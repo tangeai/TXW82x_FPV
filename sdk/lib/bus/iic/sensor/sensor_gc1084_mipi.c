@@ -43,8 +43,13 @@ SENSOR_INIT_SECTION const unsigned char GC1084InitTable[CMOS_INIT_LEN]=
     0x0d,0x73,0x92,
     0x00,0x76,0x00,
     0x0d,0x76,0x00,
+#if defined(SYS_DOUBLE_SENSOR_SPICE_DEMO)
     0x0d,0x41,0x05,
-    0x0d,0x42,0x10,  //vts=1296=25fps
+    0x0d,0x42,0x10,  // 双目模式先按原厂25fps初始化，随后slave_init切换为15fps
+#else
+    0x0d,0x41,0x0a,
+    0x0d,0x42,0x20,  // vts=2592=12.5fps
+#endif
     0x0d,0x7a,0x0a,
     0x00,0x6b,0x18,
     0x0d,0xb0,0x9d,
@@ -242,17 +247,24 @@ const _Sensor_AWB gc1084_awb_init =
 
 const _Sensor_AE gc1084_ae_init = 
 {
-    .max_frame_length      = 2160,               //default value, Automatically read the frame length
-    .curr_fps              = (uint32)(15*256),   //default value, During initialization, calculate the frame rate
-    .default_exposure_line = 2150,               //default value, Equal to max_frame_length - min_frame_vb
-    .max_exposure_line     = 2150,               //default value, Equal to max_frame_length - min_frame_vb
+#if defined(SYS_DOUBLE_SENSOR_SPICE_DEMO)
+    .max_frame_length      = 2160,               // 双目slave模式: VTS=2160, FSYNC=15Hz
+    .curr_fps              = (uint32)(15*256),
+    .default_exposure_line = 2150,
+    .max_exposure_line     = 2150,
+#else
+    .max_frame_length      = 2592,               // 43482 timing: 12.5fps VTS
+    .curr_fps              = (uint32)(12.5*256),
+    .default_exposure_line = 596,                // keep product exposure tuning
+    .max_exposure_line     = 2576,
+#endif
     .to_day_bv             = 1528,               //not use
     .to_night_bv           = 369,                //not use
 
     .min_frame_vb          = 16,
-    .max_analog_gain       = (48<<8),
+    .max_analog_gain       = (25<<8),
     .min_analog_gain       = 1<<8,
-    .min_exposure_line     = 16,
+    .min_exposure_line     = 1,
     .row_time_us           = 30.87,
     .expo_frame_interval   = 3,    
     .dark_scene_target_lut = {50, 55},

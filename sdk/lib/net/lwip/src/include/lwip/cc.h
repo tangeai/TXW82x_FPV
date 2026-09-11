@@ -101,6 +101,47 @@ void assert_printf(char *msg, int line, char *file);
 /* Plaform specific diagnostic output */
 #define LWIP_PLATFORM_DIAG(vars) printf vars
 #define LWIP_PLATFORM_ASSERT(flag) { assert_printf((flag), __LINE__, __FILE__); }
+#elif LWIP_STATS_DISPLAY
+/* 非 DEBUG 但开了 stats_display.
+ *
+ * 不能直接调 printf: stats.c 里调用是 LWIP_PLATFORM_DIAG(("recv: %u\n\t", ...)),
+ * 每条以 "\n\t" 结尾, 项目 hgprintf 只在缓冲最末字符==\n 时才把 \n 转 \r\n
+ * (string.c:323), 中间的 \n 被原样发到 UART, 表现为整段 dump 压成一行.
+ *
+ * 这里用 static inline wrapper, vsnprintf 到栈缓冲再逐字节 \n → \r\n,
+ * 一次性吐到 UART. 只在编译 stats.c 时被 lwip 头链路引入, 不污染其他文件. */
+#include <stdarg.h>
+extern int vsnprintf(char *str, unsigned int size, const char *fmt, va_list ap);
+extern int printf(const char *fmt, ...);
+static inline void __lwip_diag_crlf(const char *fmt, ...)
+{
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n <= 0) return;
+    if (n > (int)sizeof(buf) - 1) n = sizeof(buf) - 1;
+    /* 原地无法插入, 改用串 putchar; 但 hgprintf 锁更重, 这里一次一行调 printf
+     * 切片: 用 \n 拆开, 每段独立 printf("%.*s\r\n", ...) 让 hgprintf 末尾自带 \r\n. */
+//    char *p = buf;
+    char *line_start = buf;
+    for (int i = 0; i < n; i++) {
+        if (buf[i] == '\n') {
+            buf[i] = 0;
+            printf("%s\r\n", line_start);
+            line_start = &buf[i + 1];
+        }
+    }
+    if (line_start < &buf[n]) {
+        /* 末尾不带 \n 的残余 (例如 stats.c 每条以 \n\t 结尾时残一个 \t):
+         * 不加换行, 直接吐出去 — 让下一条续上 (但因下一条又会先吐\r\n,
+         * 这个 \t 会落到下一行行首充当缩进). */
+        printf("%s", line_start);
+    }
+}
+#define LWIP_PLATFORM_DIAG(vars) __lwip_diag_crlf vars
+#define LWIP_PLATFORM_ASSERT(flag) { ; }
 #else
 #define LWIP_PLATFORM_DIAG(msg) { ; }
 #define LWIP_PLATFORM_ASSERT(flag) { ; }

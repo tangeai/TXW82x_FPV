@@ -151,6 +151,7 @@ int32 ble_adv_ctrl_destory(void)
 {
 	if (ble_ctrl) {
 		os_free(ble_ctrl);
+        ble_ctrl = NULL;
 	}
 	return RET_OK;
 }

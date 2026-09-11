@@ -341,27 +341,29 @@
 #define UBLE_UUID_128_SUPPORT           1
 #endif
 
-#ifdef PSRAM_HEAP
-#define TCPIP_MBOX_SIZE                 128
-#define DEFAULT_UDP_RECVMBOX_SIZE       64
-#define DEFAULT_TCP_RECVMBOX_SIZE       64
-#define DEFAULT_ACCEPTMBOX_SIZE         16
-
-//#define MEM_LIBC_MALLOC 1
-//#define MEMP_MEM_MALLOC 1 
-#define MEM_SIZE                        80*1024
-#define MEMP_NUM_PBUF                   40
-#define MEMP_NUM_NETCONN                16
-#define MEMP_NUM_NETBUF                 64
-#define MEMP_NUM_UDP_PCB                8
-#define MEMP_NUM_TCP_PCB                16
-#define MEMP_NUM_TCP_SEG                320
-#define PBUF_POOL_SIZE                  80
-
-#define TCP_SND_BUF                    (40 * TCP_MSS)
-#define TCP_WND                        (40 * TCP_MSS)
-#define TCP_TMR_INTERVAL                50
-#endif
+/*********以下配置参数移动至project_config.h中，方便针对不同芯片做对应修改*********/
+//#ifdef PSRAM_HEAP
+//#define TCPIP_MBOX_SIZE                 128
+//#define DEFAULT_UDP_RECVMBOX_SIZE       64
+//#define DEFAULT_TCP_RECVMBOX_SIZE       64
+//#define DEFAULT_ACCEPTMBOX_SIZE         16
+//
+////#define MEM_LIBC_MALLOC 1
+////#define MEMP_MEM_MALLOC 1 
+//#define MEM_SIZE                        80*1024
+//#define MEMP_NUM_PBUF                   40
+//#define MEMP_NUM_NETCONN                16
+//#define MEMP_NUM_NETBUF                 64
+//#define MEMP_NUM_UDP_PCB                8
+//#define MEMP_NUM_TCP_PCB                16
+//#define MEMP_NUM_TCP_SEG                320
+//#define PBUF_POOL_SIZE                  80
+//
+//#define TCP_SND_BUF                    (40 * TCP_MSS)
+//#define TCP_WND                        (40 * TCP_MSS)
+//#define TCP_TMR_INTERVAL                50
+//#endif
+/***********************************************************************************/
 
 #ifndef VIDEO_YUV_RANGE_TYPE
 #define VIDEO_YUV_RANGE_TYPE            (1)

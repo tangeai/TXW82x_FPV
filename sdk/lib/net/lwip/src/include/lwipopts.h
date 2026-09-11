@@ -322,7 +322,7 @@ extern void hw_memcpy(void *dest, const void *src, unsigned int size);
 #endif
 
 #ifndef DNS_TABLE_SIZE
-#define DNS_TABLE_SIZE 1
+#define DNS_TABLE_SIZE  4
 #endif
 
 #ifndef LWIP_SOCKET
@@ -395,7 +395,14 @@ extern void hw_memcpy(void *dest, const void *src, unsigned int size);
 #define MEMP_SANITY_CHECK           1
 #else
 #define LWIP_NOASSERT               1
-#define LWIP_STATS                  0
+/* 强制开 LWIP_STATS 用于运行时监控 (event_report_demo 调 stats_display).
+ * - LWIP_STATS=1: 启用统计计数 (内存开销 ~几百字节)
+ * - LWIP_STATS_DISPLAY=1: 启用 stats_display() 打印函数
+ *   (注: MEM_STATS 受 MEM_CUSTOM_ALLOCATOR 影响仍为 0, 但 MEMP_STATS=1 可用,
+ *    PBUF / UDP_PCB / TCP_PCB 等池水位可看)
+ * 排查 webrtc send_data_with_retry errno=12 (ENOMEM) 必备 */
+#define LWIP_STATS                  1
+#define LWIP_STATS_DISPLAY          1
 #endif
 
 #define LWIP_DBG_TYPES_ON           LWIP_DBG_ON

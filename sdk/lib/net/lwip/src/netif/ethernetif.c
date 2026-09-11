@@ -268,6 +268,20 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
     }
 
     if (ret) {
+        /* errno=12 排查: netdev_send_data 失败是 ENOMEM 还是别的.
+         * -ENOMEM 几乎总意味着 SKB pool (WiFi MAC 共享) 耗尽 —— 这是 ARP
+         * STABLE 路径下 udp_sendto 返回 ERR_MEM 的最常见原因, 与 pbuf_clone
+         * 失败 (PENDING 路径) 互补. 节流 500ms. */
+        {
+            extern int printf(const char *fmt, ...);
+            static u32_t s_last_ms = 0;
+            u32_t now = sys_now();
+            if ((u32_t)(now - s_last_ms) >= 500) {
+                s_last_ms = now;
+                printf("[netdev-send-fail] ret=%d tot_len=%u scat_cnt=%d (likely SKB pool exhausted)\r\n",
+                       (int)ret, (unsigned)p->tot_len, scat_cnt);
+            }
+        }
         switch(ret){ //转换成lwip自定义的error
             case -ENOMEM:
                 ret = ERR_MEM;

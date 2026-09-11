@@ -130,7 +130,29 @@ netconn_apimsg(tcpip_callback_fn fn, struct api_msg *apimsg)
 
   err = tcpip_send_msg_wait_sem(fn, apimsg, LWIP_API_MSG_SEM(apimsg));
   if (err == ERR_OK) {
+    /* errno=12 排查: step3 (do_send 在 tcpip_thread 里) 失败 */
+    if (apimsg->err != ERR_OK) {
+      extern int printf(const char *fmt, ...);
+      static u32_t s_last_ms_s3 = 0;
+      u32_t now = sys_now();
+      if ((u32_t)(now - s_last_ms_s3) >= 500) {
+        s_last_ms_s3 = now;
+        printf("[apimsg-fail] step3 fn=%p apimsg.err=%d (do_send/udp_sendto failed)\r\n",
+               (void *)fn, (int)apimsg->err);
+      }
+    }
     return apimsg->err;
+  }
+  /* errno=12 排查: step2 (tcpip_send_msg_wait_sem 失败 = mbox post/sem 失败) */
+  {
+    extern int printf(const char *fmt, ...);
+    static u32_t s_last_ms_s2 = 0;
+    u32_t now = sys_now();
+    if ((u32_t)(now - s_last_ms_s2) >= 500) {
+      s_last_ms_s2 = now;
+      printf("[apimsg-fail] step2 fn=%p tcpip_send err=%d (mbox post failed)\r\n",
+             (void *)fn, (int)err);
+    }
   }
   return err;
 }

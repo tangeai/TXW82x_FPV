@@ -360,6 +360,10 @@ void get_single_dvp(uint16_t *w,uint16_t *h);
 #define DEV_SENSOR_H63P                 0
 #endif
 
+#ifndef DEV_SENSOR_H63S
+#define DEV_SENSOR_H63S                 0
+#endif
+
 
 #ifndef DEV_SENSOR_SC1346
 #define DEV_SENSOR_SC1346               0
@@ -536,6 +540,11 @@ extern SENSOR_OP_SECTION const _Sensor_Adpt_ h62_cmd;
 #if DEV_SENSOR_H63P
 extern const _Sensor_Ident_ h63p_init;
 extern SENSOR_OP_SECTION const _Sensor_Adpt_ h63p_cmd;
+#endif
+
+#if DEV_SENSOR_H63S
+extern const _Sensor_Ident_ h63s_init;
+extern SENSOR_OP_SECTION const _Sensor_Adpt_ h63s_cmd;
 #endif
 
 #if DEV_SENSOR_H66
