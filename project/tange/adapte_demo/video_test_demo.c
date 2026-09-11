@@ -5,7 +5,6 @@
 #include "app_lcd/app_lcd.h"
 #include "lib/video/dvp/jpeg/jpg.h"
 #include "app/video_app/file_thumb.h"
-#include "video_demo.h"
 #include "stream_define.h"
 #include "osal_file.h"
 #include "hal/isp.h"

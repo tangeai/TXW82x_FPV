@@ -1423,7 +1423,7 @@ void event_report_demo(void*arg)
 
 extern int psram_heap_size;
 
-#define TG_DEBUG_MODE  1
+//#define TG_DEBUG_MODE  1
 
 int IpcStep1(void)
 {
