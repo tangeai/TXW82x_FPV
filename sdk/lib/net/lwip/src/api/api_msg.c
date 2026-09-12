@@ -1540,7 +1540,13 @@ lwip_netconn_do_send(void *m)
 {
   struct api_msg *msg = (struct api_msg *)m;
 
+  /* errno=12 排查: 4 个分支可能产生失败值, 用 origin 标记到底是哪个分支 */
+  int diag_origin = 0; /* 1=pending_err, 2=pcb_null, 3=udp_send, 4=udp_sendto, 5=default */
+
   err_t err = netconn_err(msg->conn);
+  if (err != ERR_OK) {
+    diag_origin = 1;
+  }
   if (err == ERR_OK) {
     if (msg->conn->pcb.tcp != NULL) {
       switch (NETCONNTYPE_GROUP(msg->conn->type)) {
@@ -1559,28 +1565,50 @@ lwip_netconn_do_send(void *m)
           if (ip_addr_isany(&msg->msg.b->addr) || IP_IS_ANY_TYPE_VAL(msg->msg.b->addr)) {
             err = udp_send_chksum(msg->conn->pcb.udp, msg->msg.b->p,
                                   msg->msg.b->flags & NETBUF_FLAG_CHKSUM, msg->msg.b->toport_chksum);
+            diag_origin = 3;
           } else {
             err = udp_sendto_chksum(msg->conn->pcb.udp, msg->msg.b->p,
                                     &msg->msg.b->addr, msg->msg.b->port,
                                     msg->msg.b->flags & NETBUF_FLAG_CHKSUM, msg->msg.b->toport_chksum);
+            diag_origin = 4;
           }
 #else /* LWIP_CHECKSUM_ON_COPY */
           if (ip_addr_isany_val(msg->msg.b->addr) || IP_IS_ANY_TYPE_VAL(msg->msg.b->addr)) {
             err = udp_send(msg->conn->pcb.udp, msg->msg.b->p);
+            diag_origin = 3;
           } else {
             err = udp_sendto(msg->conn->pcb.udp, msg->msg.b->p, &msg->msg.b->addr, msg->msg.b->port);
+            diag_origin = 4;
           }
 #endif /* LWIP_CHECKSUM_ON_COPY */
           break;
 #endif /* LWIP_UDP */
         default:
           err = ERR_CONN;
+          diag_origin = 5;
           break;
       }
     } else {
       err = ERR_CONN;
+      diag_origin = 2;
     }
   }
+
+  /* errno=12 排查: 失败时打印来源 + conn 关键状态. 节流 500ms. */
+  if (err != ERR_OK) {
+    extern int printf(const char *fmt, ...);
+    static u32_t s_last_ms = 0;
+    u32_t now = sys_now();
+    if ((u32_t)(now - s_last_ms) >= 500) {
+      s_last_ms = now;
+      printf("[do_send-fail] origin=%d err=%d type=0x%02x flags=0x%x pcb=%p\r\n",
+             diag_origin, (int)err,
+             (unsigned)msg->conn->type,
+             (unsigned)msg->conn->flags,
+             (void *)msg->conn->pcb.ip);
+    }
+  }
+
   msg->err = err;
   TCPIP_APIMSG_ACK(msg);
 }

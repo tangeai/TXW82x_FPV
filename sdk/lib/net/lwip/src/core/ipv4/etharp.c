@@ -1122,6 +1122,24 @@ etharp_query(struct netif *netif, const ip4_addr_t *ipaddr, struct pbuf *q)
             ETHARP_STATS_INC(etharp.memerr);
             LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_query: could not queue a copy of PBUF_REF packet %p (out of memory)\n", (void *)q));
             result = ERR_MEM;
+            /* errno=12 排查: pbuf_clone(PBUF_LINK, tot_len, PBUF_RAM) 失败.
+             * 打印目标 IP + 需要的字节数 + 当前 PSRAM 余量, 判断是碎片化还是别的. */
+            {
+                extern int printf(const char *fmt, ...);
+                extern struct sys_psramheap psram_heap;
+                extern unsigned int _sysheap_freesize(struct sys_heap *heap);
+                static u32_t s_last_ms = 0;
+                u32_t now = sys_now();
+                if ((u32_t)(now - s_last_ms) >= 500) {
+                    s_last_ms = now;
+                    const u8_t *ip = (const u8_t *)ipaddr;
+                    printf("[etharp-clone-fail] dst=%u.%u.%u.%u tot_len=%u copy_needed=%d psram_free=%u arp_state=%d\r\n",
+                           ip[0], ip[1], ip[2], ip[3],
+                           (unsigned)q->tot_len, copy_needed,
+                           (unsigned)_sysheap_freesize((struct sys_heap *)&psram_heap),
+                           (int)arp_table[i].state);
+                }
+            }
         }
     }
     return result;

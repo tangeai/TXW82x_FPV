@@ -39,12 +39,64 @@ enum
 #define STREAM_FREE   av_psram_free
 #define STREAM_ZALLOC av_psram_zalloc
 
+// JPEG 节点从 av_psram 堆一次性分配(持有不释放)
+#define JPG_STATIC_NODE_LEN   (8*1024)
+#define JPG_STATIC_NODE_MAX   JPG_NODE_COUNT
+static uint8_t *jpg_static_pool[JPG_STATIC_NODE_MAX] = {NULL};
+static uint8_t  jpg_static_pool_used = 0;
+static uint8_t  jpg_static_pool_inited = 0;
+
+#ifdef __TXW826__
+#define jpg_static_malloc os_malloc
+#define jpg_static_free   os_free
+#else
+#define jpg_static_malloc av_psram_malloc
+#define jpg_static_free   av_psram_free
+#endif
+
+// 初始化 JPEG 节点池，首次使用时一次性从 av_psram 分配 4×16KB = 64KB
+// 分配后永不释放，效果等同静态预分配
+int jpg_static_pool_init(void)
+{
+    if (jpg_static_pool_inited)
+        return 0;
+    for (int i = 0; i < JPG_STATIC_NODE_MAX; i++)
+    {
+        jpg_static_pool[i] = (uint8_t *) jpg_static_malloc(JPG_STATIC_NODE_LEN);
+        if (!jpg_static_pool[i])
+        {
+            os_printf(KERN_ERR "jpg_static_pool: av_psram_malloc failed at %d\r\n", i);
+            // 回滚已分配的节点
+            for (int j = 0; j < i; j++)
+            {
+                jpg_static_free(jpg_static_pool[j]);
+                jpg_static_pool[j] = NULL;
+            }
+            return -1;
+        }
+        sys_dcache_invalid_range((uint32_t *) jpg_static_pool[i], JPG_STATIC_NODE_LEN);
+    }
+    jpg_static_pool_inited = 1;
+    os_printf(KERN_INFO "jpg_static_pool: init ok, %d x %d bytes\r\n",
+              JPG_STATIC_NODE_MAX, JPG_STATIC_NODE_LEN);
+    return 0;
+}
+
 // 结构体申请空间函数
 #define STREAM_LIBC_MALLOC av_malloc
 #define STREAM_LIBC_FREE   av_free
 #define STREAM_LIBC_ZALLOC av_zalloc
 
 struct msi *g_jpg_msi[HARDWARE_JPG_NUM] = {NULL, NULL};
+
+// jpg_V3_msi_s 使用静态内存，避免反复 malloc/free 产生 SRAM 碎片
+// 额外预留 JPG_STATIC_NODE_MAX 个 uint32_t 空间给 jpg_node_buf 数组（紧跟结构体后面）
+struct jpg_V3_msi_s_ext {
+    struct jpg_V3_msi_s base;
+    uint32_t            node_buf[JPG_STATIC_NODE_MAX];
+};
+static struct jpg_V3_msi_s_ext g_jpg_msg_pool[HARDWARE_JPG_NUM];
+static uint8_t                 g_jpg_msg_used[HARDWARE_JPG_NUM] = {0, 0};
 
 // 采用默认jpg方式,如果遇到频繁切换mjpg模式,会变慢
 #ifndef FAST_JPG
@@ -486,21 +538,14 @@ static int jpg_msi_action(struct msi *msi, uint32 cmd_id, uint32 param1, uint32 
             fbpool_destroy(&jpg_msg->pool);
             os_msgq_del(&jpg_msg->msgq);
             os_event_del(&jpg_msg->evt);
-            msi->name               = NULL; // 这里比较特殊,正常不能清空的
-            // 释放节点
-            uint32_t jpg_node_count = jpg_msg->jpg_node_count;
-            uint32_t m_size         = 0;
-            while (m_size < jpg_node_count)
-            {
-                if (jpg_msg->jpg_node_buf[m_size])
-                {
-                    ASSERT(jpg_msg->jpg_node_buf[m_size]);
-                    STREAM_FREE((uint8_t *) jpg_msg->jpg_node_buf[m_size]);
-                }
-                m_size++;
-            }
-
-            STREAM_LIBC_FREE(jpg_msg);
+            msi->name = NULL; // 这里比较特殊,正常不能清空的
+            // 静态池节点归还计数
+            if (jpg_static_pool_used >= jpg_msg->jpg_node_count)
+                jpg_static_pool_used -= jpg_msg->jpg_node_count;
+            else
+                jpg_static_pool_used = 0;
+            // jpg_msg 是静态内存，标记为未使用即可，不需要 free
+            g_jpg_msg_used[jpg_msg->which] = 0;
         }
         break;
         case MSI_CMD_PRE_DESTROY:
@@ -581,6 +626,7 @@ static int jpg_msi_action(struct msi *msi, uint32 cmd_id, uint32 param1, uint32 
                     jpg_msg->w = w;
                     jpg_msg->h = h;
                     // jpg_set_size(jpg_msg->jpg, h, w);
+                    os_printf("jpg w:%d, h:%d\n", jpg_msg->w,jpg_msg->h);
                 }
                 break;
 
@@ -835,23 +881,30 @@ struct msi *hardware_jpg_msi(uint8_t which_jpg, uint8_t src_from, uint16_t jpg_n
     {
         return NULL;
     }
-    struct jpg_V3_msi_s *jpg_msg = (struct jpg_V3_msi_s *) STREAM_LIBC_ZALLOC(sizeof(struct jpg_V3_msi_s) + jpg_node_count * sizeof(uint32_t));
-    if (jpg_msg)
+    // 使用静态内存，避免反复 malloc/free 产生 SRAM 碎片
+    struct jpg_V3_msi_s *jpg_msg = &g_jpg_msg_pool[which_jpg].base;
+    os_memset(jpg_msg, 0, sizeof(struct jpg_V3_msi_s_ext));
+    jpg_msg->jpg_node_buf = g_jpg_msg_pool[which_jpg].node_buf;
+    g_jpg_msg_used[which_jpg] = 1;
+
+    // 首次使用时初始化静态池(从 av_psram 一次性分配，持有不释放)
+    if (jpg_static_pool_init() != 0)
     {
-        jpg_msg->jpg_node_buf = (uint32_t *) (jpg_msg + 1);
+        os_printf(KERN_ERR "hardware_jpg_msi: jpg_static_pool_init failed\r\n");
+        g_jpg_msg_used[which_jpg] = 0;
+        return NULL;
     }
 
-    // 先去分配空间,如果空间不够,则不启动硬件,分配节点不足4个也会退出
+    // 从静态池分配 JPEG 节点
     uint32_t m_size = 0;
     while (m_size < jpg_node_count)
     {
-        uint8_t *buff = (uint8_t *) STREAM_MALLOC(jpg_node_len);
-        sys_dcache_invalid_range((uint32_t *) buff, jpg_node_len);
-        if (!buff)
-        {
+        if (jpg_static_pool_used >= JPG_STATIC_NODE_MAX)
             break;
-        }
+        uint8_t *buff = jpg_static_pool[jpg_static_pool_used];
+        sys_dcache_invalid_range((uint32_t *) buff, jpg_node_len);
         jpg_msg->jpg_node_buf[m_size] = (uint32_t) buff;
+        jpg_static_pool_used++;
         m_size++;
     }
     if (m_size != jpg_node_count)
@@ -910,21 +963,10 @@ struct msi *hardware_jpg_msi(uint8_t which_jpg, uint8_t src_from, uint16_t jpg_n
 
     if (!msi)
     {
-        m_size = 0;
-        while (m_size < jpg_node_count)
-        {
-            if (jpg_msg->jpg_node_buf[m_size])
-            {
-                ASSERT(jpg_msg->jpg_node_buf[m_size]);
-                STREAM_FREE((uint8_t *) jpg_msg->jpg_node_buf[m_size]);
-            }
-            m_size++;
-        }
-
-        if (jpg_msg)
-        {
-            STREAM_LIBC_FREE(jpg_msg);
-        }
+        // 静态池归还计数
+        jpg_static_pool_used -= m_size;
+        // jpg_msg 是静态内存，标记为未使用即可
+        g_jpg_msg_used[which_jpg] = 0;
     }
     else
     {

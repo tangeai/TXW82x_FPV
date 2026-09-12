@@ -1,3 +1,4 @@
+#include "project_config.h"     
 #include "lib/fs/fatfs/osal_file.h"
 #include "lib/heap/av_psram_heap.h"
 #include "osal/string.h"
@@ -27,8 +28,9 @@
 #define MP4_FUNC_MACRO(x) mp4_##x##_write
 #define MP4_S_MACRO(x)    mp4_##x
 
-// mp4 裁剪为实际文件大小
-#define MP4_TRUNCATE_REAL_EN    0
+// mp4 裁剪为实际文件大小。mux_file 会按 32KB 对齐写入最后一块，
+// 关闭录像时必须裁掉尾部补零，否则 demux 会把补零误认为下一个 box。
+#define MP4_TRUNCATE_REAL_EN    1
 
 #if FF_USE_FASTSEEK
 #define MP4_FAST_SEEK_CLMT_ITEMS_MIN 64U
@@ -349,6 +351,9 @@ void mp4_file_syn(F_FILE *fp)
     }
 
     osal_fsync(fp);
+    /* fsync 是 SD 卡最重的操作 (刷 FAT 表 + 目录项, 多扇区写入),
+     * 完成后让出 CPU 给 WiFi 任务处理 TCP 收发包. */
+//    os_sleep_ms(1);
 }
 
 static int mp4_default_ops_write(void *file, const void *buf, uint32_t len)
@@ -480,11 +485,29 @@ static void mp4_default_ops_init(F_FILE *fp, file_ops_t *ops)
 #define BIG2_ENDIAN(X) (((X) & 0xFF00) >> 8 | ((X) & 0x00FF) << 8)
 #define BIG1_ENDIAN(X) ((X))
 
-#define STTS_COUNT (0x2000)
+/* MP4 moov 内 stbl 子表的预分配容量 (条数). SDK 在写文件头时 truncate 出
+ * COUNT * entry_size 的连续磁盘空间, 实际录像时只用前面 N 条, 后面的预留
+ * 空间永久浪费 (mp4_deinit 不收缩).
+ *
+ * !!! 容量打小风险: SDK 在 stxx_count >= STXX_COUNT 时, mp4_syn 内 ret++,
+ *     一路传回 write_h264_nal 触发 WRITE_ERR 让 mp4_encode_thread 提前切片,
+ *     表现是录像短于 rec_time 就切下一个文件. 见 ret 处理 mp4_encode.c:921 等.
+ *
+ * 按 IPC 实际参数核算 (rec_time=60s, 视频实际帧率 ≤15fps 但有抖动, GOP=30):
+ *   STTS: 时间增量条目, 帧间隔每变化一次就新增一条. 帧率抖动剧烈时最坏每帧
+ *         一条 entry, 按 30fps×60s = 1800 条 + 2 倍余量 → 4096
+ *   STSZ: 每帧大小, 同样按 30fps×60s 估上限 → 4096
+ *   STCO: 每帧 chunk 偏移, 同 STSZ → 4096
+ *   STSS: 关键帧索引, GOP=30/15fps = 2s/I帧, 60s=30 条; I 帧密度突增时
+ *         可能更多, 512 留 ~16 倍余量
+ *   STSC: 不动 (1 已经够)
+ * 合计预分配 66KB (vs 原 1.3MB), 单文件仍节省 ~1.23MB.
+ * 若以后改大 rec_time 或提高 fps, 需相应放大. */
+#define STTS_COUNT (4096)
 #define STSC_COUNT (1)
-#define STSZ_COUNT (0x20000)
-#define STCO_COUNT (0x20000)
-#define STSS_COUNT (0x10000)
+#define STSZ_COUNT (4096)
+#define STCO_COUNT (4096)
+#define STSS_COUNT (512)
 static const char          language[4] = "und";
 static const unsigned char box_ftyp[]  = {
 #if 1
@@ -1198,6 +1221,7 @@ uint32_t mp4_sync(mp4_key_msg *msg)
     uint32_t      max_duration = 0;
     uint32_t      sync_duration;
     uint32_t      nowoffset;
+    uint32_t      syn_start    = os_jiffies();
     // 先尝试同步视频
     trak_key_msg *vtrak;
 
@@ -1342,6 +1366,13 @@ uint32_t mp4_sync(mp4_key_msg *msg)
         msg->syn_time = sync_duration;
     }
     mp4_seek(fp, nowoffset, SEEK_SET);
+    {
+        uint32_t syn_end = os_jiffies();
+        if (syn_end - syn_start > 100)
+        {
+            os_printf(KERN_INFO "mp4_syn slow: time=%dms\n", syn_end - syn_start);
+        }
+    }
     mp4_active_msg = old_active;
     return ret;
 }
@@ -1493,6 +1524,7 @@ write_h264_nal_end:
 uint32_t write_aac_data(mp4_key_msg *msg, uint8_t *aac_buf, uint32_t size, uint32_t duration)
 {
     uint32_t ret = 0;
+    uint32_t start_time = os_jiffies();
     if (msg->trak_count < 2 || !msg->audio_enable)
     {
         ret |= (MP4_AUDIO_ERR << 16);
@@ -1520,6 +1552,13 @@ uint32_t write_aac_data(mp4_key_msg *msg, uint8_t *aac_buf, uint32_t size, uint3
     }
 
 write_aac_data_end:
+    {
+        uint32_t end_time = os_jiffies();
+        if (end_time - start_time > 100)
+        {
+            os_printf(KERN_INFO "write_aac_data slow: size=%d time=%dms\n", size, end_time - start_time);
+        }
+    }
     return ret;
 }
 
@@ -1690,9 +1729,9 @@ uint32_t write_h264_data(mp4_key_msg *msg, uint8_t *nal_buf, uint32_t size, uint
         ret |= (MP4_V_TYPE_ERR << 16);
     }
     uint32_t end_time = os_jiffies();
-    if (end_time - start_time > 500)
+    if (end_time - start_time > 100)
     {
-        os_printf(KERN_INFO "%s:%d\tspend time:%d\n", __FUNCTION__, __LINE__, end_time - start_time);
+        os_printf(KERN_INFO "write_h264_data slow: size=%d time=%dms\n", size, end_time - start_time);
     }
     return ret;
 }

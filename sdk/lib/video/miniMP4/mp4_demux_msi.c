@@ -43,7 +43,13 @@
 #define STREAM_LIBC_FREE   os_free
 #define STREAM_LIBC_ZALLOC os_zalloc
 
-#define MAX_MP4_DEMUX_TX 8
+/* MP4 回放 framebuff 池容量.
+ * 回放无实时性要求 (APP 按 ts 节奏 ack, 每帧间隔 40-77ms), 不需要 buffer 多帧.
+ * 1 = 严格串行: demux 取一帧 → APP 消费完 fb_put → 再取下一帧.
+ *   - 内存占用最低 (单帧 ~20KB 峰值, 而非 8×20KB=160KB)
+ *   - 单帧 alloc/free 无碎片化压力
+ *   - 上层 pb_thread 已是 1 帧/40ms 节奏, 串行完全跟得上 */
+#define MAX_MP4_DEMUX_TX 1
 #define MAX_TRY_COUNT    (10)
 
 extern uint8_t *mp4_demux_get_sps(struct msi *msi, uint16_t *sps_len);
@@ -256,6 +262,10 @@ struct mp4_demux_msi_s
     uint32_t        audio_samplerate;
     struct os_event evt;
     struct fbpool   tx_pool;
+    /* 快速输出: 1=不按 PTS 节奏 sleep, 直接尽快吐出每帧
+     * 用于上层做软件 seek 时, 让 demux 立刻吐出帧让上层快速跳过.
+     * 上层到达目标后置 0 恢复正常 PTS 节奏. */
+    volatile uint8_t fast_output;
 };
 
 extern uint32_t box_read(struct mp4_demux_msi_s *mp4_demux, const char *name, int32_t max_size);
@@ -945,6 +955,29 @@ uint32_t box_read(struct mp4_demux_msi_s *mp4_demux, const char *name, int32_t m
         ret = osal_fread(box_name, 1, 4, fp);
         MP4_ABORT(ret == 0);
         box_len    = BIG4_ENDIAN(box_len);
+
+        /* mux_file 的对齐写入可能在旧录像尾部留下全 0 padding。
+         * box_len 为 0 时若继续执行，read_size 不会递减，并且 fseek
+         * 会回退 8 字节，最终在同一段 padding 上无限循环。 */
+        if (box_len == 0 && box_name[0] == 0 && box_name[1] == 0 &&
+            box_name[2] == 0 && box_name[3] == 0)
+        {
+            os_printf(KERN_WARNING "mp4 demux: ignore zero padding, remain:%d\n", read_size);
+            ret = 0;
+            break;
+        }
+
+        /* 一个普通 MP4 box 至少包含 8 字节头。这里不能用 read_size
+         * 作为严格上界：该 demux 的 stsd/general_parse 传参不包含同一
+         * 层级的 8 字节头，正常 avc1 会出现 box_len == read_size + 8。 */
+        if (box_len < 8)
+        {
+            os_printf(KERN_ERR "mp4 demux: invalid box %.4s len:%d remain:%d\n",
+                      box_name, box_len, read_size);
+            ret = 1;
+            goto abort_end;
+        }
+
         cur_offset = osal_ftell(fp);
         if (get_trak && (os_strncmp(box_name, "trak", os_strlen("trak")) == 0))
         {
@@ -1126,7 +1159,9 @@ void mp4_demux_thread(void *d)
         err_times = 0;
     mp4_demux_thread_JMP:
         video_timestamp = get_frame_num_pts(&mp4_demux->trak_t[0], mp4_demux->play_vframe_num);
-        if (video_timestamp > os_jiffies() - last_play_time)
+        /* fast_output=1 时直接进入 else 分支尽快吐帧, 跳过 PTS 节奏等待.
+         * 上层 (pb_thread) 做软件 seek 时置 1, 到达 seek 目标后置 0 恢复正常. */
+        if (!mp4_demux->fast_output && video_timestamp > os_jiffies() - last_play_time)
         {
             os_sleep_ms(1);
         }
@@ -1161,8 +1196,15 @@ void mp4_demux_thread(void *d)
                 video_timestamp            = get_frame_num_pts(&mp4_demux->trak_t[0], mp4_demux->play_vframe_num);
                 // 配置播放的时间
                 last_play_time             = os_jiffies() - video_timestamp;
-                mp4_demux->play_aframe_num = video_timestamp / (1024 * 1000 / mp4_demux->audio_samplerate);
-                flag                       = 0;
+                /* 防除零: video-only mp4 (没有 mp4a box) 时 audio_samplerate=0,
+                 * 此前直接除零触发 CPU Exception NO.3 崩溃. video-only 场景下
+                 * play_aframe_num 没有意义, 置 0 即可 */
+                if (mp4_demux->audio_samplerate > 0) {
+                    mp4_demux->play_aframe_num = video_timestamp / (1024 * 1000 / mp4_demux->audio_samplerate);
+                } else {
+                    mp4_demux->play_aframe_num = 0;
+                }
+                flag = 0;
                 goto mp4_demux_thread_JMP;
             }
             rflags = 0;
@@ -1186,18 +1228,53 @@ void mp4_demux_thread(void *d)
                 extern uint8_t is_key_frame(trak * trak_t, uint32_t frame_num);
                 // os_printf("is key:%d\n", is_key_frame(NULL, mp4_demux->play_vframe_num));
                 fb->time = get_frame_num_pts(&mp4_demux->trak_t[0], mp4_demux->play_vframe_num);
-                fb->data = (uint8_t *) STREAM_MALLOC(vframe_size - 4);
+                /* 组装输出格式, 与实时流完全一致:
+                 *   I 帧: [00 00 00 01 SPS][00 00 00 01 PPS][00 00 00 01 IDR]
+                 *   P 帧: [00 00 00 01 P]
+                 * 这样回放上层无需再做拼接, 直接透传 fb->data 给 TciSendPbFrame.
+                 * mp4 文件结构不变, 播放器兼容性不受影响 */
+                uint8_t  is_key = is_key_frame(&mp4_demux->trak_t[0], mp4_demux->play_vframe_num);
+                uint32_t idr_len = vframe_size - 4;
+                uint32_t prefix_len = 4;  /* P 帧: 只加 SC */
+                if (is_key && mp4_demux->sps && mp4_demux->pps) {
+                    prefix_len = 4 + mp4_demux->sps_len + 4 + mp4_demux->pps_len + 4;
+                }
+                uint32_t total_len = prefix_len + idr_len;
+                /* 帧数据优先从 av_psram 申请; 回放时 av_psram 常被实时流(H264 buf/
+                 * webrtc)占满, 失败则回退普通 psram (余量充足). 用 fb->datatag 记来源,
+                 * MSI_CMD_FREE_FB 时按 tag 选对应 free, 避免跨堆释放.
+                 *   datatag: 0 = av_psram (STREAM_FREE), 1 = psram (_os_free_psram) */
+                fb->data = (uint8_t *) STREAM_MALLOC(total_len);
+                if (fb->data) {
+                    fb->datatag = 0;
+                } else {
+                    fb->data = (uint8_t *) _os_malloc_psram(total_len);
+                    fb->datatag = 1;
+                }
                 if (!fb->data)
                 {
                     msi_delete_fb(NULL, fb);
                     os_sleep_ms(1);
                     continue;
                 }
-                fb->len   = vframe_size - 4;
+                fb->len   = total_len;
                 fb->mtype = F_H264;
                 fb->stype = FSTYPE_H264_FILE;
+
+                /* 先填前置的 start code + SPS/PPS */
+                static const uint8_t SC[4] = {0x00, 0x00, 0x00, 0x01};
+                uint32_t off = 0;
+                if (is_key && mp4_demux->sps && mp4_demux->pps) {
+                    memcpy(fb->data + off, SC, 4);                                   off += 4;
+                    memcpy(fb->data + off, mp4_demux->sps, mp4_demux->sps_len);      off += mp4_demux->sps_len;
+                    memcpy(fb->data + off, SC, 4);                                   off += 4;
+                    memcpy(fb->data + off, mp4_demux->pps, mp4_demux->pps_len);      off += mp4_demux->pps_len;
+                }
+                memcpy(fb->data + off, SC, 4);                                       off += 4;
+
+                /* 再读裸 NAL 到 fb->data 尾部 */
                 osal_fseek(mp4_demux->fp, vframe_offset + 4);
-                err = osal_fread(fb->data, 1, vframe_size - 4, mp4_demux->fp);
+                err = osal_fread(fb->data + off, 1, idr_len, mp4_demux->fp);
                 // os_printf("frame_size:%d\t%02X\t%02X\n", frame_size,fb->data[0], fb->data[1]);
                 // 暂时只有I帧和P帧
                 // 可能文件系统有错,重新尝试打开文件系统,超过一定次数就退出
@@ -1230,7 +1307,7 @@ void mp4_demux_thread(void *d)
                     }
                     count++;
                     msi_output_fb(mp4_demux->msi, fb);
-                    _os_printf("M");
+                    // _os_printf("M");   /* SDK 调试用, 关掉, 日志靠 pb_thread 的 pb stat 看流量 */
                     fb = NULL;
                 }
 
@@ -1281,7 +1358,14 @@ void mp4_demux_thread(void *d)
                     os_sleep_ms(1);
                     fb = fbpool_get(&mp4_demux->tx_pool, 0, mp4_demux->msi);
                 }
+                /* 同视频帧: av_psram 失败回退普通 psram, datatag 记来源 */
                 fb->data = (uint8_t *) STREAM_MALLOC(aframe_size + 7);
+                if (fb->data) {
+                    fb->datatag = 0;
+                } else {
+                    fb->data = (uint8_t *) _os_malloc_psram(aframe_size + 7);
+                    fb->datatag = 1;
+                }
                 if (!fb->data)
                 {
                     msi_delete_fb(NULL, fb);
@@ -1422,8 +1506,15 @@ static int32_t mp4_demux_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t p
             // os_printf("mp4_demux:%X\tfb:%X\tdata:%X\n", mp4_demux, fb, fb->data);
             if (fb->data)
             {
-                STREAM_FREE(fb->data);
-                fb->data = NULL;
+                /* 按申请时记录的来源选对应 free, 避免跨堆释放:
+                 *   datatag==1 → 回退路径用的普通 psram; 否则 av_psram */
+                if (fb->datatag == 1) {
+                    _os_free_psram(fb->data);
+                } else {
+                    STREAM_FREE(fb->data);
+                }
+                fb->data    = NULL;
+                fb->datatag = 0;
             }
 
             if (fb->priv)
@@ -1480,6 +1571,12 @@ static int32_t mp4_demux_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t p
                     break;
                 }
                 break;
+                case MSI_VIDEO_DEMUX_FAST_OUTPUT:
+                {
+                    /* arg=1 开启快速输出 (跳过 PTS 节奏), arg=0 关闭 */
+                    mp4_demux->fast_output = (uint8_t)(arg ? 1 : 0);
+                    break;
+                }
                 default:
                     break;
             }

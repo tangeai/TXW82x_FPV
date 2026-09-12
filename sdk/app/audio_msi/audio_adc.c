@@ -128,7 +128,9 @@ int32_t auadc_start(struct auadc_struct *s, uint32_t auproc_enable)
 	}
 #endif
 	ausys_ad_register_msg(auadc_s->platform,AUSYS_AD_MSG_PLAY_DONE);
-	auadc_s->task_hdl = os_task_create("auadc_deal_task", auadc_deal_task, auadc_s, AUADC_TASK_PRIORITY, 0, NULL, 1024);
+	/* 栈 1024 原本就紧 (msi_output_fb -> rec_alaw_action -> osal_fwrite + 失败诊断打印),
+	 * 提到 2048 留 1KB 余量, 避免 stack overflow */
+	auadc_s->task_hdl = os_task_create("auadc_deal_task", auadc_deal_task, auadc_s, AUADC_TASK_PRIORITY, 0, NULL, 2048);
 	return RET_OK;
 }
 

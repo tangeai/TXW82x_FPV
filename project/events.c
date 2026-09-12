@@ -18,6 +18,9 @@
 #include "syscfg.h"
 #include "lib/bluetooth/uble/ble_demo.h"
 #include "sysevt_usb/sysevt_usb.h"
+#if BLE_SUPPORT
+#include "ble_tange_netcfg.h"   /* BLE 配网: 配网成功关 BLE */
+#endif
 
 extern int32 sys_wifi_event_hdl_wifi_pair(uint8 ifidx, uint16 evt, uint32 param1, uint32 param2);
 extern int32 sys_wifi_event_hdl_pairled(uint8 ifidx, uint16 evt, uint32 param1, uint32 param2);
@@ -25,7 +28,7 @@ extern int32 sys_wifi_event_hdl_pairled(uint8 ifidx, uint16 evt, uint32 param1, 
 extern int32 sys_wifi_event_hdl_walkietalkie(uint8 ifidx, uint16 evt, uint32 param1, uint32 param2);
 extern void sys_event_hdl_wifi_pair(uint32 event_id, uint32 data, uint32 priv);
 extern void sys_event_hdl_walkie_talkie(uint32 event_id, uint32 data, uint32 priv);
-
+extern void SetNetworkState(int state/*0:not ready; 1:ap started; 2: lan ok*/);
 //更新 sys_status 信息
 static void sys_event_hdl_dhcp(uint32 event_id, uint32 data, uint32 priv)
 {
@@ -55,6 +58,18 @@ static void sys_event_hdl_dhcp(uint32 event_id, uint32 data, uint32 priv)
             sys_status.dhcpc_result.dns2    = (dns_getserver(1))->addr;
             os_printf(KERN_NOTICE"dhcp done, ip:"IPSTR", mask:"IPSTR", gw:"IPSTR"\r\n",
                       IP2STR_N(nif->ip_addr.addr), IP2STR_N(nif->netmask.addr), IP2STR_N(nif->gw.addr));
+
+            /* 备用公网 DNS (slot 1), 防止路由器 DNS relay 故障导致域名解析失败.
+             * 会覆盖 DHCP 下发的第 2 个 DNS (通常和 slot 0 同为路由器 IP, 保留无益).
+             * 设备优先用 slot 0 (路由器 DNS), 超时后才切到 slot 1 (114.114.114.114). */
+            {
+                ip_addr_t backup_dns;
+                ipaddr_aton("114.114.114.114", &backup_dns);
+                dns_setserver(1, &backup_dns);
+                os_printf(KERN_NOTICE"dns backup: "IPSTR"\r\n", IP2STR_N(backup_dns.addr));
+            }
+
+            SetNetworkState(2);
         }
         break;
     }
@@ -103,13 +118,17 @@ sysevt_hdl_res sys_event_hdl(uint32 event_id, uint32 data, uint32 priv)
      * 使用 sys_event_take 注册，每次会消耗16byte heap memory
      */
 #if SYS_APP_BLENC
-    sys_event_ble_netconfig(event_id, data, priv);
+//    sys_event_ble_netconfig(event_id, data, priv);
 #endif
 
     sys_event_hdl_dhcp(event_id, data, priv);
-    sys_event_hdl_lte(event_id, data, priv);
+//    sys_event_hdl_lte(event_id, data, priv);
 
-    system_event_usbh_video_hdl(event_id, data, priv);
+//    system_event_usbh_video_hdl(event_id, data, priv);
+
+#if BLE_SUPPORT
+    tg_ble_netcfg_event(event_id, data, priv);   /* BLE 配网成功后关 BLE */
+#endif
 
     return SYSEVT_CONTINUE;
 }

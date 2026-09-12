@@ -322,16 +322,27 @@ __init static void malloc_psram_init(void)
 #endif
 }
 
+int psram_heap_size = 0;
 
 __init static int system_psram_init(void)
 {
 	extern void add_psram_cfg();
 	add_psram_cfg();
-    
+
     //  240M， 320M, 274M, 160M...
     //  你可以选择你喜欢的频率， 但内部只有几个挡位可以选择， 匹配最接近的配置
-    int psram_heap_size = psram_auto_init(0, 320 * 1000000);
+    psram_heap_size = psram_auto_init(0, 320 * 1000000);
     cache_open_psram();
+
+    /* 模拟实际产品的 PSRAM 容量上限.
+     * 开发板硬件 16MB, 但实际产品只有 8MB. 加上此宏后, 后续 sysheap 只看到
+     * SIMULATE_PSRAM_SIZE_MB 这么大的空间, 真实硬件多出的部分被丢弃,
+     * 用来在 16MB 板子上提前发现 8MB 模式下的内存问题. */
+#ifdef SIMULATE_PSRAM_SIZE_MB
+    if (psram_heap_size > SIMULATE_PSRAM_SIZE_MB) {
+        psram_heap_size = SIMULATE_PSRAM_SIZE_MB;
+    }
+#endif
 
 #ifdef PSRAM_HEAP
     if(psram_heap_size){
@@ -389,7 +400,7 @@ __init void pre_main(void)
     VERSION_SHOW();
     module_version_show();
     sys_reset_show();
-    os_workqueue_init(&main_wkq, "MAIN", OS_TASK_PRIORITY_NORMAL, NULL, 2048);
+    os_workqueue_init(&main_wkq, "MAIN", OS_TASK_PRIORITY_ABOVE_NORMAL, NULL, 2048);
     mainwkq_monitor_init();
     os_run_func((os_run_func_t)main, 0, 0, 0);
 

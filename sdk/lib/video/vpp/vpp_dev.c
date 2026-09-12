@@ -979,7 +979,7 @@ void vpp_frame_done(uint32 irq, uint32 dev, uint32 param)
     uint32_t        loc;
     uint16_t        buf1w = 0, buf1h = 0;
     uint8_t        *ptr_cache;
-    
+//    _os_printf(KERN_DEBUG "F");
     static time_t      last_time_val = 0;
     struct vpp_device *p_vpp         = (struct vpp_device *) dev;
     struct timeval     ptimeval;
@@ -1149,7 +1149,7 @@ void vpp_frame_done(uint32 irq, uint32 dev, uint32 param)
 		//720P --->260us
 		photo_complex = compute_block_laplacian_mean(motion_detect_buf + 4 * ((vpp_msg.vpp_w + 31) / 32),(vpp_msg.vpp_h + 31) / 32,(vpp_msg.vpp_w + 31) / 32);
 	}
-	_os_printf(KERN_DEBUG "F(%d)",photo_complex);
+//	_os_printf(KERN_DEBUG "F(%d)",photo_complex);
 }
 volatile uint8 itp_done = 0;
 void           vpp_itp_done(uint32 irq, uint32 dev, uint32 param)
