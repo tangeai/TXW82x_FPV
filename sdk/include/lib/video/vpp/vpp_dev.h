@@ -91,8 +91,13 @@ enum
 #endif
 
 #ifndef VPP_BUF1_MODE
+#ifdef __TXW826__
+#define VPP_BUF1_MODE                  VPP_MODE_2N
+#else
 #define VPP_BUF1_MODE                  VPP_MODE_2N_ADD_16  
 #endif
+#endif
+
 
 //注意这里配置的N,所以实际根据MODE决定申请空间
 #ifndef VPP_BUF0_LINEBUF_NUM

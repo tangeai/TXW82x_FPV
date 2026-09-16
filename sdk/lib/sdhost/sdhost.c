@@ -1582,6 +1582,12 @@ int32 sdh_loop(struct os_work *work)
     struct sdh_device *host = hdl->host;
     uint32 sleep_time = 500;
     uint32 ret;
+    /* 无卡降噪: 没插卡时本 work 每 500ms 跑一轮, 反复打 "sdh no online2" + 调
+     * fatfs_register (触发 sd_init, 连带刷 open_width / clk / SEND_IF_COND cmd err
+     * / rece cmd no response / fatfs_register ret:3 一整套).
+     * 本平台无独立插卡检测中断, 探测不能停, 但可降低频率: 无卡时把探测间隔从
+     * 500ms 拉长到 2s, 整套日志频率降到原来的 1/4. 插卡成功 (get_fat_isready)
+     * 后恢复 500ms 正常轮询. */
     if(SD_OFF == host->sd_opt || !hdl->isregister)
     {
         SDHC_ERR_PRINTF("sdh no online2\r\n");
@@ -1595,7 +1601,11 @@ int32 sdh_loop(struct os_work *work)
         fatfs_register();
         if(get_fat_isready())
         {
-            hdl->isregister = 1;
+            hdl->isregister = 1;   /* 插卡成功, 下轮走在线分支, 恢复 500ms */
+        }
+        else
+        {
+            sleep_time = 2000;     /* 仍无卡: 探测间隔拉长到 2s, 日志降到 1/4 */
         }
     } else {
         ret = os_mutex_lock(&host->lock,0);

@@ -35,6 +35,11 @@ int32 sys_empty_atcmd(const char *cmd, char *argv[], uint32 argc)
     return ATCMD_RESULT_DONE;
 }
 
+/* 示例事件任务共享状态；AT 测试命令在可选诊断补丁中。 */
+volatile uint32_t call_test_flag = 0;
+volatile uint32_t dev_status_test = 0;
+volatile uint32_t dev_status = 0;
+
 static const struct hgic_atcmd static_atcmds[] = {
     ///////////////////////////////////////////////////
     /* 常用调试 AT指令          */

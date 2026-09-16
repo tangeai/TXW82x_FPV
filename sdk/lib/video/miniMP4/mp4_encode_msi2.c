@@ -41,9 +41,12 @@
 #define MP4_EVENT_BUFFER_AUDIO_COUNT         MP4_FRAME_COUNT(MP4_AUDIO_FPS, MP4_EVENT_BUFFER_MAX_MS)
 #define MP4_EVENT_BUFFER_MAX_COUNT           (MP4_EVENT_BUFFER_VIDEO_COUNT + MP4_EVENT_BUFFER_AUDIO_COUNT)
 
-// 普通模式录卡缓冲区大小 2.5s
-#define MP4_MAX_VIDEO_EXTRA_COUNT            MP4_FRAME_COUNT(MP4_VIDEO_FPS, 2500)
-#define MP4_MAX_AUDIO_EXTRA_COUNT            MP4_FRAME_COUNT(MP4_VIDEO_FPS, 2500)
+/* 普通模式录卡缓冲区 1200ms (实测): 600ms 反而推高 PSRAM 峰值.
+ * 机理: fbq 缩小后写卡仍慢, h264 静态池被前段帧占着, 上游 video_app_h264
+ * 继续编帧 (实时流需要) → 静态池 miss 暴增 → fallback STREAM_MALLOC →
+ * 直接走 PSRAM 堆 → 碎片化 + 峰值升高. 净效果是负的, 保 1200ms. */
+#define MP4_MAX_VIDEO_EXTRA_COUNT            MP4_FRAME_COUNT(MP4_VIDEO_FPS, 1200)
+#define MP4_MAX_AUDIO_EXTRA_COUNT            MP4_FRAME_COUNT(MP4_VIDEO_FPS, 1200)
 #define MP4_VIDEO_I_EXTRA_COUNT              12U    // 缓冲区不足时只接收 I 帧
 
 #define MP4_MAX_VIDEO_COUNT_NORMAL           MP4_MAX_VIDEO_EXTRA_COUNT
@@ -719,7 +722,21 @@ static int mp4_encode_running(struct msi *msi, uint32_t save_time, void *fp, con
                 h264_count++;
                 if ((h264_priv->count != h264_count) && (h264_priv->type != 1))
                 {
-                    os_printf(KERN_ERR "%s: %d h264 frame lost,count: %d,expect: %d\ttype: %d\n", __FUNCTION__, __LINE__, h264_priv->count, h264_count, h264_priv->type);
+                    /* 启动期 sps_pps 还没就绪, 编码器全局 count 远超本次录像期望,
+                     * 这段期间的 P 帧无 I 帧参考无法独立解码, 本来就要丢, 不打印.
+                     *
+                     * 丢帧后必须把 h264_count 对齐到 priv->count, 否则后续每帧都会
+                     * 残留 +1 差值而持续报警 (日志里连续几十条 count:118 expect:20
+                     * ... count:119 expect:21 就是这个原因造成的). 同步后:
+                     *   - 若后续再丢帧, diff 会重新出现, 再打印一次 (有意义的新事件);
+                     *   - 若上游恢复, 下一帧 priv->count == h264_count+1, 不再打印. */
+                    if (sps_pps_flag) {
+                        int32_t lost = (int32_t)(h264_priv->count - h264_count);
+                        os_printf(KERN_ERR "%s:%d h264 lost %d frame(s), count:%d expect:%d type:%d\n",
+                                  __FUNCTION__, __LINE__, lost,
+                                  h264_priv->count, h264_count, h264_priv->type);
+                    }
+                    h264_count = h264_priv->count;  /* 同步期望, 避免下一帧又打印 */
                     goto mp4_encode_running_no_found_sps_pps;
                 }
                 h264_count = h264_priv->count;
@@ -817,13 +834,13 @@ static int mp4_encode_running(struct msi *msi, uint32_t save_time, void *fp, con
             // 写剩余的nal数据
             if (!mp4_is_realtime_mode(mp4_encode))
             {
-                _os_printf(KERN_INFO "T");
+//                _os_printf(KERN_INFO "T");
                 error |= write_h264_data(mp4_msg, last_nal_head_buf, fb->len - (last_nal_head_buf - fb->data), MP4_TIMELAPSE_TIME);
                 write_size += (fb->len - (last_nal_head_buf - fb->data));
             }
             else
             {
-                _os_printf(KERN_INFO "M");
+//                _os_printf(KERN_INFO "M");
                 error |= write_h264_data(mp4_msg, last_nal_head_buf, fb->len - (last_nal_head_buf - fb->data), delta);
             }
 
@@ -1014,7 +1031,13 @@ static void mp4_encode_thread(void *d)
     }
     while (msi)
     {
-        filesize = ((mp4_encode->rec_time / 60) + (mp4_encode->rec_time % 60 ? 1 : 0)) * mp4_encode->file_size;
+        /* filesize=0 → _MP4_init 跳过 pre_mp4_seek 预分配, 避免 FatFS 在 SD 上分配
+         * N MB 簇导致启动期阻塞 3-4 秒 (期间 h264 帧堆积 → drop).
+         * 文件切换由 rec_time 时长驱动, 不依赖 mdat_size 的 FULL_ERR.
+         * mp4_mdat_write 内部走 MDAT_SIZE=8MB 预分配 (小阻塞, 可接受);
+         * mp4_deinit 里加了 truncate 回正实际写入大小, 不会浪费 SD 空间. */
+        filesize = 0;
+        (void) mp4_encode->file_size;   /* 保留字段, 仅为未来需要时改回 */
         if (mp4_is_event_mode(mp4_encode))
         {
             msi->enable = 1;
@@ -1186,7 +1209,21 @@ static int32_t MP4_encode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
                         if (priv->type != 1)
                         {
                             ret = RET_ERR;
-                            os_printf(KERN_ERR "h264 drop: %d\n", mp4_encode->max_video_count);
+                            /* 节流: 累计 drop 计数, 每 1s 报一次 (含 P/B 帧丢数,
+                             * 当前 fbq 视频帧数, 上限). 用 static 全局而非 mp4_encode
+                             * 字段, 不增加结构体内存. */
+                            static uint32_t s_drop_p_cnt    = 0;
+                            static uint32_t s_drop_last_ms  = 0;
+                            uint32_t now = os_jiffies_to_msecs(os_jiffies());
+                            s_drop_p_cnt++;
+                            if ((uint32_t)(now - s_drop_last_ms) >= 1000) {
+                                s_drop_last_ms = now;
+                                os_printf(KERN_ERR "[mp4-drop] P frames dropped=%u (last 1s), fbq_video=%d limit=%d\n",
+                                          (unsigned)s_drop_p_cnt,
+                                          (int)mp4_encode->max_video_count,
+                                          (int)mp4_max_video_count_limit(mp4_encode));
+                                s_drop_p_cnt = 0;
+                            }
                         }
                     }
                 }
@@ -1328,7 +1365,11 @@ struct msi *mp4_encode_msi2_init(const char *mp4_msi_name, uint8_t srcID, uint8_
         goto mp4_encode_msi_init_end;
     }
 
-    void *mp4_hdl = os_task_create("mp4_encode", mp4_encode_thread, msi, OS_TASK_PRIORITY_ABOVE_NORMAL, 0, NULL, 2048);
+    /* 栈 2048 在边缘: mp4_encode_running 局部变量 (~80B) + MP4_open_init/
+     * mp4_box_/f_write/ 探鸽回调链, 加上节流打印的格式化栈, 关录像收尾
+     * 时容易溢出 (41244 实测: 一关录像就 stack overflow).
+     * 提到 4096 给 MP4 end 流程 (stts/stco/stsz/stss flush) 留 2KB 余量. */
+    void *mp4_hdl = os_task_create("mp4_encode", mp4_encode_thread, msi, OS_TASK_PRIORITY_ABOVE_NORMAL, 0, NULL, 4096);
     os_printf(KERN_DEBUG "mp4_hdl: %x\n", mp4_hdl);
     if (!mp4_hdl && mp4_encode)
     {

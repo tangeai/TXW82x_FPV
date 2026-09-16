@@ -443,6 +443,9 @@ enum MSI_VIDEO_DEMUX_CTRL_CMD
     MSI_VIDEO_DEMUX_START,
 	MSI_VIDEO_DEMUX_STOP,
     MSI_VIDEO_DEMUX_PAUSE,
+    /* 快速输出模式: arg=1 开启 (不等 PTS, 尽快吐出所有 fb), arg=0 关闭.
+     * 用于软件 seek 时跳过前 N 秒帧; pb_thread 到达 seek 目标后关闭. */
+    MSI_VIDEO_DEMUX_FAST_OUTPUT,
 };
 
 enum MSI_TAKEPHOTO_SCALE3_CMD

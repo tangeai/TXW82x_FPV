@@ -925,8 +925,6 @@ void vpp_set_time(struct vpp_device *p_vpp, uint32_t time_val)
 void vpp_frame_done(uint32 irq, uint32 dev, uint32 param)
 {
     static uint32_t md_isr_cnt = 0;
-    //	static uint32_t  done_num=0;
-    //	static uint32_t  detnum=0;
     uint8_t         itk        = 0;
     int32_t         ret        = 0;
     uint16_t        w, h;
@@ -934,7 +932,7 @@ void vpp_frame_done(uint32 irq, uint32 dev, uint32 param)
     uint32_t        loc;
     uint16_t        buf1w = 0, buf1h = 0;
     uint8_t        *ptr_cache;
-    _os_printf(KERN_DEBUG "F");
+//    _os_printf(KERN_DEBUG "F");
     static time_t      last_time_val = 0;
     struct vpp_device *p_vpp         = (struct vpp_device *) dev;
     struct timeval     ptimeval;

@@ -322,7 +322,7 @@ extern void hw_memcpy(void *dest, const void *src, unsigned int size);
 #endif
 
 #ifndef DNS_TABLE_SIZE
-#define DNS_TABLE_SIZE 1
+#define DNS_TABLE_SIZE  4
 #endif
 
 #ifndef LWIP_SOCKET

@@ -12,9 +12,9 @@ extern uint8_t get_vpp_w_h(uint16_t *w, uint16_t *h);
 extern uint8_t get_vpp1_w_h(uint16_t *w, uint16_t *h);
 
 // 这里是默认值,最好在project_config.h那里配置
-#ifndef JPG_NODE_COUNT
-#define JPG_NODE_COUNT 10
-#endif
+//#ifndef JPG_NODE_COUNT
+//#define JPG_NODE_COUNT 10
+//#endif
 
 // 最大支持处理200K的图片
 #define MAX_JPG_SIZE  (200 * 1024)
@@ -22,6 +22,30 @@ extern uint8_t get_vpp1_w_h(uint16_t *w, uint16_t *h);
 #define STREAM_MALLOC av_psram_malloc
 #define STREAM_FREE   av_psram_free
 #define STREAM_ZALLOC av_psram_zalloc
+
+// JPEG 帧拼接缓冲区从 av_psram 一次性分配(持有不释放)
+#define JPG_CONCAT_BUF_SIZE  (20 * 1024)
+#define JPG_CONCAT_NODE_LEN   (8*1024)
+
+static uint8_t         *jpg_concat_buf = NULL;
+static volatile uint8_t jpg_concat_buf_busy = 0;
+
+// 初始化拼接缓冲区，首次使用时一次性从 av_psram 分配，永不释放
+int jpg_concat_buf_init(void)
+{
+    if (jpg_concat_buf)
+        return 0;
+    jpg_concat_buf = (uint8_t *) av_psram_malloc(JPG_CONCAT_BUF_SIZE);
+    if (!jpg_concat_buf)
+    {
+        os_printf(KERN_ERR "jpg_concat_buf: av_psram_malloc(%d) failed\r\n", JPG_CONCAT_BUF_SIZE);
+        return -1;
+    }
+    sys_dcache_invalid_range((uint32_t *) jpg_concat_buf, JPG_CONCAT_BUF_SIZE);
+    os_printf(KERN_INFO "jpg_concat_buf: init ok, size=%d, addr=%p\r\n",
+              JPG_CONCAT_BUF_SIZE, jpg_concat_buf);
+    return 0;
+}
 
 // 结构体申请空间函数
 #ifdef MORE_SRAM
@@ -34,7 +58,7 @@ extern uint8_t get_vpp1_w_h(uint16_t *w, uint16_t *h);
 #define STREAM_LIBC_ZALLOC av_zalloc
 #endif
 
-#define MAX_JPG_CONCAT_RECV (30)
+#define MAX_JPG_CONCAT_RECV (6)
 extern struct msi *hardware_jpg_msi(uint8_t which_jpg, uint8_t src_from, uint16_t jpg_node_len, uint16_t jpg_node_count);
 
 int32_t jpg_concat_msg_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t param1, uint32_t param2)
@@ -111,7 +135,7 @@ int32_t jpg_concat_msg_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t par
                     {
                         if (!jpg_concat_msg->jpg_msi)
                         {
-                            jpg_concat_msg->jpg_msi = hardware_jpg_msi(jpg_concat_msg->which_jpg, jpg_concat_msg->from, 16 * 1024, jpg_concat_msg->jpg_node_count);
+                            jpg_concat_msg->jpg_msi = hardware_jpg_msi(jpg_concat_msg->which_jpg, jpg_concat_msg->from, JPG_CONCAT_NODE_LEN, jpg_concat_msg->jpg_node_count);
                             if (jpg_concat_msg->jpg_msi)
                             {
                                 msi_add_output(jpg_concat_msg->jpg_msi, NULL, msi->name);
@@ -285,7 +309,11 @@ int32_t jpg_concat_msg_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t par
             {
                 if (fb->data)
                 {
-                    STREAM_FREE(fb->data);
+                    // data 指向静态缓冲区 jpg_concat_buf，不能 free，释放占用标志
+                    if (fb->data == jpg_concat_buf)
+                        jpg_concat_buf_busy = 0;
+                    else
+                        STREAM_FREE(fb->data);
                     fb->data = NULL;
                 }
                 if (fb->priv)
@@ -334,16 +362,27 @@ static int32 jpg_concat_msi_work(struct os_work *work)
         struct jpg_node_s *jpg_priv = (struct jpg_node_s *) fb->priv;
         if (jpg_priv)
         {
-            jpg_len         = jpg_priv->jpg_len;
-            jpg_psram_space = (uint8_t *) STREAM_MALLOC(jpg_len);
-            if (jpg_psram_space)
+            jpg_len = jpg_priv->jpg_len;
+            // 首次使用时初始化静态缓冲区
+            if (jpg_concat_buf_init() != 0)
             {
+                os_printf(KERN_ERR "jpg_concat: buf init failed\r\n");
+            }
+            else if (jpg_concat_buf_busy || jpg_len > JPG_CONCAT_BUF_SIZE)
+            {
+                if (jpg_len > JPG_CONCAT_BUF_SIZE)
+                    os_printf(KERN_ERR "jpg_concat: frame too large %d > %d\r\n", jpg_len, JPG_CONCAT_BUF_SIZE);
+            }
+            else
+            {
+                jpg_concat_buf_busy = 1;
+                jpg_psram_space = jpg_concat_buf;
                 sys_dcache_invalid_range((uint32_t *) jpg_psram_space, jpg_len);
                 send_fb = fbpool_get(&jpg_concat_msg->tx_pool, 0, jpg_concat_msg->msi);
                 if (!send_fb)
                 {
                     _os_printf("=");
-                    STREAM_FREE(jpg_psram_space);
+                    jpg_concat_buf_busy = 0;
                 }
                 else
                 {
@@ -362,7 +401,6 @@ static int32 jpg_concat_msi_work(struct os_work *work)
                         {
                             cp_len = remain_len;
                         }
-                        // os_printf("cp_len:%X\n",cp_len);
                         hw_memcpy_no_cache(jpg_psram_space + offset, tmp_fb->data, cp_len);
                         offset += cp_len;
                         remain_len -= cp_len;
@@ -384,10 +422,10 @@ static int32 jpg_concat_msi_work(struct os_work *work)
                         send_fb->priv = (void *) jpg_msg;
                         msi_output_fb(jpg_concat_msg->msi, send_fb);
                     }
-                    // 申请不到内存,则不发送?正常不应该申请不到空间
                     else
                     {
                         os_printf("%s:%d malloc jpg_node_s fail\n", __FUNCTION__, __LINE__);
+                        jpg_concat_buf_busy = 0;
                         msi_delete_fb(jpg_concat_msg->msi, send_fb);
                     }
                 }
@@ -437,11 +475,11 @@ struct msi *jpg_concat_msi_init_start(uint32_t jpgid, uint16_t w, uint16_t h, ui
         jpg_concat_msg->filter_type = filter_type;
         jpg_concat_msg->from        = src_from;
         jpg_concat_msg->force_node  = 0;
-#ifndef FAST_JPG
+        #ifndef FAST_JPG
         jpg_concat_msg->auto_free = 1;
-#else
+        #else
         jpg_concat_msg->auto_free = 0;
-#endif
+        #endif
         jpg_concat_msg->jpg_node_count = JPG_NODE_COUNT;
         fbpool_init(&jpg_concat_msg->tx_pool, MAX_JPG_CONCAT_RECV);
         jpg_concat_msg->w = w;

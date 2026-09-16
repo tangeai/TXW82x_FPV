@@ -177,14 +177,17 @@ __init static void sys_heap_info()
     cpu1_info_free();
 }
 
+
 static int32 sys_main_loop(struct os_work *work)
 {
     mcu_watchdog_feed();
-    sys_dbginfo_print();
+//    sys_dbginfo_print();
 
 #if SYS_NETWORK_SUPPORT
     sys_dhcpc_check();
 #endif
+
+    free_ipc_stack_buf();
 
     /*run again after 1000 ms.*/
     os_run_work_delay(&main_wk, 1000);
@@ -194,11 +197,11 @@ static int32 sys_main_loop(struct os_work *work)
 __init static void sys_app_init(void)
 {
 #if SYS_APP_DHCPD && SYS_NETWORK_SUPPORT
-    sys_dhcpd_start();
+//    sys_dhcpd_start();
 #endif
 
 #if SYS_APP_SNTP && SYS_NETWORK_SUPPORT
-    sntp_client_init("ntp.aliyun.com", 2);
+//    sntp_client_init("ntp.aliyun.com", 2);
 #endif
 
 #ifdef SYS_APP_FPV
@@ -206,47 +209,75 @@ __init static void sys_app_init(void)
 #endif
 
 #ifdef SYS_APP_DEMO
-    sys_app_demo_init();
+//    sys_app_demo_init();
 #endif
 
 #ifdef SYS_APP_IPC
-    sys_app_ipc_init();
+//    sys_app_ipc_init();
 #endif
 
 #ifdef SYS_APP_BBM_LCD
-    sys_app_bbm_lcd_init();
+//    sys_app_bbm_lcd_init();
 #endif
 
 #ifdef SYS_APP_WALKIE_TALKIE
-    sys_app_walkie_talkie_init();
+//    sys_app_walkie_talkie_init();
 #endif
 
 #ifdef SYS_APP_BBM_CAM
-	sys_app_bbm_cam_init();
+//	sys_app_bbm_cam_init();
 #endif
 
 #if SYS_APP_BLENC
-    sys_ble_netconfig_init();
+//    sys_ble_netconfig_init();
 #endif
 
 #if SYS_WIFI_PAIR
-    sys_wifi_pair_init();
+//    sys_wifi_pair_init();
 #endif
 
 #if SYS_WIFI_PAIR_LED
-    sys_wifi_pair_led_init();
+//    sys_wifi_pair_led_init();
 #endif
 
 #ifdef SYS_APP_ISP_TUNNING
-    sys_app_isp_tunning_init();
+//    sys_app_isp_tunning_init();
 #endif
 }
 
+#include "platforms.h"
+extern int IpcStep1(void);
+extern void IpcStep2(void*arg);
+extern void event_report_demo(void*arg);
+struct os_task ipc_task_hdl;
+void *ipc_stack_buf = NULL;
+struct os_task event_report_task_hdl;
+volatile uint8 ipc_inited = 0;
+
+void free_ipc_stack_buf(void)
+{
+    if(ipc_stack_buf && ipc_inited){
+        _os_free_psram(ipc_stack_buf);
+        ipc_stack_buf = NULL;
+    }
+}
 __init static void usr_app_init(void)
 {
+    os_printf("usr_app_init\n");
+    
     /*
        添加用户App代码初始化
     */
+
+    #if defined(__TXW826__)
+    OS_TASK_INIT("ipc", &ipc_task_hdl, IpcStep2, NULL, OS_TASK_PRIORITY_NORMAL, NULL, 0x8000);
+    #elif defined(__TXW828__)
+    ipc_stack_buf = _os_malloc_psram(0x8000);  //828 sram不够用了，使用psram做栈内存
+    OS_TASK_INIT("ipc", &ipc_task_hdl, IpcStep2, NULL, OS_TASK_PRIORITY_NORMAL, ipc_stack_buf, 0x8000);
+    #endif
+
+    //移动侦测抓图上报
+    OS_TASK_INIT("event_report", &event_report_task_hdl, event_report_demo, NULL, OS_TASK_PRIORITY_NORMAL, NULL, 4096);
 }
 
 static int32 watchdog_loop(struct os_work *work)
@@ -272,7 +303,9 @@ int main(void)
         os_run_work_delay(&main_wk, 1000);
     }else{ // normal mode
         sys_wifi_init();
-        sys_network_init();
+//        sys_network_init();
+        IpcStep1();  //tange
+
         do_global_ctors();
         sys_app_init();
         usr_app_init();
