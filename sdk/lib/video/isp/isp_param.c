@@ -5,7 +5,7 @@
 
 #define ISP_DMA_ENABLE  1
 
-const struct hgisp_param_info isp_master_param = 
+const struct hgisp_param_info isp_master_param =
 {
     .enable_param = {
         .test_pattern_en    = 0,
@@ -34,23 +34,23 @@ const struct hgisp_param_info isp_master_param =
     },
 
     .awb_param = {
-        .coarse_scale           = 128, 
+        .coarse_scale           = 128,
         .coarse_thr             = 3 << 2,
-        .fine_step              = 1 << 2, 
-        .lock_hi_thr            = 4, 
-        .lock_lo_thr            = 0, 
-        .stable_thr             = 16, 
-        .cbcr_thr               = 3 << 2, 
-        .awb_auto_en            = 1, 
-        .awb_meas_mode          = 2, 
-        .cr_target              = 2048, 
+        .fine_step              = 1 << 2,
+        .lock_hi_thr            = 4,
+        .lock_lo_thr            = 0,
+        .stable_thr             = 16,
+        .cbcr_thr               = 3 << 2,
+        .awb_auto_en            = 1,
+        .awb_meas_mode          = 2,
+        .cr_target              = 2048,
         .cb_target              = 2048,
         .front_cr_val           = 30,
         .front_cb_val           = 30,
-        .front_uv_sum           = 15, 
+        .front_uv_sum           = 15,
         .back_cr_val            = 30,
         .back_cb_val            = 30,
-        .back_uv_sum            = 10, 
+        .back_uv_sum            = 10,
         .cons_cr_max            = 40,
         .cons_cb_max            = 40,
         .cons_uv_max            = 30,
@@ -64,10 +64,10 @@ const struct hgisp_param_info isp_master_param =
         .back_cb_min            = 5,
         .back_uv_min            = 5,
         .awb_wp_max             = 0xc0,
-        .awb_wp_min             = 32, 
-        .awb_r_max              = 0xc0, 
-        .awb_g_max              = 0xc0, 
-        .awb_b_max              = 0xc0, 
+        .awb_wp_min             = 32,
+        .awb_r_max              = 0xc0,
+        .awb_g_max              = 0xc0,
+        .awb_b_max              = 0xc0,
         .awb_precision          = 1,
         .awb_fine_cons_en       = 0,
         .awb_coarse_cons_en     = 0,
@@ -82,13 +82,13 @@ const struct hgisp_param_info isp_master_param =
 
     .cfg_ae = {
         .ae_manual_en              = 0,
-        .luma_target               = 55, 
-        .luma_weight_sum           = 61,
-        .luma_weight               = { 2, 2, 2, 2, 2,
-                                       2, 3, 3, 3, 2,
-                                       2, 3, 5, 3, 2,
-                                       2, 3, 3, 3, 2,
-                                       2, 2, 2, 2, 2},
+        .luma_target               = 53,
+        .luma_weight_sum           = 420,
+        .luma_weight               = { 15, 15, 15, 15, 15,//150
+                                       15, 20, 20, 20, 15,//90
+                                       15, 20, 20, 20, 15,//90
+                                       15, 20, 20, 20, 15,//90
+                                       15, 15, 15, 15, 15},
         .ae_crop_start_h           = 0,
         .ae_crop_start_v           = 0,
         .ae_crop_size_h            = 0,
@@ -99,12 +99,12 @@ const struct hgisp_param_info isp_master_param =
         .hist_crop_end_v           = 0,
         .ae_lock_cnt               = 10,
         .ae_lock_tolerance         = 12,
-		.exposure_alpha            = 16,
+		.exposure_alpha            = 0,
         .reduce_fps_en             = 0,
         .lowlight_lsb_gain_en      = 0,
         .lowlight_lsb_gain_4hi_fps = 16,
         .lowlight_lsb_gain_4lo_fps = 16,
-        .hist_hs_bin_thr           = 180,
+        .hist_hs_bin_thr           = 200,
         .hist_upper_hs_pixel_ratio = 0.94,
         .hist_upper_pixel_ratio    = 0.88,
         .hist_lower_pixel_ratio    = 0.00,
@@ -136,14 +136,14 @@ const struct hgisp_param_info isp_master_param =
         .abl_diff_ratio			   = 0.05,
         .abl_dark_pos_diff_thr     = 0.15 * 61,
         .abl_bright_pos_diff_thr   = 0.10 * 61,
-		
+
         .stg_mode                  = 0,
         .stg_ratio_slope           = 0.3*256,
         .stg_max_offset            = 20,
     },
-    
+
     .config_wdr = {
-        .dynamic_gamma_en          = 0,
+        .dynamic_gamma_en          = 1,
         .y_gamma_opt               = 0,
         .wdr_en                    = 0,
         .temporal_smooth_alpha     = 0.1,
@@ -157,7 +157,7 @@ const struct hgisp_param_info isp_master_param =
     },
 };
 
-const struct hgisp_param_info isp_slave0_param = 
+const struct hgisp_param_info isp_slave0_param =
 {
     .enable_param = {
         .test_pattern_en    = 0,
@@ -186,23 +186,23 @@ const struct hgisp_param_info isp_slave0_param =
     },
 
     .awb_param = {
-        .coarse_scale          = 128, 
+        .coarse_scale          = 128,
         .coarse_thr            = 3 << 2,
-        .fine_step             = 1 << 2, 
-        .lock_hi_thr           = 4, 
-        .lock_lo_thr           = 0, 
-        .stable_thr            = 16, 
-        .cbcr_thr              = 3 << 2, 
-        .awb_auto_en           = 1, 
-        .awb_meas_mode         = 0, 
-        .cr_target             = 2048, 
+        .fine_step             = 1 << 2,
+        .lock_hi_thr           = 4,
+        .lock_lo_thr           = 0,
+        .stable_thr            = 16,
+        .cbcr_thr              = 3 << 2,
+        .awb_auto_en           = 1,
+        .awb_meas_mode         = 0,
+        .cr_target             = 2048,
         .cb_target             = 2048,
         .front_cr_val          = 30,
         .front_cb_val          = 30,
-        .front_uv_sum          = 15, 
+        .front_uv_sum          = 15,
         .back_cr_val           = 30,
         .back_cb_val           = 30,
-        .back_uv_sum           = 10, 
+        .back_uv_sum           = 10,
         .cons_cr_max           = 40,
         .cons_cb_max           = 40,
         .cons_uv_max           = 30,
@@ -215,11 +215,11 @@ const struct hgisp_param_info isp_slave0_param =
         .back_cr_min           = 5,
         .back_cb_min           = 5,
         .back_uv_min           = 5,
-        .awb_wp_max            = 0xc0, 
-        .awb_wp_min            = 0x08, 
-        .awb_r_max             = 0xc0, 
-        .awb_g_max             = 0xc0, 
-        .awb_b_max             = 0xc0, 
+        .awb_wp_max            = 0xc0,
+        .awb_wp_min            = 0x08,
+        .awb_r_max             = 0xc0,
+        .awb_g_max             = 0xc0,
+        .awb_b_max             = 0xc0,
         .awb_precision         = 1,
         .awb_fine_cons_en      = 0,
         .awb_coarse_cons_en    = 0,
@@ -234,7 +234,7 @@ const struct hgisp_param_info isp_slave0_param =
 
     .cfg_ae = {
         .ae_manual_en             = 0,
-        .luma_target              = 55, 
+        .luma_target              = 55,
         .luma_weight_sum          = 61,
         .luma_weight              = { 2, 2, 2, 2, 2,
                                       2, 3, 3, 3, 2,
@@ -288,12 +288,12 @@ const struct hgisp_param_info isp_slave0_param =
         .abl_diff_ratio			   = 0.05,
         .abl_dark_pos_diff_thr     = 0.15 * 61,
         .abl_bright_pos_diff_thr   = 0.10 * 61,
-		
+
         .stg_mode                  = 0,
         .stg_ratio_slope           = 0.3*256,
         .stg_max_offset            = 20,
     },
-    
+
     .config_wdr = {
         .dynamic_gamma_en          = 0,
         .y_gamma_opt               = 0,
@@ -309,7 +309,7 @@ const struct hgisp_param_info isp_slave0_param =
     },
 };
 
-const struct hgisp_param_info isp_slave1_param = 
+const struct hgisp_param_info isp_slave1_param =
 {
     .enable_param = {
         .test_pattern_en    = 0,
@@ -338,23 +338,23 @@ const struct hgisp_param_info isp_slave1_param =
     },
 
     .awb_param = {
-        .coarse_scale          = 128, 
+        .coarse_scale          = 128,
         .coarse_thr            = 3 << 2,
-        .fine_step             = 1 << 2, 
-        .lock_hi_thr           = 4, 
-        .lock_lo_thr           = 0, 
-        .stable_thr            = 16, 
-        .cbcr_thr              = 3 << 2, 
-        .awb_auto_en           = 1, 
-        .awb_meas_mode         = 0, 
-        .cr_target             = 2048, 
+        .fine_step             = 1 << 2,
+        .lock_hi_thr           = 4,
+        .lock_lo_thr           = 0,
+        .stable_thr            = 16,
+        .cbcr_thr              = 3 << 2,
+        .awb_auto_en           = 1,
+        .awb_meas_mode         = 0,
+        .cr_target             = 2048,
         .cb_target             = 2048,
         .front_cr_val          = 30,
         .front_cb_val          = 30,
-        .front_uv_sum          = 15, 
+        .front_uv_sum          = 15,
         .back_cr_val           = 30,
         .back_cb_val           = 30,
-        .back_uv_sum           = 10, 
+        .back_uv_sum           = 10,
         .cons_cr_max           = 40,
         .cons_cb_max           = 40,
         .cons_uv_max           = 30,
@@ -367,11 +367,11 @@ const struct hgisp_param_info isp_slave1_param =
         .back_cr_min           = 5,
         .back_cb_min           = 5,
         .back_uv_min           = 5,
-        .awb_wp_max            = 0xc0, 
-        .awb_wp_min             = 32, 
-        .awb_r_max             = 0xc0, 
-        .awb_g_max             = 0xc0, 
-        .awb_b_max             = 0xc0, 
+        .awb_wp_max            = 0xc0,
+        .awb_wp_min             = 32,
+        .awb_r_max             = 0xc0,
+        .awb_g_max             = 0xc0,
+        .awb_b_max             = 0xc0,
         .awb_precision         = 1,
         .awb_fine_cons_en       = 1,
         .awb_coarse_cons_en     = 1,
@@ -386,7 +386,7 @@ const struct hgisp_param_info isp_slave1_param =
 
     .cfg_ae = {
         .ae_manual_en              = 0,
-        .luma_target               = 55, 
+        .luma_target               = 55,
         .luma_weight_sum           = 61,
         .luma_weight               = { 2, 2, 2, 2, 2,
                                        2, 3, 3, 3, 2,
@@ -440,12 +440,12 @@ const struct hgisp_param_info isp_slave1_param =
         .abl_diff_ratio			   = 0.05,
         .abl_dark_pos_diff_thr     = 0.15 * 61,
         .abl_bright_pos_diff_thr   = 0.10 * 61,
-		
+
         .stg_mode                  = 0,
         .stg_ratio_slope           = 0.3*256,
         .stg_max_offset            = 20,
     },
-        
+
     .config_wdr = {
         .dynamic_gamma_en          = 0,
         .y_gamma_opt               = 0,
@@ -486,7 +486,7 @@ void *isp_sensor_param_load(uint16 *buff)
                     os_memcpy((void *)&init->sensor_info[i], (void *)&buff[data_offset], info_szie);
                     init->sensor_info[i].info_src = ISP_INFO_SRC_TYPE_CODE_PARAM;
                     data_offset += (info_szie >> 1);
-                    // init->sensor_info[i].sensor_param.y_gamma.local_ygamma_map   = (_Sensor_YGAMMA *)&buff[data_offset];
+                    // init->sensor_info[i].sensor_param.y_gamma   = (_Sensor_YGAMMA *)&buff[data_offset];
                     // data_offset += (gamma_size >> 1);
                     init->sensor_info[i].sensor_param.rgb_gamma = (uint32 *)&buff[data_offset];
                     data_offset += (gamma_size >> 1);
@@ -520,5 +520,3 @@ _err:
 _end:
     return (void *)init;
 }
-
-

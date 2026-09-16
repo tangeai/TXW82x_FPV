@@ -8,6 +8,7 @@
 #include "osal/task.h"
 #include "osal/semaphore.h"
 #include "osal/mutex.h"
+#include "osal/irq.h"
 #include "list.h"
 #include "dev.h"
 #include "sdhost.h"
@@ -24,6 +25,25 @@
 
 #if FS_EN
 static uint8_t fat_ready = 0;
+/* 仅显式挂载允许初始化硬件，普通 fopen 不得绕过应用的旧句柄排空。 */
+static volatile uint8_t fat_mounting;
+/* 索引缓存用的卷/故障代号：重挂载或磁盘 IO 失败后，旧查询快照立即失效。 */
+static volatile uint32_t fat_storage_generation = 1;
+uint32_t fatfs_storage_generation(void) { return fat_storage_generation; }
+static void fatfs_storage_changed(void)
+{
+    uint32_t flags = disable_irq();
+    ++fat_storage_generation;
+    enable_irq(flags);
+}
+static DRESULT fatfs_index_io_result(DRESULT res)
+{
+    if (res != RES_OK) {
+        fatfs_storage_changed();
+        if (res != RES_PARERR) sd_storage_request_recovery();
+    }
+    return res;
+}
 
 uint8_t get_fat_isready()
 {
@@ -79,13 +99,17 @@ static DSTATUS fatfs_init(void *init_dev){
 	uint32 err = get_sdhost_status(init_dev);
 	if(err)
 	{
-		err = sdhost_init(48 * 1000 * 1000, 0);
+		if (sd_storage_app_managed() && !fat_mounting) return STA_NOINIT;
+		/* 稳定性基线：24MHz；单扇区请求使用 CMD17/CMD24，多扇区仍批量传输。 */
+		os_printf("[SD_BASELINE] clock=24000000 single_block=1 managed=%d\n", sd_storage_app_managed());
+		err = sdhost_init(24 * 1000 * 1000, SDHC_INIT_FLAGS_SINGLE_BLK_RW_EN);
 	}
-	
+
 	return err;
 }
 
 #if USE_FAT_CACHE
+static volatile uint8_t fat_cache_paused;
 // 内存分配函数
 static void *fat_malloc(int size)
 {
@@ -125,7 +149,7 @@ struct fat_cache_t
 	DWORD fs_size;
 	DWORD fat_tick;
 	#ifdef FAT_TIME
- 	os_timer_t fat_timer;
+    os_timer_t fat_timer;
 	#else
 	struct os_work fat_wk;
 	#endif
@@ -145,10 +169,10 @@ signed char update_fat_info(BYTE fmt, BYTE n_fats, DWORD sz_fat,DWORD fatbase, D
 {
 	if (fat_cache.fat_init != RET_OK){
 		return RET_ERR;
-	}	
+	}
 
 	os_mutex_lock(&fat_cache.lock, osWaitForever);
-	
+
 	fat_cache.fs_type = fmt;
 	fat_cache.fs_fats = n_fats;
 	fat_cache.fs_size = sz_fat;
@@ -190,7 +214,7 @@ signed char update_fat_info(BYTE fmt, BYTE n_fats, DWORD sz_fat,DWORD fatbase, D
 	if (n_fats > 1) {
 		FAT_INFO_SHOW("Physical Address ===> fat2_start %u , fat2_end %u \r\n",  fat2_physical, fat2_physical + sz_fat - 1);
 		FAT_INFO_SHOW("Logical Address ====> fat2_start %u , fat2_end %u \r\n", fat2_logical, fat2_logical + sz_fat - 1);
-	}	
+	}
 
 	os_mutex_unlock(&fat_cache.lock);
 
@@ -199,36 +223,35 @@ signed char update_fat_info(BYTE fmt, BYTE n_fats, DWORD sz_fat,DWORD fatbase, D
 
 void update_io_timestamp()
 {
-	if (fat_cache.fat_init != RET_OK || fat_cache.fat_info_ready != RET_OK){
+	if (fat_cache_paused || fat_cache.fat_init != RET_OK || fat_cache.fat_info_ready != RET_OK){
 		return;
-	}	
+	}
 	os_mutex_lock(&fat_cache.lock, osWaitForever);
 	fat_cache.fat_tick = os_jiffies();
 	os_mutex_unlock(&fat_cache.lock);
 }
 
-// fat回写SD
-static void fat_cache_sync(struct sdh_device *host)
+/* 已持有缓存锁时同步；任一副本失败都保留脏标记供后续重试。 */
+static int fat_cache_flush_locked(struct sdh_device *host, struct fat_data_t *cache)
 {
-	struct sdh_device *sdh = NULL;
-	sdh = (struct sdh_device *)dev_get(HG_SDIOHOST_DEVID);
-	if (fat_cache.fat_init != RET_OK || fat_cache.fat_info_ready != RET_OK){
-		return;
-	}
-	os_mutex_lock(&fat_cache.lock, osWaitForever);
-
-	FAT_INFO_SHOW("############# CTRL_SYNC max_offset %d\r\n", fat_cache.fat1.max_offset);
-	if (fat_cache.fat1.max_offset > 0)
-	{
-		sd_multiple_write((struct sdh_device *)host, fat_cache.fat1.start_sector, fat_cache.fat1.max_offset * 512, fat_cache.fat1.data);
-		if (fat_cache.fs_fats > 1)
-		{
-			sd_multiple_write((struct sdh_device *)host, (fat_cache.fat1.start_sector + fat_cache.fs_size), fat_cache.fat1.max_offset * 512, fat_cache.fat1.data);
-		}
-		fat_cache.fat1.max_offset = 0;
-	}
-	
-	os_mutex_unlock(&fat_cache.lock);
+    if (!cache->max_offset) return RES_OK;
+    if (sd_multiple_write(host, cache->start_sector, cache->max_offset * 512, cache->data))
+        return RES_ERROR;
+    if (fat_cache.fs_fats > 1 &&
+        sd_multiple_write(host, cache->start_sector + fat_cache.fs_size,
+                          cache->max_offset * 512, cache->data))
+        return RES_ERROR;
+    cache->max_offset = 0;
+    return RES_OK;
+}
+static int fat_cache_sync(struct sdh_device *host)
+{
+    int ret = RES_OK;
+    if (fat_cache.fat_init != RET_OK || fat_cache.fat_info_ready != RET_OK) return ret;
+    os_mutex_lock(&fat_cache.lock, osWaitForever);
+    ret = fat_cache_flush_locked(host, &fat_cache.fat1);
+    os_mutex_unlock(&fat_cache.lock);
+    return ret;
 }
 
 #ifdef FAT_TIME
@@ -237,9 +260,10 @@ static void fat_loop(void *arg)
 static int32 fat_loop(struct os_work *work)
 #endif
 {
-	if (fat_cache.fat_init != RET_OK || fat_cache.fat_info_ready != RET_OK){
+	if (fat_cache_paused || sd_storage_app_busy() ||
+		fat_cache.fat_init != RET_OK || fat_cache.fat_info_ready != RET_OK){
 		goto fat_loop_end;
-	}	
+	}
 
 	uint8 ret = 0;
 	struct sdh_device *sdh = NULL;
@@ -262,27 +286,18 @@ static int32 fat_loop(struct os_work *work)
 	if (os_jiffies() - fat_cache.fat_tick > 200 && SD_OFF != sdh->sd_opt)
 	{
 		fat_cache.fat_tick = os_jiffies();
-		if (fat_cache.fat1.max_offset > 0)
-		{
-			FAT_INFO_SHOW(" fat_loop write back max_offset %d\r\n", fat_cache.fat1.max_offset);
-			sd_multiple_write(sdh, fat_cache.fat1.start_sector, fat_cache.fat1.max_offset * 512, fat_cache.fat1.data);
-			if (fat_cache.fs_fats > 1) // 写入FAT2
-			{
-				sd_multiple_write(sdh, (fat_cache.fat1.start_sector + fat_cache.fs_size), fat_cache.fat1.max_offset * 512, fat_cache.fat1.data);
-			}
-			fat_cache.fat1.max_offset = 0;
-		}
+		fatfs_index_io_result(fat_cache_flush_locked(sdh, &fat_cache.fat1));
 	}
-	
+
 	os_mutex_unlock(&fat_cache.lock);
 fat_loop_end:
 	#ifdef FAT_TIME
 	return;
 	#else
-    os_run_work_delay(work, 50);
+    if (!fat_cache_paused) os_run_work_delay(work, 50);
 	return 0;
 	#endif
-	
+
 }
 
 static void init_fat_cache(FATFS *fs)
@@ -293,9 +308,13 @@ static void init_fat_cache(FATFS *fs)
 	FAT_INFO_SHOW("init_fat_cache \r\n");
 	struct sdh_device *sdh = NULL;
 	sdh = (struct sdh_device *)dev_get(HG_SDIOHOST_DEVID);
-	// 初始化后第一次读fat1
+	// 初始化后第一次读 FAT，在同一把锁内发布，避免后台读到半初始化窗口。
+	os_mutex_lock(&fat_cache.lock, osWaitForever);
 	fat_cache.fat1.start_sector = fs->fatbase;
-	sd_multiple_read(sdh, fat_cache.fat1.start_sector, FAT_CACHE_SIZE * 512, fat_cache.fat1.data);
+	fat_cache.fat1.max_offset = 0;
+	if (sd_multiple_read(sdh, fat_cache.fat1.start_sector, FAT_CACHE_SIZE * 512, fat_cache.fat1.data))
+		fat_cache.fat1.start_sector = 0xffffffffU;
+	os_mutex_unlock(&fat_cache.lock);
 }
 
 static void del_fat_cache(void)
@@ -306,16 +325,17 @@ static void del_fat_cache(void)
 
 	fat_cache.fat_init = 1;
 	fat_cache.fat_info_ready = 1;
-	os_mutex_lock(&fat_cache.lock, osWaitForever);
 	FAT_INFO_SHOW("########### del_fat_cache \r\n");
-	
+
 	#ifdef FAT_TIME
 	os_timer_stop(&fat_cache.fat_timer);
 	os_timer_del(&fat_cache.fat_timer);// 先卸载定时器
 	#else
 	os_work_cancle(&fat_cache.fat_wk,1);
 	#endif
-	
+	/* 取消任务时不能持有它可能正在等待的缓存锁。 */
+	os_mutex_lock(&fat_cache.lock, osWaitForever);
+
 	// 释放fat缓存
 	if (fat_cache.fat1.data)
 	{
@@ -324,99 +344,76 @@ static void del_fat_cache(void)
 		fat_cache.fat1.data = NULL;
 	}
 	os_mutex_unlock(&fat_cache.lock);
-	os_mutex_del(&fat_cache.lock); 
+	os_mutex_del(&fat_cache.lock);
 }
 
+/* 未命中时先确认旧缓存落盘，再读取新窗口；读取失败不能发布无效窗口。 */
 static DRESULT read_from_fat_cache(void *dev, struct fat_data_t *cache, BYTE *buf, DWORD sector, UINT count)
 {
-	int ret = 0;
-	if (fat_cache.fat_init != RET_OK || fat_cache.fat_info_ready != RET_OK){
-		return sd_multiple_read((struct sdh_device *)dev, sector, count * 512, buf);
-	}
-	os_mutex_lock(&fat_cache.lock, osWaitForever);
-
-	if (sector >= cache->start_sector && sector + count <= cache->start_sector + FAT_CACHE_SIZE)
-	{
-		// 从缓存读取
-		cache->offset = (sector - cache->start_sector);
-		memcpy(buf, &cache->data[cache->offset * 512], count * 512);
-	}
-	// 未命中缓存，把旧缓存写入SD，重新预读 16KB 到缓存
-	else
-	{
-		// 把旧缓存写入fat
-		if (cache->max_offset > 0)
-		{
-			FAT_INFO_SHOW("read_from_fat_cache write back max_offset %d sector %d\r\n", cache->max_offset, sector);
-			sd_multiple_write((struct sdh_device *)dev, cache->start_sector, cache->max_offset * 512, cache->data);
-			if (fat_cache.fs_fats > 1)
-			{
-				sd_multiple_write((struct sdh_device *)dev, (cache->start_sector + fat_cache.fs_size), cache->max_offset * 512, cache->data);
-			}
-			cache->max_offset = 0;
-			// memset(cache->data, 0, FAT_CACHE_SIZE * 512);
-		}
-		// 重新预读数据到缓存
-		ret = sd_multiple_read((struct sdh_device *)dev, sector, FAT_CACHE_SIZE * 512, cache->data);
-		cache->start_sector = sector;
-		memcpy(buf, &cache->data[0], count * 512);
-	}
-	// __end:
-	os_mutex_unlock(&fat_cache.lock);
-	return ret;
+    int ret = RES_OK;
+    if (fat_cache.fat_init != RET_OK || fat_cache.fat_info_ready != RET_OK)
+        return sd_multiple_read(dev, sector, count * 512, buf);
+    os_mutex_lock(&fat_cache.lock, osWaitForever);
+    if (sector < cache->start_sector || sector + count > cache->start_sector + FAT_CACHE_SIZE) {
+        ret = fat_cache_flush_locked(dev, cache);
+        if (ret) goto done;
+        /* 大请求或 FAT 尾部直接读，避免缓存预读跨出卡尾。 */
+        if (count > FAT_CACHE_SIZE || sector + FAT_CACHE_SIZE - 1 > cache->fat_end) {
+            ret = sd_multiple_read(dev, sector, count * 512, buf);
+            goto done;
+        }
+        cache->start_sector = 0xffffffffU;
+        ret = sd_multiple_read(dev, sector, FAT_CACHE_SIZE * 512, cache->data);
+        if (ret) goto done;
+        cache->start_sector = sector;
+    }
+    memcpy(buf, cache->data + (sector - cache->start_sector) * 512, count * 512);
+done:
+    os_mutex_unlock(&fat_cache.lock);
+    return ret;
 }
-
 static DRESULT write_to_fat_cache(void *dev, struct fat_data_t *cache, BYTE *buf, DWORD sector, UINT count)
 {
-	int ret = 0;
-	
-	if (fat_cache.fat_init != RET_OK || fat_cache.fat_info_ready != RET_OK){
-		return sd_multiple_write((struct sdh_device *)dev, sector, count * 512, buf);
-	}
-	os_mutex_lock(&fat_cache.lock, osWaitForever);
-
-	// 检查是否命中缓存
-	if (sector >= cache->start_sector && sector + count <= cache->start_sector + FAT_CACHE_SIZE)
-	{
-		cache->offset = (sector - cache->start_sector);
-		memcpy(&cache->data[cache->offset * 512], buf, count * 512);
-		if (cache->max_offset < (cache->offset + 1))
-		{
-			cache->max_offset = cache->offset + 1;
-		}
-	}
-	else
-	{
-		// 把旧缓存写入fat
-		if (cache->max_offset > 0)
-		{
-			FAT_INFO_SHOW("write_to_fat_cache write back max_offset %d sector %d\r\n", cache->max_offset, sector);
-			sd_multiple_write((struct sdh_device *)dev, cache->start_sector, cache->max_offset * 512, cache->data);
-			if (fat_cache.fs_fats > 1)
-			{
-				sd_multiple_write((struct sdh_device *)dev, (cache->start_sector + fat_cache.fs_size), cache->max_offset * 512, cache->data);
-			}
-			cache->max_offset = 0;
-			// memset(cache->data, 0, FAT_CACHE_SIZE * 512);
-		}
-		// 重新预读数据到缓存
-		ret = sd_multiple_read((struct sdh_device *)dev, sector, FAT_CACHE_SIZE * 512, cache->data);
-		cache->start_sector = sector;
-
-		cache->offset = 0;
-		memcpy(&cache->data[cache->offset * 512], buf, count * 512);
-
-		if (cache->max_offset < (cache->offset + 1))
-		{
-			cache->max_offset = cache->offset + 1;
-		}
-	}
-	// __end:
-	os_mutex_unlock(&fat_cache.lock);
-	return ret;
+    int ret = RES_OK;
+    if (fat_cache.fat_init != RET_OK || fat_cache.fat_info_ready != RET_OK)
+        return sd_multiple_write(dev, sector, count * 512, buf);
+    os_mutex_lock(&fat_cache.lock, osWaitForever);
+    if (sector < cache->start_sector || sector + count > cache->start_sector + FAT_CACHE_SIZE) {
+        ret = fat_cache_flush_locked(dev, cache);
+        if (ret) goto done;
+        if (count > FAT_CACHE_SIZE || sector + FAT_CACHE_SIZE - 1 > cache->fat_end) {
+            cache->start_sector = 0xffffffffU;
+            ret = sd_multiple_write(dev, sector, count * 512, buf);
+            goto done;
+        }
+        cache->start_sector = 0xffffffffU;
+        ret = sd_multiple_read(dev, sector, FAT_CACHE_SIZE * 512, cache->data);
+        if (ret) goto done;
+        cache->start_sector = sector;
+    }
+    cache->offset = sector - cache->start_sector;
+    memcpy(cache->data + cache->offset * 512, buf, count * 512);
+    if (cache->max_offset < cache->offset + count)
+        cache->max_offset = cache->offset + count;
+done:
+    os_mutex_unlock(&fat_cache.lock);
+    return ret;
 }
-
 #endif
+
+/* 仅在应用排空全部 SD 使用者后调用：格式化前丢弃旧卷缓存，禁止后台再次回写。 */
+void fatfs_cache_discard(void)
+{
+#if USE_FAT_CACHE
+    if (fat_cache.fat_init != RET_OK) return;
+    os_mutex_lock(&fat_cache.lock, osWaitForever);
+    fat_cache.fat_info_ready = 1;
+    fat_cache.fat1.max_offset = 0;
+    fat_cache.fat1.start_sector = 0xffffffffU;
+    fat_cache.fat1.fat_start = fat_cache.fat1.fat_end = 0;
+    os_mutex_unlock(&fat_cache.lock);
+#endif
+}
 
 DRESULT fatfs_read(void *dev, BYTE *buf, DWORD sector, UINT count)
 {
@@ -424,10 +421,10 @@ DRESULT fatfs_read(void *dev, BYTE *buf, DWORD sector, UINT count)
 	update_io_timestamp();
 	if (sector >= fat_cache.fat1.fat_start && sector <= fat_cache.fat1.fat_end)
 	{
-		return read_from_fat_cache((struct sdh_device *)dev, &fat_cache.fat1, buf, sector, count);
+		return fatfs_index_io_result(read_from_fat_cache((struct sdh_device *)dev, &fat_cache.fat1, buf, sector, count));
 	}
 #endif
-    return sd_multiple_read((struct sdh_device *)dev, sector, count * 512, buf);
+    return fatfs_index_io_result(sd_multiple_read((struct sdh_device *)dev, sector, count * 512, buf));
 }
 
 static DRESULT fatfs_write(void *dev, BYTE *buf, DWORD sector, UINT count)
@@ -436,10 +433,10 @@ static DRESULT fatfs_write(void *dev, BYTE *buf, DWORD sector, UINT count)
 	update_io_timestamp();
 	if (sector >= fat_cache.fat1.fat_start && sector <= fat_cache.fat1.fat_end)
 	{
-		return write_to_fat_cache((struct sdh_device *)dev, &fat_cache.fat1, buf, sector, count);
+		return fatfs_index_io_result(write_to_fat_cache((struct sdh_device *)dev, &fat_cache.fat1, buf, sector, count));
 	}
 #endif
-	return sd_multiple_write((struct sdh_device *)dev, sector, count * 512, buf);
+	return fatfs_index_io_result(sd_multiple_write((struct sdh_device *)dev, sector, count * 512, buf));
 }
 
 extern unsigned int sd_dwCap;
@@ -450,10 +447,12 @@ static DRESULT fatfs_ioctl(void *init_dev, BYTE cmd, void *buf)
 	switch (cmd)
 	{
 	case CTRL_SYNC:
-		fatfs_sd_tran_stop(init_dev);
+		if (fatfs_sd_tran_stop(init_dev)) ret = RES_ERROR;
 
 #if USE_FAT_CACHE
-		fat_cache_sync(init_dev);
+		if (fat_cache_sync(init_dev)) ret = RES_ERROR;
+		/* FAT 回写也可能启动多块传输，完成它以后才可向 f_sync 报成功。 */
+		if (fatfs_sd_tran_stop(init_dev)) ret = RES_ERROR;
 #endif
 		break;
 	case GET_SECTOR_COUNT:
@@ -473,55 +472,63 @@ static DRESULT fatfs_ioctl(void *init_dev, BYTE cmd, void *buf)
 		break;
 
 	default:
-		ret = RES_ERROR; // not finish
+		ret = RES_PARERR; /* 未支持的控制命令不是介质故障。 */
 		printf("rtos_sd_ioctl err\n");
 		break;
 	}
-	return ret;
+	return fatfs_index_io_result(ret);
 }
 
 bool fatfs_register()
 {
-
+	fatfs_storage_changed();
+	set_fat_ready(0);  /* 挂载失败时不能继续沿用上一次就绪状态。 */
 	int ret = 1;
 	struct sdh_device *fatfs_sdh;
 	// printf(">>>>>>>>>> enter %s test\r\n", __func__);
 	fatfs_sdh = (struct sdh_device *)dev_get(HG_SDIOHOST_DEVID);
 
 #if USE_FAT_CACHE
+	fat_cache_paused = 0;
 	if (fat_cache.fat_init)
 	{
 		// 分配 fat1 缓存
 		fat_cache.fat1.data = fat_malloc(FAT_CACHE_SIZE * 512);
-		if( fat_cache.fat1.data != NULL &&
-			os_mutex_init(&fat_cache.lock) == RET_OK && 
-			#ifdef FAT_TIME
-			os_timer_init(&fat_cache.fat_timer, fat_loop, OS_FAT_TIMER_MODE_PERIODIC, 0) == RET_OK
-			#else
-			OS_WORK_INIT(&fat_cache.fat_wk, fat_loop, 0) == RET_OK
-			#endif
-			)
-		{
-			fat_cache.fat_init = RET_OK;
-			FAT_INFO_SHOW("fat_init success\r\n");
-			#ifdef FAT_TIME
-			os_timer_start(&fat_cache.fat_timer, 50);
-			#else
-			os_run_work_delay(&fat_cache.fat_wk, 50);
-			#endif
+		if (!fat_cache.fat1.data) return FR_NOT_ENOUGH_CORE;
+		if (os_mutex_init(&fat_cache.lock) != RET_OK) {
+			fat_free(fat_cache.fat1.data);
+			fat_cache.fat1.data = NULL;
+			return FR_NOT_ENOUGH_CORE;
 		}
-		else
-		{
-			os_printf("fat init err \r\n");
+#ifdef FAT_TIME
+		ret = os_timer_init(&fat_cache.fat_timer, fat_loop, OS_FAT_TIMER_MODE_PERIODIC, 0);
+#else
+		ret = OS_WORK_INIT(&fat_cache.fat_wk, fat_loop, 0);
+#endif
+		if (ret != RET_OK) {
+			/* 重复恢复遇到分配失败时必须归还缓存，避免每轮泄漏 32KB。 */
+			os_mutex_del(&fat_cache.lock);
+			fat_free(fat_cache.fat1.data);
+			fat_cache.fat1.data = NULL;
+			return FR_NOT_ENOUGH_CORE;
 		}
+		fat_cache.fat_init = RET_OK;
+#ifdef FAT_TIME
+		os_timer_start(&fat_cache.fat_timer, 50);
+#else
+		os_run_work_delay(&fat_cache.fat_wk, 50);
+#endif
 
 	}
 #endif
 
+	ret = FR_NOT_READY;
 	if (fatfs_sdh)
 	{
 		fatfs_register_drive(0, (struct fatfs_diskio*)&sdcdisk_driver, fatfs_sdh);
+		fat_mounting = 1;
 		ret = f_mount(&fatfs[0], _SYSDSK_, 1);
+		fat_mounting = 0;
 		if (ret)
 		{
 			printf("%s ret:%d\n", __FUNCTION__, ret);
@@ -537,26 +544,58 @@ bool fatfs_register()
 	return ret;
 }
 
-void fatfs_unregister()
+/* 调用者必须先封闭应用准入并等待所有文件使用者退出。 */
+int fatfs_prepare_remount(void)
 {
+	fatfs_storage_changed();
 	int ret = 1;
 	FAT_INFO_SHOW(">>>>>>>>>>enter %s test\r\n", __func__);
 	struct sdh_device *fatfs_sdh;
 	fatfs_sdh = (struct sdh_device *)dev_get(HG_SDIOHOST_DEVID);
 	if (fatfs_sdh)
 	{
+#if USE_FAT_CACHE
+		fat_cache_paused = 1;
+		if (fat_cache.fat_init == RET_OK) {
+#ifdef FAT_TIME
+			os_timer_stop(&fat_cache.fat_timer);
+#else
+			os_work_cancle(&fat_cache.fat_wk, 1);
+#endif
+		}
+		fatfs_cache_discard();
+#endif
 		fatfs_register_drive(0, (struct fatfs_diskio*)&sdcdisk_driver, fatfs_sdh);
 		ret = f_mount(NULL, _SYSDSK_, 0);
 		if (ret)
 		{
 			printf("%s ret:%d\n", __FUNCTION__, ret);
-			return;
+			return ret;
 		}
 		set_fat_ready(0);
 #if USE_FAT_CACHE
 		del_fat_cache();
 #endif
 	}
+	return ret;
+}
+
+void fatfs_unregister(void)
+{
+	fatfs_prepare_remount();
+}
+
+int fatfs_recover_mount(void)
+{
+	int ret = fatfs_prepare_remount();
+	if (ret) return ret;
+	struct sdh_device *host = (struct sdh_device *)dev_get(HG_SDIOHOST_DEVID);
+	if (!host) return FR_NOT_READY;
+	os_mutex_lock(&host->lock, osWaitForever);
+	host->sd_opt = SD_OFF;
+	host->sd_stop = 0;
+	os_mutex_unlock(&host->lock);
+	return fatfs_register();
 }
 
 #endif

@@ -98,10 +98,9 @@ int get_device_feature(const char* key, char* buf, int bytes)
     }
 
     else if(strcasecmp(key, "BatteryCam") == 0) {
-        return -1;//strcpy(buf, "Solar"); //Should be: Dormant
+        return -1;//strcpy(buf, "Dormant");
     }
     else if(strcasecmp(key, "DeviceType") == 0) {
-        //strcpy(buf,  "LockBell");
         strcpy(buf, "IPC");
     }
 	else if(strcasecmp(key, "AudioFmt") == 0)
@@ -475,8 +474,9 @@ int Handle_P2p_Cmd(p2phandle_t handle, int cmd, const void *buf, int size)
 			SAvExEvent *items = NULL;
 			int nRec = rec_list_get((uint32_t)t_start, (uint32_t)t_end, &items);
 			if (nRec < 0) {
-				_os_printf("rec_list_get failed\n");
-				break;
+				_os_printf("rec_list_get unavailable, send empty end response\n");
+                /* 协议没有列表错误字段，仍回复结束包，避免 APP 永久等待。 */
+                nRec = 0;
 			}
 			_os_printf("%d records\n", nRec);
             int i;
@@ -601,8 +601,8 @@ int Handle_P2p_Cmd(p2phandle_t handle, int cmd, const void *buf, int size)
                 memset(&resp, 0, sizeof(resp));
                 resp.channel = 0;
                 uint32_t total_mb = 0, free_mb = 0;
-                sd_get_capacity(&total_mb, &free_mb);
-                resp.total = total_mb;
+                int cap_ret = sd_get_capacity(&total_mb, &free_mb);
+                resp.total = cap_ret < 0 ? cap_ret : (int)total_mb;
                 resp.free  = free_mb;
                 _os_printf("TCI_CMD_GET_EXTERNAL_STORAGE %d/%d MB\n", resp.free, resp.total);
                 TciSendCmdResp(handle, TCI_CMD_GET_EXTERNAL_STORAGE_RESP, (char *)&resp, sizeof(Tcis_SDCapResp));
@@ -1230,6 +1230,7 @@ void event_report_demo(void*arg)
     while(1){
 
         os_sleep_ms(1000);
+//        continue;
 
         /* 每 5 秒 dump 一次: PSRAM 主堆 + av_psram_heap 余量 */
         if ((os_jiffies() - last_stats_time_ms) >= 5000) {
@@ -1318,20 +1319,22 @@ void event_report_demo(void*arg)
                     _os_printf("event report failed\n");
                     snapshot_release(md_jpg_out_data);//上报失败释放内存，上报成功后在on_status回调内释放。
                 }else{
+                #if 0
+                    int i;
                     //模拟连续多次触发事件，延长云存储录像时长
-//                    int i;
-//                    for(i=0; i < 3; i++){
-//                        os_sleep_ms(4000);
-//                        memset(&evtp, 0x0, sizeof(evtp));
-//                        evtp.cbSize = sizeof(evtp);
-//                        evtp.event = ECEVENT_MOTION_DETECTED;
-//                        evtp.tHappen = time(NULL);
-//                        evtp.status = 1;
-//                        evtp.jpg_pic = NULL;
-//                        evtp.pic_len = 0;
-//                        evtp.evtp_flags = EPF_RECORD_ONLY;
-//                        TciSetEventEx(&evtp);
-//                    }
+                    for(i=0; i < 3; i++){
+                        os_sleep_ms(4000);
+                        memset(&evtp, 0x0, sizeof(evtp));
+                        evtp.cbSize = sizeof(evtp);
+                        evtp.event = ECEVENT_MOTION_DETECTED;
+                        evtp.tHappen = time(NULL);
+                        evtp.status = 1;
+                        evtp.jpg_pic = NULL;
+                        evtp.pic_len = 0;
+                        evtp.evtp_flags = EPF_RECORD_ONLY;
+                        TciSetEventEx(&evtp);
+                    }
+                #endif
                 }
             }else{
                 _os_printf("snapshot jpg failed\n");

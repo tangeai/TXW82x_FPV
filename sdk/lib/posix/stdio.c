@@ -21,7 +21,7 @@
 /* sram slice buffer size, usr for psram slice write to sd */
 #define STDIO_RWBUF_SIZE 10000
 
-extern int osal_open(const char *filename, int oflags, int mode);
+/* osal_open 统一使用 osal_file.h 的指针返回类型声明；open 内部再转换为整数句柄。 */
 int read(int fd, void *buf, size_t nbytes);
 int write(int fd, const void *buf, size_t nbytes);
 
@@ -278,7 +278,7 @@ int fsync(int fd)
 int getc(FILE *stream)
 {
     uint8 val = 0;
-#if FS_EN    
+#if FS_EN
     osal_fread(&val, 1, 1, (F_FILE *)stream);
 #endif
     return val;
@@ -322,7 +322,7 @@ int write_from_psram(int fd, const char *psram_buf, size_t nbytes)
     int left_len = nbytes;
     int write_len = 0;
     int wlen = 0;
-    int len = -1;        
+    int len = -1;
     char *sram_buf = os_malloc(STDIO_RWBUF_SIZE);
     if(sram_buf == NULL){
         return -ENOMEM;
@@ -553,4 +553,3 @@ int	_fflush_r (void *rptr, void *fp)
     return 0;
 }
 #endif
-

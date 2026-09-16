@@ -9902,10 +9902,19 @@ Board: txw82x
         <File Name="tange/demo/mufbuff_demo.c">
           <FileOption />
         </File>
+        <File Name="tange/demo/rec_day_index.h">
+          <FileOption />
+        </File>
+        <File Name="tange/demo/rec_mp4_recover.h">
+          <FileOption />
+        </File>
         <File Name="tange/demo/rec_playback.c">
           <FileOption />
         </File>
         <File Name="tange/demo/rec_playback.h">
+          <FileOption />
+        </File>
+        <File Name="tange/demo/rec_playback_mp4aac.c">
           <FileOption />
         </File>
         <File Name="tange/demo/snapshot_bare.c">

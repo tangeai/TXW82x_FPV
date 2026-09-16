@@ -482,11 +482,33 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 /* ============================================================================
  * 卡录像码流选择 (icam365 rec_playback 模块用)
  *   0 = 主码流 (高画质, SD 占用大)
- *     - 826: 1280x720 @ 15fps, 主码流走 VPP_DATA0
+ *     - 828: 1920x1080 @ 15fps 2Mbps, 15MB/min, 30GB SD ≈ 34 小时
+ *     - 切主码流前必须确认: sdk/app/mp4/mp4_encode.c 的 MDAT_SIZE 足够大
+ *       (主码流 60s 约 15MB, MDAT_SIZE 默认 8MB 会让 mdat box 越界写)
+ *     - 同时建议 REC_LOOP_REMAIN_MB 增大以避免清理过于频繁
  *   1 = 子码流 (默认, 低带宽低 SD 占用)
- *     - 826: 子码流走 gen420 路径, stype = FSTYPE_H264_GEN420_DATA */
+ *     - 828: 640x360 @ 15fps 250kbps, 1.8MB/min, 30GB SD ≈ 40 天 */
 #define REC_STREAM_TYPE                 0
 
+/* 卡录像媒体存储方式:
+ *   0: 旧版 video-only MP4 + 独立 G.711A .alaw
+ *   1: 新版 H264 + AAC 复用进单个 MP4
+ * 仅改变媒体文件写法，录像列表、切片、循环删除和 P2P 回放控制流程不变。 */
+#ifndef REC_MP4AAC_SINGLE_FILE
+#define REC_MP4AAC_SINGLE_FILE          1
+#endif
+
+/* AAC 编/解码控制。
+ * 单文件方案: encoder 负责把 AAC 写进 MP4; 回放时设备端把 AAC 解码成 PCM,
+ * 再用 linear2alaw 转 G.711A 发给 APP,
+ * 与实时流音频格式保持一致. 因此 encoder 和 decoder 都要打开。 */
+#if REC_MP4AAC_SINGLE_FILE
+#define AAC_ENC_CTRL                    1   /* AUCODER_RUN_IN_CPU0 */
+#define AAC_DEC_CTRL                    1   /* 回放 AAC→PCM→G.711A 转码需要 */
+#else
+#define AAC_ENC_CTRL                    0
+#define AAC_DEC_CTRL                    0
+#endif
 
 
 /************************************************************************************************************************
@@ -535,17 +557,6 @@ INPUT_MODE:
  *音频及功放使能io配置
  * ********************************************************/
 #define AUDIO_EN                        1
-
-/***********************************************************
- * AAC 编解码使能 (0 = NO_RUN, 1 = CPU0, 2 = CPU1)
- *
- * Plan B 之后 IPC 卡录像/回放不再依赖 AAC:
- *   - 录像: MP4 video-only, 音频独立存为 .alaw (G.711A)
- *   - 回放: pb_thread 直接读 .alaw 透传, 不需要 AAC 解码
- * 关掉 AAC 节省 PSRAM (解码器 buffer 几十 KB 级).
- * 如果后期需要 AAC (比如对讲走 AAC 格式), 改回 1 即可. */
-#define AAC_ENC_CTRL                    0
-#define AAC_DEC_CTRL                    0
 
 /***********************************************************
  * 抓拍实现选择 (和 CUSTOMER_ID==4 保持一致)
@@ -790,6 +801,25 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
  *     - 828: 640x360 @ 15fps 250kbps, 1.8MB/min, 30GB SD ≈ 40 天 */
 #define REC_STREAM_TYPE                 0
 
+/* 卡录像媒体存储方式:
+ *   0: 旧版 video-only MP4 + 独立 G.711A .alaw
+ *   1: 新版 H264 + AAC 复用进单个 MP4
+ * 仅改变媒体文件写法，录像列表、切片、循环删除和 P2P 回放控制流程不变。 */
+#ifndef REC_MP4AAC_SINGLE_FILE
+#define REC_MP4AAC_SINGLE_FILE          1
+#endif
+
+/* AAC 编/解码控制。
+ * 单文件方案: encoder 负责把 AAC 写进 MP4; 回放时设备端把 AAC 解码成 PCM,
+ * 再用 linear2alaw 转 G.711A 发给 APP,
+ * 与实时流音频格式保持一致. 因此 encoder 和 decoder 都要打开。 */
+#if REC_MP4AAC_SINGLE_FILE
+#define AAC_ENC_CTRL                    1   /* AUCODER_RUN_IN_CPU0 */
+#define AAC_DEC_CTRL                    1   /* 回放 AAC→PCM→G.711A 转码需要 */
+#else
+#define AAC_ENC_CTRL                    0
+#define AAC_DEC_CTRL                    0
+#endif
 
 
 /************************************************************************************************************************
@@ -814,7 +844,7 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 #define DEV_SENSOR_F37P                 0
 #define DEV_SENSOR_TP9950               0
  ***************************************************************************************************************************/
-//#define DEV_SENSOR_SC1346               1
+#define DEV_SENSOR_SC1346               1
 #define DEV_SENSOR_GC1084               1
 #define DEV_SENSOR_GC2053               1
 
@@ -837,17 +867,6 @@ INPUT_MODE:
  *音频及功放使能io配置
  * ********************************************************/
 #define AUDIO_EN                        1
-
-/* AAC 编/解码控制.
- * 0=AUCODER_NO_RUN  1=AUCODER_RUN_IN_CPU0  2=AUCODER_RUN_IN_CPU1
- *
- * Plan B 之后 IPC 卡录像/回放不再依赖 AAC:
- *   - 录像: MP4 video-only (audio_encode=0), 音频独立存为 .alaw (G.711A)
- *   - 回放: pb_thread 直接读 .alaw 透传给 APP, 不需要 AAC 解码
- * 关掉 AAC 节省 PSRAM (解码器内部 buffer 几十 KB 级).
- * 如果后期需要 AAC (比如对讲走 AAC 格式), 改回 1 即可. */
-#define AAC_ENC_CTRL                    0
-#define AAC_DEC_CTRL                    0
 
 /***********************************************************
  *默认mjpeg的节点数量,要根据mjpeg启动的分辨率去考虑
