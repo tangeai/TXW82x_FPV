@@ -61,13 +61,13 @@ __initconst const uint16_t __used isp_param[4096 / 2] = {4096, 0};
 __initconst const uint16_t __used eq_param[1024 / 2] = {1024};
 __initconst const uint16_t __used psram_param[4096 / 2] = {4096, 0};
 
-const uint32_t __used sys_factory_param[SYS_FACTORY_PARAM_SIZE / 2] __at_section("SYS_PARAM") = 
+const uint32_t __used sys_factory_param[SYS_FACTORY_PARAM_SIZE / 2] __at_section("SYS_PARAM") =
     {
         PARAM_HEAD(SYS_FACTORY_PARAM_SIZE,0x2B1A),
         FUNCCODE1_HEAD(FUN_NUM,FUN_NUM_1_SIZE),
-        (uint32_t)IOCFG_PARAM_ADDR, 
-        (uint32_t)eq_param, 
-        (uint32_t)isp_param, 
+        (uint32_t)IOCFG_PARAM_ADDR,
+        (uint32_t)eq_param,
+        (uint32_t)isp_param,
         (uint32_t)psram_param
     };
 
@@ -117,7 +117,7 @@ __SYS_INIT void cache_open_psram(void)
         sysctrl_cpu0_dbus_burst_set(CPU_BURST_SIZE_16B);
         csi_cache_set_range(3, PSRAM_BASE, CACHE_CRCR_16M, 0x1);
         csi_dcache_enable();
-    } 
+    }
 #endif
 }
 
@@ -222,7 +222,7 @@ __SYS_INIT void SystemInit(void)
 #endif
 
     sysctrl_qspi_lock();
-    
+
     system_set_ace_peris();
     cache_open();
 
@@ -246,14 +246,14 @@ __SYS_INIT void SystemInit(void)
     fls_user_data_t user_data   = (fls_user_data_t)info_in_fls->user.user_data;
     if (info_in_fls->user.user_data) {
         if (user_data->fw_magic == (0xC791B319)) {
-            
+
         } else {
             ll_xip_clock_init(0);
         }
     } else {
         ll_xip_clock_init(0);
     }
-    
+
     sysctrl_cmu_init();
 
 #ifndef FPGA_SUPPORT
@@ -320,21 +320,32 @@ __init static void malloc_psram_init(void)
 #endif
 }
 
+int psram_heap_size = 0;
 
 __init static int system_psram_init(void)
 {
 	extern void add_psram_cfg();
 	add_psram_cfg();
-    
+
     //  240M， 320M, 274M, 160M...
     //  你可以选择你喜欢的频率， 但内部只有几个挡位可以选择， 匹配最接近的配置
-    int psram_heap_size = psram_auto_init(0, 320 * 1000000);
+    psram_heap_size = psram_auto_init(0, 320 * 1000000);
     cache_open_psram();
+
+    /* 模拟实际产品的 PSRAM 容量上限.
+     * 开发板硬件 16MB, 但实际产品只有 8MB. 加上此宏后, 后续 sysheap 只看到
+     * SIMULATE_PSRAM_SIZE_MB 这么大的空间, 真实硬件多出的部分被丢弃,
+     * 用来在 16MB 板子上提前发现 8MB 模式下的内存问题. */
+#ifdef SIMULATE_PSRAM_SIZE_MB
+    if (psram_heap_size > SIMULATE_PSRAM_SIZE_MB) {
+        psram_heap_size = SIMULATE_PSRAM_SIZE_MB;
+    }
+#endif
 
 #ifdef PSRAM_HEAP
     if(psram_heap_size){
         psrampool_end = PSRAM_BASE + psram_heap_size*1024*1024;
-        malloc_psram_init(); 
+        malloc_psram_init();
         psram_rsv_addr = (uint32)os_malloc_psram(32);
     }
 
@@ -354,7 +365,7 @@ __init void pre_main(void)
 
     save_boot_loader_addr();
     malloc_init();
-    
+
     int psram_size = system_psram_init();
 
 #ifdef CSKY_OS
@@ -368,7 +379,7 @@ __init void pre_main(void)
     device_init();
 
     psram_info(psram_size);
-    
+
     sysctrl_efuse_validity_handle();
 
 #ifndef SINGLE_CORE
@@ -387,7 +398,7 @@ __init void pre_main(void)
     VERSION_SHOW();
     module_version_show();
     sys_reset_show();
-    os_workqueue_init(&main_wkq, "MAIN", OS_TASK_PRIORITY_NORMAL, NULL, 2048);
+    os_workqueue_init(&main_wkq, "MAIN", OS_TASK_PRIORITY_ABOVE_NORMAL, NULL, 2048);
     mainwkq_monitor_init();
     os_run_func((os_run_func_t)main, 0, 0, 0);
 
@@ -398,4 +409,3 @@ __init void pre_main(void)
     LOS_Start();
 #endif
 }
-

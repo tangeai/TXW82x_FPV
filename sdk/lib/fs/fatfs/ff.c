@@ -244,9 +244,9 @@ DWORD fs_get_time()
     struct timeval ptimeval;
 	gettimeofday(&ptimeval, NULL);
 	time_t time_val = (time_t)ptimeval.tv_sec;
-    
+
 	time_info = gmtime(&time_val);
-	
+
 
 	DWORD year	=	time_info->tm_year + 1900;
 	DWORD mon 	=	time_info->tm_mon + 1;
@@ -2072,7 +2072,7 @@ FRESULT load_xdir (	/* FR_INT_ERR: invalid entry block */
 /* exFAT: Load the object's directory entry block */
 /*------------------------------------------------*/
 static
-FRESULT load_obj_xdir (	
+FRESULT load_obj_xdir (
 	DIR* dp,			/* Blank directory object to be used to access containing direcotry */
 	const FFOBJID* obj	/* Object with its containing directory information */
 )
@@ -2713,7 +2713,7 @@ FRESULT create_name (	/* FR_OK: successful, FR_INVALID_NAME: could not create */
 		cf = 0;
 		if(p[si] < ' ') cf = NS_LAST;
 	}
-	
+
 	*path = &p[si];						/* Return pointer to the next segment */
 	//cf = (w < ' ') ? NS_LAST : 0;		/* Set last segment flag if end of the path */
 #if FF_FS_RPATH != 0
@@ -4997,8 +4997,8 @@ FRESULT f_getlabel (
 		dj.obj.fs = fs; dj.obj.sclust = 0;	/* Open root directory */
 		res = dir_sdi(&dj, 0);
 		if (res == FR_OK) {
-		 	res = dir_read(&dj, 1);			/* Find a volume label entry */
-		 	if (res == FR_OK) {
+            res = dir_read(&dj, 1);			/* Find a volume label entry */
+            if (res == FR_OK) {
 #if FF_FS_EXFAT
 				if (fs->fs_type == FS_EXFAT) {
 					for (si = di = 0; si < dj.dir[XDIR_NumLabel]; si++) {	/* Extract volume label from 83 entry */
@@ -5716,7 +5716,9 @@ FRESULT f_mkfs (
 		}
 		st_word(buf + BS_55AA, 0xAA55);					/* Signature (offset is fixed here regardless of sector size) */
 #if USE_FAT_CACHE
+#if FS_EN
 		update_fat_info(fmt,n_fats,sz_fat,(sz_rsv+b_vol),b_vol);
+#endif
 #endif
 		if (disk_write(pdrv, buf, b_vol, 1) != RES_OK) return FR_DISK_ERR;	/* Write it to the VBR sector */
 
@@ -6312,4 +6314,3 @@ int f_ioctl(FIL *fp, long cmd, void *argp)
 {
     return -1;
 }
-

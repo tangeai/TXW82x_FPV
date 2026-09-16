@@ -845,7 +845,7 @@ lwip_close(int s)
     err = netconn_prepare_delete(sock->conn);
     if (err != ERR_OK) {
         set_errno(err_to_errno(err));
-        done_socket(sock);
+        free_socket(sock, is_tcp);
         return -1;
     }
 
@@ -4796,7 +4796,7 @@ static void lwip_conn_dump_tcp_pcb(struct netconn *conn)
     int unack_data_len = 0;
     int ooseq_seg_num  = 0;
     int ooseq_data_len = 0;
-    
+
     if (!conn || !conn->pcb.tcp) {
         return;
     }
@@ -4819,9 +4819,9 @@ static void lwip_conn_dump_tcp_pcb(struct netconn *conn)
               ooseq_seg_num,ooseq_data_len);
     } else {
         printf("port:[%d]->[%d],status:[%s],rcv_wnd:[%u],snd_wnd:[%u]->[%u],sndbuf:[%u]\n",
-              conn->pcb.tcp->local_port, conn->pcb.tcp->remote_port, 
+              conn->pcb.tcp->local_port, conn->pcb.tcp->remote_port,
               tcp_get_state_str(conn->pcb.tcp->state),conn->pcb.tcp->rcv_wnd,
-              conn->pcb.tcp->snd_wnd,conn->pcb.tcp->snd_wnd_max, conn->pcb.tcp->snd_buf);                
+              conn->pcb.tcp->snd_wnd,conn->pcb.tcp->snd_wnd_max, conn->pcb.tcp->snd_buf);
     }
 }
 
@@ -4855,15 +4855,15 @@ void lwip_dump_sockets(void)
 {
     int i = 0;
     unsigned int conn_type = 0;
-    
+
     SYS_ARCH_DECL_PROTECT(lev);
     SYS_ARCH_PROTECT(lev);
 
     for (i = 0; i < NUM_SOCKETS; ++i) {
-        if (sockets[i].conn != NULL) {            
+        if (sockets[i].conn != NULL) {
             conn_type = NETCONNTYPE_GROUP(netconn_type(sockets[i].conn));
             if (conn_type == NETCONN_TCP) {
-                printf("TCP:fd:[%d],con_state:[0x%x],err:[%d],recv mbox:[%d],acceptmbox:[%d],send_evt:[%d],recv_evt:[%d],err_evt:[%d],", 
+                printf("TCP:fd:[%d],con_state:[0x%x],err:[%d],recv mbox:[%d],acceptmbox:[%d],send_evt:[%d],recv_evt:[%d],err_evt:[%d],",
                       i,
                       sockets[i].conn->state,
                       sockets[i].sockerr,
@@ -4874,13 +4874,13 @@ void lwip_dump_sockets(void)
                       sockets[i].errevent);
                 lwip_conn_dump_tcp_pcb(sockets[i].conn);
             } else if (conn_type == NETCONN_UDP) {
-                printf("UDP:fd:[%d],err:[%d],recv mbox:[%d]", 
+                printf("UDP:fd:[%d],err:[%d],recv mbox:[%d]",
                       i,sockets[i].sockerr,sys_mbox_get_num(&sockets[i].conn->recvmbox));
                 lwip_conn_dump_udp_pcb(sockets[i].conn);
             } else if(conn_type == NETCONN_RAW) {
-                printf("RAW:fd:[%d],err:[%d],recv mbox:[%d]", 
+                printf("RAW:fd:[%d],err:[%d],recv mbox:[%d]",
                       i,sockets[i].sockerr,sys_mbox_get_num(&sockets[i].conn->recvmbox));
-                lwip_conn_dump_raw_pcb(sockets[i].conn);                
+                lwip_conn_dump_raw_pcb(sockets[i].conn);
             } else {
                 ;//others;
             }
