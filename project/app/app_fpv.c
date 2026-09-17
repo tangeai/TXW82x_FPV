@@ -496,7 +496,19 @@ void        hardware_init(uint8_t vcam)
 #if AUDIO_EN
     reg_auproc_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
     reg_wsola_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-    reg_aucoder_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
+    /* 音频编解码器改用普通 PSRAM 堆, 不再用 av_psram 独立堆.
+     *
+     * 原因: 回放时 av_psram 堆会被录像编码/回放帧缓冲占满, 实测
+     *   av_psram: malloc fail, size=6200 [LR:0x1009675c]  remain size:3904
+     *   aac_decode_s malloc fail!
+     *   pb: AAC decode msi init fail        (反复, 卡回放没有声音)
+     * 解码器状态约 6KB 申请不到, 解码器就建不起来.
+     *
+     * av_psram_heap.h:6 的条件编译决定了 av_psram_malloc 是独立小堆; 关掉
+     * 该分支时它本就是 _os_malloc_psram 的别名, 所以两者语义一致, 只是换成
+     * 容量大得多的通用 PSRAM 堆. 五个函数的签名与 AUCODE_* 完全匹配.
+     * 注意: 注册在初始化阶段完成, 之后 alloc/free 全程同一套, 不会跨堆释放. */
+    reg_aucoder_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
     aucode_mutex_init();
     audio_adc_init(AUSYS_AUAD, 8000, 1, 4, 0);
     audio_dac_init();

@@ -1,8 +1,9 @@
 /*******************************************************************************
- * 旧版 SD 卡录像 + 探鸽 P2P 回放实现
+ * H264 + AAC 单 MP4 卡录像 + 探鸽 P2P 回放实现
  *
- * 存储格式: video-only MP4 + 独立 G.711A .alaw 文件
+ * 本文件是单 MP4 方案的完整实现，音视频均从同一个 MP4 读写。
  *
+ * 录制时使用 .REC 临时后缀，关闭并通过后台校验后才发布为 .MP4。
  * 文件命名:  0:/REC/YYYYMMDD/HHMMSS_Eee_dd.MP4
  *                                   ↑ ↑
  *                              事件类型(ECEVENT) 时长(秒)
@@ -10,16 +11,25 @@
  *   0:/REC/20260423/153045_E00_60.MP4    连续录 60s
  *   0:/REC/20260423/153100_E01_30.MP4    motion 报警 30s
  *
- * 不维护常驻索引, 查询时按需扫描 SD 卡目录.
+ * 按天持久化录像索引，PSRAM 仅缓存一天；缺失或失效时回退目录扫描。
  * 回放跨文件只在当前日期目录内查找; 找不到下一个就 EndOfEvent.
  ******************************************************************************/
 
 #include "basic_include.h"
 #include "project_config.h"      /* 确保 __TXW826__ / __TXW828__ 宏可见 */
 
-#if !REC_MP4AAC_SINGLE_FILE
+#if REC_MP4AAC_SINGLE_FILE
 
+/* 试用开关：置 0 恢复原来的按需目录扫描，不影响旧录像模式。 */
+#ifndef REC_DAY_INDEX_ENABLE
+#define REC_DAY_INDEX_ENABLE 1
+#endif
+
+#include <stdio.h>               /* sscanf 等标准格式化函数的声明。 */
+#include <sys/time.h>
 #include "osal/string.h"
+#include "osal/irq.h"
+#include "osal/time.h"
 #include "lib/multimedia/msi.h"
 #include "lib/heap/av_heap.h"
 #include "lib/heap/av_psram_heap.h"
@@ -35,6 +45,7 @@
 #include "TgCloudCmd.h"  /* 42229 SDK Tcis_FormatExtStorageResp / TCI_CMD_FORMATEXTSTORAGE_RESP 在这里 */
 #include "ec_const.h"
 #include "rec_playback.h"
+#include "g711.h"                /* linear2alaw: 回放 PCM 转 G.711A 用 */
 
 /* 卡录像 H264 framebuff stype: 按芯片 + 主/子码流 4 个组合.
  * 由 project_config.h 的 REC_STREAM_TYPE 选 (0=主, 1=子, 默认 1):
@@ -63,8 +74,6 @@
 /* 旧别名: 之前代码用 REC_SUB_STREAM_STYPE, 保留作为向后兼容, 指向同一个值 */
 #define REC_SUB_STREAM_STYPE    REC_STREAM_STYPE
 
-/* 旧版独立音频文件使用的软件 G.711A 编码。 */
-extern uint8_t linear2alaw(short pcm);
 
 /* 系统不支持时区, 自定义全局时区偏移 (秒).
  * 语义: local_secs = utc_secs + _tg_timezone_, 北京时区 = 28800 */
@@ -85,10 +94,15 @@ extern long _tg_timezone_;
 /* =========================================================================
  * 外部依赖声明
  * ========================================================================= */
+extern volatile uint8_t time_sync_flag;  /* 提前声明，供文件恢复和格式化逻辑使用。 */
 extern struct msi *mp4_encode_msi2_init(const char *mp4_msi_name, uint8_t srcID, uint8_t filter_type,
                                         uint8_t rec_time, uint32_t audio_encode,
                                         struct file_process *file_process, uint8_t mode);
 extern struct msi *mp4_demux_msi_init(const char *msi_name, const char *filename);
+extern uint32_t mp4_demux_active_workers(void);
+extern uint32_t mp4_encode_active_workers(void);
+extern int fatfs_prepare_remount(void);
+extern int fatfs_recover_mount(void);
 
 /* =========================================================================
  * 全局状态
@@ -103,6 +117,77 @@ static volatile uint8_t g_rp_inited = 0;
 /* sd_format 进行中标志: 阻塞 rec_bootstrap_thread 的预删除循环, 防止跟 f_mkfs 抢 SD.
  * sd_format 入口设 1, 出口设 0; 预删除循环每轮开头检查. */
 static volatile uint8_t g_sd_formatting = 0;
+static volatile uint8_t g_sd_fault_pending;
+static volatile uint32_t g_sd_fault_epoch;
+static uint8_t g_sd_recovering;
+/* 驱动通知可能在磁盘锁内发生：这里只置标志，不等待、不操作文件。 */
+int sd_storage_app_managed(void) { return 1; }
+int sd_storage_app_busy(void) { return g_sd_formatting || g_sd_fault_pending; }
+void sd_storage_request_recovery(void)
+{
+    uint32_t flags = disable_irq();
+    g_sd_fault_pending = 1;
+    ++g_sd_fault_epoch;
+    enable_irq(flags);
+}
+/* 门锁只保护准入计数，不在锁内做 SD IO 或等待任务退出。格式化先封门再排空。 */
+static struct os_mutex g_sd_gate;
+static uint32_t g_sd_users;
+static uint32_t g_sd_generation;
+#define REC_TEMP_EXT ".REC"
+static int rec_sd_enter(void)
+{
+    if (!g_rp_inited) return -1;
+    os_mutex_lock(&g_sd_gate, osWaitForever);
+    if (g_sd_formatting || g_sd_fault_pending) {
+        os_mutex_unlock(&g_sd_gate);
+        return -1;
+    }
+    ++g_sd_users;
+    os_mutex_unlock(&g_sd_gate);
+    return 0;
+}
+static void rec_sd_leave(void)
+{
+    os_mutex_lock(&g_sd_gate, osWaitForever);
+    if (g_sd_users) --g_sd_users;
+    os_mutex_unlock(&g_sd_gate);
+}
+/* 本模块目录迭代保留错误码，读取失败不能伪装成目录结束。 */
+typedef struct { DIR dir; FILINFO info; FRESULT error; } rec_dir;
+static void *rec_dir_open(const char *path)
+{
+    rec_dir *d = _os_malloc_psram(sizeof(*d));
+    if (!d) return NULL;
+    d->error = f_opendir(&d->dir, path);
+    if (d->error != FR_OK) { _os_free_psram(d); return NULL; }
+    return d;
+}
+static void *rec_dir_read(void *ptr)
+{
+    rec_dir *d = ptr;
+    if (!d || g_sd_formatting || g_sd_fault_pending) { if (d) d->error = FR_NOT_READY; return NULL; }
+    d->error = f_readdir(&d->dir, &d->info);
+    return d->error == FR_OK && d->info.fname[0] ? &d->info : NULL;
+}
+static int rec_dir_failed(void *ptr) { return ptr && ((rec_dir *)ptr)->error != FR_OK; }
+static void rec_dir_close(void *ptr)
+{
+    if (!ptr) return;
+    f_closedir(&((rec_dir *)ptr)->dir);
+    _os_free_psram(ptr);
+}
+static int rec_has_ext(const char *name, const char *ext)
+{
+    int n = os_strlen(name);
+    return n >= 4 && os_strcasecmp(name + n - 4, ext) == 0;
+}
+static int rec_recover_file(const char *path);
+static void rec_pending_scan(void);
+static int sd_get_capacity_raw(uint32_t *total, uint32_t *free);
+static int pb_mp4_is_playable(const char *path);
+static int day_dir_has_mp4(const char *date_dir);
+static volatile uint8_t g_sync_base_valid;
 
 /* 正在删除的文件名/日期目录快照. rec_recycle_oldest 进入 osal_unlink 前设置,
  * 删完立即清空. scan_day_dir 在两遍扫描里都跳过该名字, 这样:
@@ -200,37 +285,113 @@ static volatile uint8_t  g_unsync_need_migrate = 0;
  * 真正的 UNSYNC 文件迁移交给 rec_bootstrap_thread 异步做. */
 void rec_on_time_synced(uint32_t utc)
 {
-    if (g_sync_pending) return;   /* 已记过, 防重复 (set_time 可能被多次调) */
+    if (g_sync_base_valid) return; /* 同一开机会话只固定一次映射，迁移期间不被再次校时改写。 */
     g_sync_utc      = utc;
     g_sync_boot_sec = (uint32_t)(os_jiffies_to_msecs(os_jiffies()) / 1000);
     g_sync_pending  = 1;
+    g_sync_base_valid = 1;
 }
 
 /* MSI */
-static struct msi *g_rec_msi     = NULL;   /* MP4 编码 msi（仅视频轨） */
+static struct msi *g_rec_msi     = NULL;   /* MP4 编码/复用 msi */
 static struct msi *g_rec_h264    = NULL;   /* 上游 AUTO_H264 */
-static struct msi *g_rec_alaw    = NULL;   /* PCM → G.711A 转码 + 写 .alaw 文件 msi */
+static struct msi *g_rec_aac     = NULL;   /* S_AUADC → AAC 编码器 */
+static uint8_t     g_rec_aac_attached = 0;
 
-/* 音频独立文件方案说明:
- *   录像时 MP4 只存视频轨, 音频独立存成 .alaw 文件, 和 mp4 同名不同后缀.
- *   8kHz mono × 1B = 8KB/s = 480KB/min, 和 mp4 (视频) 并列存储.
- *   回放时 pb_thread 同时打开 mp4 (视频) 和 .alaw (音频), 按视频 ts 节奏各自读取.
- *   好处: 避免 AAC 解码器连续调用的状态问题, 音频直接 G711A 透传给 APP 不再转码. */
-#define REC_AUDIO_EXT_NAME   ".alaw"       /* 音频文件扩展名 */
-static void *g_rec_alaw_fp = NULL;         /* 当前 .alaw 写入文件句柄 (os_mutex_lock 保护) */
-static struct os_mutex g_rec_alaw_lock;    /* 保护 g_rec_alaw_fp 切换 */
-static uint8_t g_rec_alaw_lock_inited = 0;
+/* 录像侧 AAC encoder 生命周期。只供本文件的单 MP4 方案使用。 */
+static int rec_aac_prepare(void)
+{
+    AUENC_INIT auenc_init;
+    struct msi *adc;
+    uint32_t samplerate;
+
+    if (g_rec_aac)
+        return RET_OK;
+
+    adc = get_auadc_msi(AUSYS_AUAD);
+    if (!adc) {
+        os_printf(KERN_ERR "rec_mp4aac: audio ADC msi not ready\n");
+        return RET_ERR;
+    }
+
+    samplerate = audio_adc_get_samplerate(AUSYS_AUAD);
+    /* 42229 miniMP4 的 AAC sample duration 固定为 128ms，即 1024/8000。
+     * 非 8kHz 时继续录像会造成音频时间轴错误，因此明确拒绝启动。 */
+    if (samplerate != 8000) {
+        os_printf(KERN_ERR "rec_mp4aac: unsupported samplerate=%u, require 8000Hz\n",
+                  (unsigned)samplerate);
+        return RET_ERR;
+    }
+
+    os_memset(&auenc_init, 0, sizeof(auenc_init));
+    auenc_init.destroy_self = 0;
+    auenc_init.src_msi = adc;
+
+    g_rec_aac = audio_encode_init(AAC_ENC, samplerate, &auenc_init);
+    if (!g_rec_aac) {
+        os_printf(KERN_ERR "rec_mp4aac: AAC encoder init failed\n");
+        return RET_ERR;
+    }
+
+    g_rec_aac_attached = 0;
+    os_printf(KERN_INFO "rec_mp4aac: AAC encoder ready, samplerate=%u\n",
+              (unsigned)samplerate);
+    return RET_OK;
+}
+
+static int rec_aac_attach(const char *mp4_msi_name)
+{
+    int ret;
+
+    if (!g_rec_aac || !mp4_msi_name)
+        return RET_ERR;
+    if (g_rec_aac_attached)
+        return RET_OK;
+
+    ret = audio_code_add_output(g_rec_aac, mp4_msi_name);
+    if (ret != RET_OK) {
+        os_printf(KERN_ERR "rec_mp4aac: attach AAC -> %s failed, ret=%d\n",
+                  mp4_msi_name, ret);
+        return ret;
+    }
+
+    g_rec_aac_attached = 1;
+    os_printf(KERN_INFO "rec_mp4aac: AAC attached to %s\n", mp4_msi_name);
+    return RET_OK;
+}
+
+static void rec_aac_stop(const char *mp4_msi_name)
+{
+    if (!g_rec_aac)
+        return;
+
+    if (g_rec_aac_attached && mp4_msi_name) {
+        audio_code_del_output(g_rec_aac, mp4_msi_name);
+        g_rec_aac_attached = 0;
+    }
+
+    audio_encode_deinit(g_rec_aac);
+    g_rec_aac = NULL;
+    os_printf(KERN_INFO "rec_mp4aac: AAC encoder stopped\n");
+}
 
 /* 当前正在录的文件信息 (用于报警延长/标记事件类型) */
 static struct {
-    char      fname[FILE_NAME_LEN + 1];    /* 当前文件名 (不含路径) */
+    char      fname[24];                  /* 兼容较长的 UNSYNC 开机秒文件名。 */
     char      fpath[96];                   /* 当前完整路径 */
-    char      alaw_fpath[96];              /* 对应 .alaw 文件完整路径 */
     uint32_t  t_start;                     /* 开始时刻 UTC */
     uint8_t   event;                       /* 事件类型 */
     uint8_t   duration_sec;                /* 计划时长 */
     uint8_t   extended;                    /* 是否已经延长过 */
 } g_curfile;
+
+/* 已关闭 MP4 的时长校正交给 bootstrap 低优先级任务。
+ * 编码线程只投递路径，不在切片点读 mdhd/改名，避免 H264 堆积。 */
+#define REC_FINALIZE_SLOTS  4
+static volatile uint8_t g_finalize_pending[REC_FINALIZE_SLOTS] = {0};
+static char             g_finalize_path[REC_FINALIZE_SLOTS][96] = {{0}};
+/* stop 与 mp4_encode 真正收尾是异步的；收尾期间仍需将该文件视为“正在写”。 */
+static volatile uint8_t g_rec_file_closing = 0;
 
 /* =========================================================================
  * 工具函数
@@ -245,6 +406,7 @@ static int parse_filename(const char *name, uint8_t *event, uint16_t *duration,
         return -1;
     if (sscanf(name, "%02d%02d%02d_E%02d_%d", &h, &m, &s, &e, &d) != 5)
         return -1;
+    if (h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59 || e < 0 || e > 99 || d <= 0 || d > 65535) return -1;
     if (hh) *hh = h;
     if (mm) *mm = m;
     if (ss) *ss = s;
@@ -261,6 +423,7 @@ static int parse_dirname(const char *name, uint16_t *year, uint8_t *mon, uint8_t
         return -1;
     if (sscanf(name, "%04d%02d%02d", &y, &mm, &dd) != 3)
         return -1;
+    if (y < 2020 || y > 2099 || mm < 1 || mm > 12 || dd < 1 || dd > 31) return -1;
     if (year) *year = y;
     if (mon) *mon = mm;
     if (day) *day = dd;
@@ -327,17 +490,269 @@ static uint32_t tmval_to_utc(uint16_t y, uint8_t mon, uint8_t day,
  *     新结构 12B, 1440 条 ≈ 17KB, 省 23KB. */
 typedef struct {
     uint32_t t_start;       /* UTC 秒 */
-    uint16_t duration;      /* 秒 */
+    uint16_t duration;      /* 文件名中的时长 (文件关闭时已校正为真实时长) */
     uint8_t  event;
     uint8_t  hh, mm, ss;    /* 重建文件名用 */
 } scan_item_t;
+
+static FRESULT rec_idx_change(const char *src, const char *dest);
+static void rec_idx_empty_day(const char *date);
 
 /* 从 scan_item_t 重建文件名字符串 "HHMMSS_Eee_dd.MP4".
  * buf 至少 FILE_NAME_LEN+1 字节 */
 static void build_fname_from_item(const scan_item_t *it, char *buf, int buf_sz)
 {
     os_snprintf(buf, buf_sz, "%02u%02u%02u_E%02u_%u%s",
-                it->hh, it->mm, it->ss, it->event, it->duration, REC_EXT_NAME);
+                it->hh, it->mm, it->ss, it->event,
+                it->duration, REC_EXT_NAME);
+}
+
+/* MP4 box 整数均为大端。关闭后的单文件校正只进入
+ * moov/trak/mdia 三层并读取 mdhd，不扫描 mdat 视频数据。 */
+static uint32_t rec_mp4_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
+}
+
+static uint64_t rec_mp4_be64(const uint8_t *p)
+{
+    return ((uint64_t)rec_mp4_be32(p) << 32) | rec_mp4_be32(p + 4);
+}
+
+static int rec_mp4_box_is(const uint8_t *type, const char *name)
+{
+    return type[0] == (uint8_t)name[0] && type[1] == (uint8_t)name[1] &&
+           type[2] == (uint8_t)name[2] && type[3] == (uint8_t)name[3];
+}
+
+/* 递归查找所有 mdhd，取音视频轨中较长的一条作为文件真实覆盖时长。 */
+static void rec_mp4_scan_mdhd(F_FILE *fp, uint32_t begin, uint32_t end,
+                              uint8_t depth, uint64_t *max_duration_ms)
+{
+    uint32_t pos = begin;
+
+    if (!fp || !max_duration_ms || depth > 3)
+        return;
+
+    while (pos <= end && end - pos >= 8U) {
+        uint8_t hdr[8];
+        uint32_t box_size;
+        uint32_t box_end;
+
+        if (osal_fseek(fp, pos) != FR_OK || osal_fread(hdr, 1, sizeof(hdr), fp) != sizeof(hdr))
+            return;
+
+        box_size = rec_mp4_be32(hdr);
+        if (box_size == 0U)
+            box_end = end;
+        else {
+            /* 本设备 FatFS/文件偏移均为 32 位，不生成 extended-size box。 */
+            if (box_size == 1U || box_size < 8U || box_size > end - pos)
+                return;
+            box_end = pos + box_size;
+        }
+
+        if (rec_mp4_box_is(hdr + 4, "mdhd")) {
+            uint8_t body[32];
+            uint32_t body_len = box_end - (pos + 8U);
+            uint32_t timescale = 0;
+            uint64_t duration = 0;
+
+            if (body_len > sizeof(body)) body_len = sizeof(body);
+            if (body_len >= 20U && osal_fread(body, 1, body_len, fp) == body_len) {
+                if (body[0] == 0 && body_len >= 20U) {
+                    timescale = rec_mp4_be32(body + 12);
+                    duration  = rec_mp4_be32(body + 16);
+                } else if (body[0] == 1 && body_len >= 32U) {
+                    timescale = rec_mp4_be32(body + 20);
+                    duration  = rec_mp4_be64(body + 24);
+                }
+                if (timescale != 0U && duration != 0U) {
+                    uint64_t duration_ms = (duration * 1000ULL + timescale - 1U) / timescale;
+                    if (duration_ms > *max_duration_ms)
+                        *max_duration_ms = duration_ms;
+                }
+            }
+        } else if (rec_mp4_box_is(hdr + 4, "moov") ||
+                   rec_mp4_box_is(hdr + 4, "trak") ||
+                   rec_mp4_box_is(hdr + 4, "mdia")) {
+            rec_mp4_scan_mdhd(fp, pos + 8U, box_end, depth + 1U,
+                              max_duration_ms);
+        }
+
+        if (box_end <= pos)
+            return;
+        pos = box_end;
+    }
+}
+
+/* 成功返回 0；损坏、未完成或无 mdhd 时由调用者继续使用文件名时长。 */
+static int rec_mp4_get_duration_sec(const char *path, uint16_t *duration_sec)
+{
+    F_FILE *fp;
+    uint32_t file_size;
+    uint64_t duration_ms = 0;
+    uint64_t sec;
+
+    if (!path || !duration_sec)
+        return -1;
+
+    fp = osal_fopen(path, "rb");
+    if (!fp)
+        return -1;
+
+    file_size = osal_fsize(fp);
+    if (file_size >= 8U)
+        rec_mp4_scan_mdhd(fp, 0, file_size, 0, &duration_ms);
+    osal_fclose(fp);
+
+    /* 向上取整到秒，避免毫秒截断人为制造 1 秒列表缝隙。 */
+    sec = (duration_ms + 999ULL) / 1000ULL;
+    if (sec == 0U || sec > 0xffffU)
+        return -1;
+
+    *duration_sec = (uint16_t)sec;
+    return 0;
+}
+
+/* 编码线程投递一个已 fclose 的文件。正常每 60s 才产生一次，
+ * bootstrap 每 3s 消费，两个槽位还能覆盖“刚切片立即停录”；若 SD 卡持续卡顿，
+ * 宁可保留新文件的计划时长，也不阻塞 mp4_encode 线程。 */
+static void rec_finalize_enqueue(const char *path)
+{
+    uint8_t i;
+
+    if (!path || !path[0])
+        return;
+    for (i = 0; i < REC_FINALIZE_SLOTS; i++)
+        if (g_finalize_pending[i] && !os_strcmp(g_finalize_path[i], path)) return;
+    for (i = 0; i < REC_FINALIZE_SLOTS; i++) {
+        if (!g_finalize_pending[i]) {
+            os_strncpy(g_finalize_path[i], path, sizeof(g_finalize_path[i]) - 1);
+            g_finalize_path[i][sizeof(g_finalize_path[i]) - 1] = '\0';
+            g_finalize_pending[i] = 1;       /* 路径写完后再发布 */
+            return;
+        }
+    }
+    os_printf(KERN_WARNING "rec_finalize: queue full, background scan will retry: %s\n", path);
+}
+
+/* 只由 rec_bootstrap_thread 调用：读取刚关闭 MP4 的 mdhd，
+ * 再将 HHMMSS_Eee_60.MP4 改成 HHMMSS_Eee_<真实秒数>.MP4。
+ * 列表查询便可继续像旧模式一样只解析文件名。 */
+#include "rec_mp4_recover.h"
+
+/* 只有本机临时录像才修复/删除。IO 失败保留，严重结构错误在重复确认后才删除。 */
+static int rec_recover_file(const char *path)
+{
+    if (g_sd_formatting || !rec_has_ext(path, REC_TEMP_EXT)) return -1;
+    if ((g_rec_msi || g_rec_file_closing) && !os_strcmp(path, g_curfile.fpath)) return -1;
+    int ret = rec_fix_index(path);
+    if (ret == 0) {
+        uint32_t total = 0;
+        /* 再打开确认一次，避免单次读卡异常被误分类；卡状态失败也不能删除。 */
+        if (g_sd_formatting || sd_get_capacity_raw(&total, NULL) || !total) return -1;
+        ret = rec_fix_index(path);
+        if (ret == 0 && !g_sd_formatting) {
+            FRESULT res = osal_unlink(path);
+            os_printf(KERN_WARNING "rec_recover: invalid index, delete res=%d %s\n", res, path);
+            return res == FR_OK ? 0 : -1;
+        }
+    }
+    if (ret != 1 || g_sd_formatting) return -1;
+    uint16_t dur;
+    if (rec_mp4_get_duration_sec(path, &dur) || !dur || dur > 99U) return -1;
+    char dest[96];
+    const char *slash = os_strrchr(path, '/');
+    const char *name = slash ? slash + 1 : path;
+    unsigned event, old_dur, boot;
+    if (os_strstr(path, REC_UNSYNC_DIR) == path) {
+        if (sscanf(name, "%u_E%02u_%u", &boot, &event, &old_dur) != 3) return -1;
+        os_snprintf(dest, sizeof(dest), "%s/%u_E%02u_%02u.MP4", REC_UNSYNC_DIR, boot, event, dur);
+    } else {
+        uint8_t ev, h, m, s; uint16_t old;
+        if (parse_filename(name, &ev, &old, &h, &m, &s)) return -1;
+        int prefix = slash ? (int)(slash - path + 1) : 0;
+        if (prefix + 18 >= sizeof(dest)) return -1;
+        os_memcpy(dest, path, prefix);
+        os_snprintf(dest + prefix, sizeof(dest) - prefix, "%02u%02u%02u_E%02u_%02u.MP4", h, m, s, ev, dur);
+    }
+    if (g_sd_formatting) return -1;
+    FRESULT res = rec_idx_change(path, dest);
+    os_printf(KERN_INFO "rec_recover: publish res=%d %s -> %s\n", res, path, dest);
+    /* 目标已存在时不覆盖、不删除源文件，交由后续人工核查。 */
+    if (res == FR_OK && os_strstr(dest, REC_UNSYNC_DIR) == dest && time_sync_flag)
+        g_unsync_need_migrate = 1;
+    return res == FR_OK ? 1 : -1;
+}
+static void rec_finalize_pending_run(void)
+{
+    if (g_sd_formatting) return;
+    for (unsigned i = 0; i < REC_FINALIZE_SLOTS; ++i) {
+        if (g_finalize_pending[i] != 1) continue;
+        char path[96];
+        uint32_t flags = disable_irq();
+        os_strncpy(path, g_finalize_path[i], sizeof(path));
+        g_finalize_pending[i] = 2;
+        enable_irq(flags);
+        rec_recover_file(path);
+        /* 失败文件仍留在卡上，周期扫描会重试，队列无需无限占用。 */
+        g_finalize_pending[i] = 0;
+        break;
+    }
+}
+
+/* 后台每次只恢复一个残留临时文件。游标跨轮推进，坏卡/重名文件不会饿死其它文件。 */
+static void rec_pending_scan(void)
+{
+    static char cursor[96];
+    static uint32_t generation = 0xffffffffU;
+    if (generation != g_sd_generation) { cursor[0] = 0; generation = g_sd_generation; }
+    if (g_sd_formatting) return;
+    char best[96] = {0};
+    void *root = rec_dir_open(REC_ROOT_PATH);
+    if (!root) return;
+    void *ent;
+    while ((ent = rec_dir_read(root)) != NULL) {
+        char date[16];
+        const char *name = osal_dirent_name(ent);
+        uint16_t y; uint8_t m, d;
+        if (!osal_dirent_isdir(ent) || os_strlen(name) >= sizeof(date)) continue;
+        int unsync = !os_strcmp(name, "UNSYNC");
+        if (!unsync && parse_dirname(name, &y, &m, &d)) continue;
+        os_strcpy(date, name);
+        char folder[48];
+        os_snprintf(folder, sizeof(folder), "%s/%s", REC_ROOT_PATH, date);
+        void *dir = rec_dir_open(folder);
+        if (!dir) { rec_dir_close(root); return; }
+        void *item;
+        while ((item = rec_dir_read(dir)) != NULL) {
+            const char *fn = osal_dirent_name(item);
+            if (osal_dirent_isdir(item) || !rec_has_ext(fn, REC_TEMP_EXT) ||
+                os_strlen(fn) >= 24U) continue;
+            uint8_t ev, h, mm, ss; uint16_t len;
+            unsigned boot, event, duration;
+            if (unsync) {
+                if (sscanf(fn, "%u_E%02u_%u", &boot, &event, &duration) != 3) continue;
+            } else if (parse_filename(fn, &ev, &len, &h, &mm, &ss)) continue;
+            char path[96];
+            os_snprintf(path, sizeof(path), "%s/%s", folder, fn);
+            if ((g_rec_msi || g_rec_file_closing) && !os_strcmp(path, g_curfile.fpath)) continue;
+            if (os_strcmp(path, cursor) <= 0) continue;
+            if (!best[0] || os_strcmp(path, best) < 0) os_strcpy(best, path);
+        }
+        int failed = rec_dir_failed(dir);
+        rec_dir_close(dir);
+        if (failed) { rec_dir_close(root); return; }
+    }
+    int failed = rec_dir_failed(root);
+    rec_dir_close(root);
+    if (failed) return;
+    if (best[0]) {
+        os_strcpy(cursor, best);
+        rec_recover_file(best);
+    } else cursor[0] = 0;
 }
 
 static int cmp_scan_item(const void *a, const void *b)
@@ -355,7 +770,8 @@ static int cmp_scan_item(const void *a, const void *b)
  * @param out_cnt   [out] 条目数
  * @return 0 成功
  */
-static int scan_day_dir(const char *date_dir, scan_item_t **out_arr, uint32_t *out_cnt)
+static int scan_day_dir_raw(const char *date_dir, scan_item_t **out_arr, uint32_t *out_cnt,
+                            int skip_recycling)
 {
     *out_arr = NULL;
     *out_cnt = 0;
@@ -363,13 +779,17 @@ static int scan_day_dir(const char *date_dir, scan_item_t **out_arr, uint32_t *o
     char sub_path[64];
     os_snprintf(sub_path, sizeof(sub_path), "%s/%s", REC_ROOT_PATH, date_dir);
 
-    void *d = osal_opendir(sub_path);
-    if (!d) return -1;
+    void *d = rec_dir_open(sub_path);
+    if (!d) {
+        FILINFO info;
+        FRESULT res = f_stat(sub_path, &info);
+        return res == FR_NO_FILE || res == FR_NO_PATH ? 0 : -1;
+    }
 
     uint16_t y;
     uint8_t  mon, day;
     if (parse_dirname(date_dir, &y, &mon, &day) != 0) {
-        osal_closedir(d);
+        rec_dir_close(d);
         return -1;
     }
 
@@ -381,7 +801,7 @@ static int scan_day_dir(const char *date_dir, scan_item_t **out_arr, uint32_t *o
      * !!! g_curfile 仅在录像模式激活时有效; 未激活时 fname 为空字符串 */
     char cur_fname_snapshot[FILE_NAME_LEN + 1] = {0};
     char cur_fpath_snapshot[96] = {0};
-    if (g_rec_msi) {
+    if (g_rec_msi || g_rec_file_closing) {
         os_strncpy(cur_fname_snapshot, g_curfile.fname, sizeof(cur_fname_snapshot) - 1);
         os_strncpy(cur_fpath_snapshot, g_curfile.fpath, sizeof(cur_fpath_snapshot) - 1);
     }
@@ -398,13 +818,13 @@ static int scan_day_dir(const char *date_dir, scan_item_t **out_arr, uint32_t *o
     /* 先数一遍 */
     uint32_t cnt = 0;
     void *fno;
-    while ((fno = osal_readdir(d)) != NULL) {
+    while ((fno = rec_dir_read(d)) != NULL) {
         char *fname = osal_dirent_name(fno);
         if (!fname || osal_dirent_isdir(fno)) continue;
         int nlen = os_strlen(fname);
         if (nlen < 5 || os_strcasecmp(fname + nlen - 4, REC_EXT_NAME) != 0) continue;
-        uint8_t ev; uint16_t dur; uint8_t hh, mm, ss;
-        if (parse_filename(fname, &ev, &dur, &hh, &mm, &ss) != 0) continue;
+        uint8_t ev; uint16_t name_dur; uint8_t hh, mm, ss;
+        if (parse_filename(fname, &ev, &name_dur, &hh, &mm, &ss) != 0) continue;
         /* 过滤正在录的文件: fname 匹配 + date_dir 隶属 fpath */
         if (cur_fname_snapshot[0] &&
             os_strcmp(fname, cur_fname_snapshot) == 0 &&
@@ -412,14 +832,16 @@ static int scan_day_dir(const char *date_dir, scan_item_t **out_arr, uint32_t *o
             continue;
         }
         /* 过滤正在被预删除的文件 (date_dir + fname 双匹配, 防误伤跨日同名) */
-        if (recy_fname_snapshot[0] &&
+        if (skip_recycling && recy_fname_snapshot[0] &&
             os_strcmp(fname, recy_fname_snapshot) == 0 &&
             os_strcmp(date_dir, recy_dir_snapshot) == 0) {
             continue;
         }
         cnt++;
     }
-    osal_closedir(d);
+    int scan_failed = rec_dir_failed(d);
+    rec_dir_close(d);
+    if (scan_failed) return -1;
 
     if (cnt == 0) return 0;
 
@@ -427,37 +849,39 @@ static int scan_day_dir(const char *date_dir, scan_item_t **out_arr, uint32_t *o
     if (!arr) return -1;
 
     /* 第二遍收集 */
-    d = osal_opendir(sub_path);
+    d = rec_dir_open(sub_path);
     if (!d) { RP_FREE(arr); return -1; }
 
     uint32_t idx = 0;
-    while ((fno = osal_readdir(d)) != NULL && idx < cnt) {
+    while ((fno = rec_dir_read(d)) != NULL && idx < cnt) {
         char *fname = osal_dirent_name(fno);
         if (!fname || osal_dirent_isdir(fno)) continue;
         int nlen = os_strlen(fname);
         if (nlen < 5 || os_strcasecmp(fname + nlen - 4, REC_EXT_NAME) != 0) continue;
-        uint8_t ev; uint16_t dur; uint8_t hh, mm, ss;
-        if (parse_filename(fname, &ev, &dur, &hh, &mm, &ss) != 0) continue;
+        uint8_t ev; uint16_t name_dur; uint8_t hh, mm, ss;
+        if (parse_filename(fname, &ev, &name_dur, &hh, &mm, &ss) != 0) continue;
         /* 同 pass1 过滤规则, 保持两遍一致 */
         if (cur_fname_snapshot[0] &&
             os_strcmp(fname, cur_fname_snapshot) == 0 &&
             os_strstr(cur_fpath_snapshot, date_dir) != NULL) {
             continue;
         }
-        if (recy_fname_snapshot[0] &&
+        if (skip_recycling && recy_fname_snapshot[0] &&
             os_strcmp(fname, recy_fname_snapshot) == 0 &&
             os_strcmp(date_dir, recy_dir_snapshot) == 0) {
             continue;
         }
-        arr[idx].t_start  = tmval_to_utc(y, mon, day, hh, mm, ss);
-        arr[idx].duration = dur;
-        arr[idx].event    = ev;
-        arr[idx].hh       = hh;
-        arr[idx].mm       = mm;
-        arr[idx].ss       = ss;
+        arr[idx].t_start      = tmval_to_utc(y, mon, day, hh, mm, ss);
+        arr[idx].duration     = name_dur;
+        arr[idx].event        = ev;
+        arr[idx].hh           = hh;
+        arr[idx].mm           = mm;
+        arr[idx].ss           = ss;
         idx++;
     }
-    osal_closedir(d);
+    scan_failed = rec_dir_failed(d);
+    rec_dir_close(d);
+    if (scan_failed) { RP_FREE(arr); return -1; }
 
     if (idx > 1)
         qsort(arr, idx, sizeof(scan_item_t), cmp_scan_item);
@@ -465,6 +889,26 @@ static int scan_day_dir(const char *date_dir, scan_item_t **out_arr, uint32_t *o
     *out_arr = arr;
     *out_cnt = idx;
     return 0;
+}
+
+static int scan_day_dir(const char *date, scan_item_t **arr, uint32_t *count)
+{
+    return scan_day_dir_raw(date, arr, count, 1);
+}
+
+/* 只在本编译单元展开，避免修改 CDK 自动生成的工程列表。 */
+#include "rec_day_index.h"
+
+/* 仅回放扫描做有限重试，不能把扫描失败当成录像列表为空。 */
+static int pb_scan_day_retry(const char *date_dir, scan_item_t **arr, uint32_t *cnt)
+{
+    for (int n = 0; n < 3; ++n) {
+        if (scan_day_dir(date_dir, arr, cnt) == 0) return 0;
+        os_printf(KERN_WARNING "pb: directory scan failed %s (attempt %d/3)\n",
+                  date_dir, n + 1);
+        if (n < 2) os_sleep_ms(100);
+    }
+    return -1;
 }
 
 /* 在指定日期目录内查找 "下一个文件".
@@ -479,17 +923,17 @@ static int find_next_in_day(const char *date_dir, const char *cur_fname,
 {
     scan_item_t *arr = NULL;
     uint32_t cnt = 0;
-    if (scan_day_dir(date_dir, &arr, &cnt) != 0 || cnt == 0) {
+    if (pb_scan_day_retry(date_dir, &arr, &cnt) != 0 || cnt == 0) {
         if (arr) RP_FREE(arr);
         return -1;
     }
     int  ret = -1;
     char tmp[FILE_NAME_LEN + 1];
-    for (uint32_t i = 0; i < cnt - 1; i++) {
+    for (uint32_t i = 0; i < cnt; i++) {
         build_fname_from_item(&arr[i], tmp, sizeof(tmp));
-        if (os_strcmp(tmp, cur_fname) == 0) {
-            build_fname_from_item(&arr[i + 1], next_fname, FILE_NAME_LEN + 1);
-            *next_t0 = arr[i + 1].t_start;
+        if (os_strcmp(tmp, cur_fname) > 0) {
+            build_fname_from_item(&arr[i], next_fname, FILE_NAME_LEN + 1);
+            *next_t0 = arr[i].t_start;
             ret = 0;
             break;
         }
@@ -503,6 +947,15 @@ static int find_next_in_day(const char *date_dir, const char *cur_fname,
  * ========================================================================= */
 
 int sd_get_capacity(uint32_t *total, uint32_t *free)
+{
+    if (total) *total = 0;
+    if (free) *free = 0;
+    if (rec_sd_enter() != 0) return g_sd_formatting ? -3 : -1;
+    int ret = sd_get_capacity_raw(total, free);
+    rec_sd_leave();
+    return ret;
+}
+static int sd_get_capacity_raw(uint32_t *total, uint32_t *free)
 {
     uint32_t tot_mb = 0, free_mb = 0;
     /* osal_fatfsfree 内部已做 扇区 / 2 / 1024 换算, 返回单位就是 MB */
@@ -522,7 +975,8 @@ int sd_get_capacity(uint32_t *total, uint32_t *free)
 /* 真正的回收逻辑, 必须在 g_recycle_lock 持锁状态下调用. */
 static int rec_recycle_oldest_locked(void)
 {
-    void *root = osal_opendir(REC_ROOT_PATH);
+    if (g_sd_formatting || rec_pb_is_active()) return -1;
+    void *root = rec_dir_open(REC_ROOT_PATH);
     if (!root) {
         os_printf(KERN_ERR "rec_recycle: opendir(%s) fail, REC root not exist\n", REC_ROOT_PATH);
         return -1;
@@ -531,7 +985,7 @@ static int rec_recycle_oldest_locked(void)
     char oldest_dir[16] = {0};
     void *fno;
     uint32_t total_dirs = 0, valid_date_dirs = 0;
-    while ((fno = osal_readdir(root)) != NULL) {
+    while ((fno = rec_dir_read(root)) != NULL) {
         char *name = osal_dirent_name(fno);
         if (!name || !osal_dirent_isdir(fno)) continue;
         total_dirs++;
@@ -541,12 +995,17 @@ static int rec_recycle_oldest_locked(void)
             continue;
         }
         valid_date_dirs++;
+        int has = day_dir_has_mp4(name);
+        if (has < 0) { rec_dir_close(root); return -1; }
+        if (!has) continue; /* 只探测是否存在，避免每删一段就排序所有日期的录像。 */
         if (oldest_dir[0] == '\0' || os_strcmp(name, oldest_dir) < 0) {
             os_strncpy(oldest_dir, name, sizeof(oldest_dir) - 1);
             oldest_dir[sizeof(oldest_dir) - 1] = '\0';
         }
     }
-    osal_closedir(root);
+    int root_failed = rec_dir_failed(root);
+    rec_dir_close(root);
+    if (root_failed) return -1;
 
     if (oldest_dir[0] == '\0') {
         os_printf(KERN_ERR "rec_recycle: no YYYYMMDD dir under %s "
@@ -555,16 +1014,10 @@ static int rec_recycle_oldest_locked(void)
         return -1;
     }
 
-    /* 按"单文件粒度"清理 (按需删 - 删一个看一下 free 够不够):
-     *   1) 目录里有 MP4 → 删最旧的 1 个 MP4 + 同名 .alaw, return 0
-     *      (本日还有 MP4 时, 下次调用继续删本日下一个; 全删完了下次调用 oldest 切到次旧日)
-     *   2) 目录里没 MP4 但有孤儿 .alaw → 一次性全删 + 删空目录, return 0
-     *      (孤儿 .alaw 单独留着没意义)
-     *   3) 目录本来就空 → 删空目录, return -1
-     */
+    /* 每次只删除最旧的一段已发布 MP4，临时文件交由恢复任务处理。 */
     scan_item_t *arr = NULL; uint32_t cnt = 0;
     if (scan_day_dir(oldest_dir, &arr, &cnt) == 0 && cnt > 0) {
-        /* === 路径 1: 删最旧的 1 个 MP4 + 同名 .alaw === */
+        /* === 路径 1: 删除最旧的一个 MP4 === */
         char full_path[96];
         char fn0[FILE_NAME_LEN + 1];
         build_fname_from_item(&arr[0], fn0, sizeof(fn0));
@@ -578,31 +1031,21 @@ static int rec_recycle_oldest_locked(void)
         os_strncpy((char *)g_recycling_fname,    fn0,
                    sizeof(g_recycling_fname)    - 1);
 
-        FRESULT res = osal_unlink(full_path);
+        FRESULT res = rec_idx_change(full_path, NULL);
         if (res == FR_OK) {
             os_printf(KERN_INFO "rec_recycle: deleted %s\n", full_path);
         } else {
             os_printf(KERN_ERR "rec_recycle: unlink %s fail res=%d\n", full_path, res);
         }
-        /* 同步删除对应 .alaw 文件 (如果存在) */
-        int plen = os_strlen(full_path);
-        int elen = os_strlen(REC_EXT_NAME);
-        if (plen > elen) {
-            char alaw_path[96];
-            os_snprintf(alaw_path, sizeof(alaw_path), "%.*s%s",
-                        plen - elen, full_path, REC_AUDIO_EXT_NAME);
-            osal_unlink(alaw_path);    /* 忽略错误: 可能本来就没 .alaw */
-        }
-
         /* 清空"正在删除"快照, 让 scan_day_dir 立即恢复正常 */
         g_recycling_fname[0]    = '\0';
         g_recycling_date_dir[0] = '\0';
 
-        /* 这是最后一个 MP4? 删完目录可能空了, 但目录里可能还有非 IPC 文件,
-         * 这里不做目录清理, 留给"路径 2"在下次调用中处理 */
-        if (cnt == 1) {
+        /* 删除最后一段后只尝试移除空目录，目录里其它文件不受影响。 */
+        if (res == FR_OK && cnt == 1) {
             char full_dir[64];
             os_snprintf(full_dir, sizeof(full_dir), "%s/%s", REC_ROOT_PATH, oldest_dir);
+            rec_idx_empty_day(oldest_dir);
             osal_unlink_dir(full_dir, 0);   /* 空了才会删成功, 不空就保留 */
         }
         RP_FREE(arr);
@@ -610,36 +1053,8 @@ static int rec_recycle_oldest_locked(void)
     }
     if (arr) RP_FREE(arr);
 
-    /* === 路径 2/3: 目录里没 MP4, 扫整个目录处理孤儿 / 判空 === */
-    char full_dir[64];
-    os_snprintf(full_dir, sizeof(full_dir), "%s/%s", REC_ROOT_PATH, oldest_dir);
-    void *d2 = osal_opendir(full_dir);
-    uint32_t purged = 0;
-    if (d2) {
-        void *fno2;
-        while ((fno2 = osal_readdir(d2)) != NULL) {
-            char *fn2 = osal_dirent_name(fno2);
-            if (!fn2 || osal_dirent_isdir(fno2)) continue;
-            if (fn2[0] == '.' && (fn2[1] == 0 || (fn2[1] == '.' && fn2[2] == 0))) continue;
-            char fp[96];
-            os_snprintf(fp, sizeof(fp), "%s/%s", full_dir, fn2);
-            if (osal_unlink(fp) == FR_OK) {
-                purged++;
-                os_printf(KERN_INFO "rec_recycle: purged orphan %s\n", fp);
-            } else {
-                os_printf(KERN_ERR "rec_recycle: unlink %s fail\n", fp);
-            }
-        }
-        osal_closedir(d2);
-    }
-    osal_unlink_dir(full_dir, 0);   /* 空了删目录 */
-    if (purged > 0) {
-        os_printf(KERN_INFO "rec_recycle: oldest dir %s purged %u orphan(s) + removed dir\n",
-                  oldest_dir, purged);
-        return 0;   /* 删了东西, 让 bootstrap 继续轮询容量 */
-    }
-    os_printf(KERN_WARNING "rec_recycle: oldest dir %s empty, removed\n", oldest_dir);
-    return -1;      /* 目录空, 没腾出空间 */
+    /* 没有可回收 MP4 不代表目录为空，不能把当前录像、临时文件或未知文件当垃圾。 */
+    return -1;
 }
 
 /* 对外入口: 加 mutex 串行化, 避免预删除线程和 mp4_encode_thread 兜底删除并发.
@@ -651,7 +1066,7 @@ static int rec_recycle_oldest(void)
         return rec_recycle_oldest_locked();
     }
     os_mutex_lock(&g_recycle_lock, osWaitForever);
-    int ret = rec_recycle_oldest_locked();
+    int ret = (g_sd_formatting || rec_pb_is_active()) ? -1 : rec_recycle_oldest_locked();
     os_mutex_unlock(&g_recycle_lock);
     return ret;
 }
@@ -660,10 +1075,10 @@ static int rec_recycle_oldest(void)
 int _rp_record_start(uint8_t event_type);
 int _rp_record_stop(void);
 
-/* 把 UNSYNC 目录里一个文件 (mp4 或 alaw) 改名到真实时间目录.
+/* 把 UNSYNC 目录里的 MP4 改名到真实时间目录.
  * 仅用于"本会话时间同步"场景, 按 (g_sync_utc, g_sync_boot_sec) 还原真实时间.
  * 跨重启残留 (boot_sec 基准已丢, 时间无法还原) 的文件不走这里, 由调用方直接删除.
- * @param unsync_fname  UNSYNC 目录下文件名, 形如 "<boot_sec>_Eee_dd.MP4/.alaw"
+ * @param unsync_fname  UNSYNC 目录下文件名, 形如 "<boot_sec>_Eee_dd.MP4"
  * @return 0 成功 / -1 跳过
  *
  * 文件名映射: <boot_sec>_Eee_dd.EXT  →  YYYYMMDD/HHMMSS_Eee_dd.EXT
@@ -679,7 +1094,7 @@ static int rec_unsync_migrate_one(const char *unsync_fname)
     const char *dot = NULL;
     for (int i = nlen - 1; i >= 0; i--) { if (unsync_fname[i] == '.') { dot = unsync_fname + i; break; } }
     if (!dot) return -1;
-    os_strncpy(ext, dot, sizeof(ext) - 1);   /* ".MP4" 或 ".alaw" */
+    os_strncpy(ext, dot, sizeof(ext) - 1);
 
     if (sscanf(unsync_fname, "%u_E%02d_%d", &boot_sec, &ev, &dur) != 3)
         return -1;
@@ -698,8 +1113,8 @@ static int rec_unsync_migrate_one(const char *unsync_fname)
     /* 确保目标日期目录存在 */
     char dst_dir[48];
     os_snprintf(dst_dir, sizeof(dst_dir), "%s/%s", REC_ROOT_PATH, date_dir);
-    void *d = osal_opendir(dst_dir);
-    if (d) osal_closedir(d);
+    void *d = rec_dir_open(dst_dir);
+    if (d) rec_dir_close(d);
     else   osal_fmkdir(dst_dir);
 
     /* 源 / 目标完整路径 */
@@ -708,7 +1123,8 @@ static int rec_unsync_migrate_one(const char *unsync_fname)
     os_snprintf(dst_path, sizeof(dst_path), "%s/%s_E%02d_%02d%s",
                 dst_dir, hms, ev, dur, ext);
 
-    FRESULT r = osal_rename(src_path, dst_path);
+    if (g_sd_formatting) return -1;
+    FRESULT r = rec_idx_change(src_path, dst_path);
     if (r != FR_OK) {
         os_printf(KERN_ERR "rec_unsync_migrate: rename %s -> %s fail res=%d\n",
                   src_path, dst_path, r);
@@ -724,144 +1140,156 @@ static int rec_unsync_migrate_one(const char *unsync_fname)
  * 跨重启残留场景不调本函数, 由调用方直接删整个 UNSYNC 目录. */
 static void rec_unsync_migrate_all(void)
 {
-    uint32_t moved = 0, total = 0;
-    void *fno;
-    void *dir;
-    /* 注意: 一边 readdir 一边 rename 同目录, FATFS 行为不保证. 这里只 rename
-     * 出本目录 (移到别的目录), 当前目录条目变少, 用"反复扫到空"策略更稳:
-     * 每轮重新 opendir 扫一遍只搬第一个文件, 直到扫不到文件. UNSYNC 文件数量
-     * 有限 (断网时段的录像, 一分钟一个), 多扫几遍开销可接受. */
-    while (1) {
-        dir = osal_opendir(REC_UNSYNC_DIR);
-        if (!dir) break;   /* 目录不存在或已删空 */
-        char one_fname[FILE_NAME_LEN + 8] = {0};
-        int found = 0;
-        while ((fno = osal_readdir(dir)) != NULL) {
-            char *fn = osal_dirent_name(fno);
-            if (!fn || osal_dirent_isdir(fno)) continue;
-            if (fn[0] == '.') continue;
-            os_strncpy(one_fname, fn, sizeof(one_fname) - 1);
-            found = 1;
+    static char cursor[FILE_NAME_LEN + 8];
+    static uint32_t generation = 0xffffffffU;
+    if (generation != g_sd_generation) { cursor[0] = 0; generation = g_sd_generation; }
+    unsigned moved = 0, total = 0;
+    /* 按名字推进游标，每轮最多八段；重名/坏卡不能卡住其它待迁移文件。 */
+    while (total < 8 && !g_sd_formatting) {
+        void *dir = rec_dir_open(REC_UNSYNC_DIR);
+        if (!dir) {
+            FILINFO info;
+            FRESULT res = f_stat(REC_UNSYNC_DIR, &info);
+            if (res != FR_NO_FILE && res != FR_NO_PATH) g_unsync_need_migrate = 1;
             break;
         }
-        osal_closedir(dir);
-        if (!found) break;
-
-        total++;
-        if (rec_unsync_migrate_one(one_fname) == 0) {
-            moved++;
-        } else {
-            /* 迁移失败 (解析不了/rename 失败): 直接 unlink 避免死循环卡在这个文件 */
-            char bad[96];
-            os_snprintf(bad, sizeof(bad), "%s/%s", REC_UNSYNC_DIR, one_fname);
-            osal_unlink(bad);
-            os_printf(KERN_WARNING "rec_unsync_migrate: drop unmigratable %s\n", bad);
+        char next[sizeof(cursor)] = {0};
+        void *ent;
+        while ((ent = rec_dir_read(dir)) != NULL) {
+            const char *fn = osal_dirent_name(ent);
+            if (osal_dirent_isdir(ent) || !rec_has_ext(fn, REC_EXT_NAME) ||
+                os_strlen(fn) >= sizeof(next) || os_strcmp(fn, cursor) <= 0) continue;
+            if (!next[0] || os_strcmp(fn, next) < 0) os_strcpy(next, fn);
         }
+        int failed = rec_dir_failed(dir);
+        rec_dir_close(dir);
+        if (failed) { g_unsync_need_migrate = 1; break; }
+        if (!next[0]) {
+            /* 从头重试此前失败的文件；成功迁移后空目录会被下面删除。 */
+            if (cursor[0] || total) g_unsync_need_migrate = 1;
+            cursor[0] = 0;
+            break;
+        }
+        os_strcpy(cursor, next);
+        ++total;
+        if (!rec_unsync_migrate_one(next)) ++moved;
+        else g_unsync_need_migrate = 1;
     }
-    /* 迁移完删空的 UNSYNC 目录 (空了才会删成功) */
-    osal_unlink_dir(REC_UNSYNC_DIR, 0);
-    os_printf(KERN_INFO "rec_unsync_migrate_all: total=%u moved=%u\n",
-              (unsigned)total, (unsigned)moved);
+    if (total >= 8 || g_sd_formatting) g_unsync_need_migrate = 1;
+    if (!g_sd_formatting) osal_unlink_dir(REC_UNSYNC_DIR, 0);  /* 只删除空目录。 */
+    if (total) os_printf(KERN_INFO "rec_unsync_migrate: total=%u moved=%u\n", total, moved);
 }
 
-void sd_format_handle(void*arg)
+static void sd_format_reply(void *handle, int failed)
 {
-    os_printf(KERN_INFO "sd_format: start\n");
-
-    /* 通知预删除循环让位. 必须在调 _rp_record_stop 前设置, 让 bootstrap
-     * 线程在下一轮检查时立刻跳过 SD 操作 */
-    g_sd_formatting = 1;
-
-    /* 停止录像 */
+    Tcis_FormatExtStorageResp resp;
+    os_memset(&resp, 0, sizeof(resp));
+    resp.storage = 0;
+    resp.result = failed ? 1 : 0;
+    TciSendCmdResp(handle, TCI_CMD_FORMATEXTSTORAGE_RESP, (char *)&resp, sizeof(resp));
+}
+void sd_format_handle(void *arg)
+{
     rec_mode_t saved_mode = g_rec_mode;
+    int failed = 1;
+    BYTE *work = NULL;
+    unsigned wait;
+    os_printf(KERN_INFO "sd_format: quiesce SD users\n");
+    /* 先等已经获准的查询/后台任务退出，再停止可能由它们启动的录像与回放。 */
+    for (wait = 0; wait < 1000; ++wait) {
+        os_mutex_lock(&g_sd_gate, osWaitForever);
+        uint32_t users = g_sd_users;
+        os_mutex_unlock(&g_sd_gate);
+        if (!users) break;
+        os_sleep_ms(10);
+    }
+    if (wait == 1000) { saved_mode = g_rec_mode; goto done; }
+    saved_mode = g_rec_mode;  /* 已进入的模式指令可能刚执行完，使用最终模式。 */
     g_rec_mode = REC_MODE_OFF;
     _rp_record_stop();
-
-    /* sleep 2s: 之前 500ms 仅给 mp4_encode_thread 收尾; 现在还要给可能正在
-     * 跑 osal_unlink 的预删除线程一个完成窗口 (单次 unlink ~500ms),
-     * 避免和 f_mkfs 并发操作 SD 卡导致 FatFS 状态错乱 */
-    os_sleep_ms(2000);
-
-    /* 进一步严谨: 拿 g_recycle_lock 才进 f_mkfs.
-     * 即使上面的 2s sleep 没等到 unlink 完成, 这里也会真正阻塞直到预删除释放
-     * 锁. 注意: 持锁期间预删除线程会被阻塞, 必须保证 f_mkfs 后立即 unlock. */
-    uint8_t hold_recycle = 0;
-    if (g_recycle_lock_inited) {
-        os_mutex_lock(&g_recycle_lock, osWaitForever);
-        hold_recycle = 1;
+    pb_stop();
+    extern uint32_t mp4_demux_active_workers(void);
+    for (wait = 0; wait < 1000 && (g_rec_file_closing || rec_pb_is_active() || mp4_demux_active_workers() || mp4_encode_active_workers()); ++wait)
+        os_sleep_ms(10);
+    if (g_rec_file_closing || rec_pb_is_active() || mp4_demux_active_workers() || mp4_encode_active_workers()) {
+        os_printf(KERN_ERR "sd_format: close timeout, format cancelled\n");
+        goto done;
     }
-
-    int ret = 0;
-    /* 执行格式化 */
-    BYTE *work = (BYTE*)_os_malloc_psram(FF_MAX_SS);
-    if(!work){
-        os_printf(KERN_ERR "sd_format: malloc psram failed\n");
-        if (hold_recycle) os_mutex_unlock(&g_recycle_lock);
-        g_rec_mode = saved_mode;
-        g_sd_formatting = 0;
-        ret = -1;
-        goto FORMAT_EXIT ;
-    }
+    rec_idx_reset();  /* 格式化前释放缓存，失败也不能沿用旧卷的列表。 */
+    work = _os_malloc_psram(FF_MAX_SS);
+    if (!work) goto done;
+    /* 全部应用 IO 已停止；先隔离旧卷缓存，避免后台把旧 FAT 回写到新文件系统。 */
+    extern void fatfs_cache_discard(void);
+    extern bool fatfs_register(void);
+    fatfs_cache_discard();
+    if (fatfs_prepare_remount() != FR_OK) goto done;
     FRESULT res = f_mkfs("0:", FM_ANY, 0, work, FF_MAX_SS);
-    if (res != FR_OK) {
-        os_printf(KERN_ERR "sd_format: f_mkfs failed, res=%d\n", res);
-        if (hold_recycle) os_mutex_unlock(&g_recycle_lock);
-        g_rec_mode = saved_mode;
-        g_sd_formatting = 0;
-        ret = -1;
-        goto FORMAT_EXIT ;
-    }
-    os_printf(KERN_INFO "sd_format: done\n");
-
-    /* 重建 REC 根目录 */
-    osal_fmkdir(REC_ROOT_PATH);
-
-    /* 释放回收锁: 预删除线程现在可以恢复工作 (但 g_sd_formatting 还为 1,
-     * 它在循环开头会再次检查并跳过, 直到下面把 g_sd_formatting 清掉) */
-    if (hold_recycle) os_mutex_unlock(&g_recycle_lock);
-
-    /* 恢复录像; 清标志后预删除循环也会重新生效.
-     * 顺便清 SD 不可恢复故障标志 — 格式化后 SD 应该可用, 用户期望立刻恢复录像 */
-    g_rec_mode = saved_mode;
-    g_sd_formatting = 0;
+    os_printf(KERN_INFO "sd_format: f_mkfs=%d\n", res);
+    /* 成败都重新挂载检测，不能沿用格式化前的容量缓存。 */
+    int mounted = fatfs_register() == 0;
+    if (res != FR_OK || !mounted) goto done;
+    res = osal_fmkdir(REC_ROOT_PATH);
+    if (res != FR_OK && res != FR_EXIST) goto done;
+    uint32_t total, free_mb;
+    if (sd_get_capacity_raw(&total, &free_mb) || !total) goto done;
+    os_memset((void *)g_finalize_pending, 0, sizeof(g_finalize_pending));
+    os_memset(&g_curfile, 0, sizeof(g_curfile));
+    g_unsync_need_migrate = 0;
+    g_rec_unsync_mode = !time_sync_flag;
     g_sd_unrecoverable = 0;
     g_create_null_streak = 0;
-    if (saved_mode == REC_MODE_ALL_DAY) {
-        _rp_record_start(ECEVENT_NONE);
-    }
-
-    Tcis_FormatExtStorageResp formatRes;
-FORMAT_EXIT:
-    if(ret == 0){
-        formatRes.storage = 0;
-        formatRes.result  = 0;
-    }else{
-        formatRes.storage = 0;
-        formatRes.result  = 1;
-    }
-    _os_printf("TCI_CMD_FORMATEXTSTORAGE_REQ ret=%d\n", ret);
-
-    void *handle = arg;
-    TciSendCmdResp(handle, TCI_CMD_FORMATEXTSTORAGE_RESP, (char *)&formatRes, sizeof(Tcis_FormatExtStorageResp));
-    if(work){
-        _os_free_psram(work);
-    }
-    return ;
+    ++g_sd_generation;
+    failed = 0;
+    os_printf(KERN_INFO "sd_format: ready total=%u free=%uMB\n", total, free_mb);
+done:
+    if (work) _os_free_psram(work);
+    g_rec_mode = saved_mode;
+    if (failed) sd_storage_request_recovery();
+    os_mutex_lock(&g_sd_gate, osWaitForever);
+    g_sd_formatting = 0;
+    os_mutex_unlock(&g_sd_gate);
+    /* 失败也由后台检测卡状态再恢复，不在失败出口强制创建录像。 */
+    if (!failed && saved_mode == REC_MODE_ALL_DAY) _rp_record_start(ECEVENT_NONE);
+    sd_format_reply(arg, failed);
 }
 void sd_format(void *arg)
 {
-    struct os_task format_task;
-    OS_TASK_INIT("sd_format", &format_task, sd_format_handle, arg, OS_TASK_PRIORITY_NORMAL, NULL, 2048);
+    if (!g_rp_inited) { sd_format_reply(arg, 1); return; }
+    os_mutex_lock(&g_sd_gate, osWaitForever);
+    if (g_sd_formatting || g_sd_fault_pending) {
+        os_mutex_unlock(&g_sd_gate);
+        sd_format_reply(arg, 1);
+        return;
+    }
+    g_sd_formatting = 1;
+    os_mutex_unlock(&g_sd_gate);
+    /* 动态任务不引用调用者栈上的 os_task；重复命令不会创建第二个格式化任务。 */
+    if (!os_task_create("sd_format", (os_task_func_t)sd_format_handle, arg,
+                        OS_TASK_PRIORITY_NORMAL, 0, NULL, 8192)) {
+        os_mutex_lock(&g_sd_gate, osWaitForever);
+        g_sd_formatting = 0;
+        os_mutex_unlock(&g_sd_gate);
+        sd_format_reply(arg, 1);
+    }
 }
 
 /* =========================================================================
  * 模式控制
  * ========================================================================= */
 
+static int rec_set_mode_raw(rec_mode_t mode);
 int rec_set_mode(rec_mode_t mode)
 {
-    if (mode > REC_MODE_ALL_DAY)
-        return -1;
+    if (mode < REC_MODE_OFF || mode > REC_MODE_ALL_DAY) return -1;
+    if (!g_rp_inited) { g_rec_mode = mode; return 0; }  /* 初始化前只保存配置。 */
+    if (rec_sd_enter()) return -1;
+    int ret = rec_set_mode_raw(mode);
+    rec_sd_leave();
+    return ret;
+}
+static int rec_set_mode_raw(rec_mode_t mode)
+{
+    if (g_sd_formatting) return -1;
 
     rec_mode_t old = g_rec_mode;
     g_rec_mode = mode;
@@ -887,9 +1315,70 @@ rec_mode_t rec_get_mode(void)
 /* =========================================================================
  * 模块初始化
  * ========================================================================= */
-extern volatile uint8_t time_sync_flag;
 /* SDK FatFS mount 标志 (set_fat_ready). 真实挂载入口是 fatfs_test.c 里的 fatfs_register */
 extern uint8_t get_fat_isready(void);
+
+/* 后台唯一恢复入口；本函数不能持有 rec_sd_enter 的使用名额。 */
+static void rec_sd_recovery_step(void)
+{
+    static uint32_t last_try_ms;
+    if (!g_sd_fault_pending || !g_rp_inited) return;
+    os_mutex_lock(&g_sd_gate, osWaitForever);
+    if (g_sd_formatting && !g_sd_recovering) {
+        os_mutex_unlock(&g_sd_gate);
+        return;
+    }
+    g_sd_formatting = 1;
+    g_sd_recovering = 1;
+    uint32_t users = g_sd_users;
+    os_mutex_unlock(&g_sd_gate);
+    uint32_t now = (uint32_t)os_jiffies_to_msecs(os_jiffies());
+    if (last_try_ms && (uint32_t)(now - last_try_ms) < 3000U) return;
+    last_try_ms = now;
+    if (users) {
+        os_printf(KERN_WARNING "[SD_RECOVER] wait users=%u\n", users);
+        return;
+    }
+    _rp_record_stop();
+    pb_stop();
+    if (g_rec_file_closing || mp4_encode_active_workers() ||
+        rec_pb_is_active() || mp4_demux_active_workers()) {
+        os_printf(KERN_WARNING "[SD_RECOVER] wait close: rec=%u pb=%u\n",
+                  mp4_encode_active_workers(), mp4_demux_active_workers());
+        return; /* 超时保持封门，绝不强行卸载。 */
+    }
+    rec_idx_reset();
+    /* 内存中的待提交路径不跨卷使用；磁盘上的 .REC 留待原恢复扫描处理。 */
+    os_memset((void *)g_finalize_pending, 0, sizeof(g_finalize_pending));
+    os_memset(&g_curfile, 0, sizeof(g_curfile));
+    uint32_t epoch = g_sd_fault_epoch;
+    int ret = fatfs_recover_mount();
+    uint32_t total = 0, avail = 0;
+    if (!ret) {
+        FRESULT mkdir_ret = osal_fmkdir(REC_ROOT_PATH);
+        if (mkdir_ret != FR_OK && mkdir_ret != FR_EXIST) ret = mkdir_ret;
+    }
+    if (!ret) ret = sd_get_capacity_raw(&total, &avail);
+    if (ret || !total || epoch != g_sd_fault_epoch) {
+        os_printf(KERN_WARNING "[SD_RECOVER] mount failed ret=%d total=%u\n", ret, total);
+        return;
+    }
+    g_sd_unrecoverable = 0;
+    g_create_null_streak = 0;
+    ++g_sd_generation;
+    os_mutex_lock(&g_sd_gate, osWaitForever);
+    uint32_t flags = disable_irq();
+    if (epoch == g_sd_fault_epoch) {
+        g_sd_fault_pending = 0;
+        g_sd_recovering = 0;
+        g_sd_formatting = 0;
+    }
+    enable_irq(flags);
+    os_mutex_unlock(&g_sd_gate);
+    if (!g_sd_fault_pending)
+        os_printf(KERN_INFO "[SD_RECOVER] ready total=%u free=%uMB\n", total, avail);
+    /* 保留用户录像模式；全天录像由正常后台循环重启，回放等待 APP 新请求。 */
+}
 
 /* 启动检测任务: 周期检查 SD 卡是否就绪, 就绪后根据当前模式启动录像 */
 static void rec_bootstrap_thread(void *arg)
@@ -904,6 +1393,8 @@ static void rec_bootstrap_thread(void *arg)
     uint32_t wait_ms = 0;
     while (1) {
         os_sleep_ms(1000);
+        rec_sd_recovery_step();
+        if (g_sd_formatting) continue;
 
         if(GetNetworkState() == 1){
             continue;
@@ -936,12 +1427,13 @@ static void rec_bootstrap_thread(void *arg)
         }
     }
 
+    while (rec_sd_enter() != 0) { rec_sd_recovery_step(); os_sleep_ms(10); }
     /* SD 就绪, 建立 REC 根目录 */
-    void *dir = osal_opendir(REC_ROOT_PATH);
+    void *dir = rec_dir_open(REC_ROOT_PATH);
     if (!dir) {
         osal_fmkdir(REC_ROOT_PATH);
     } else {
-        osal_closedir(dir);
+        rec_dir_close(dir);
     }
 
     /* 处理上次会话残留的 UNSYNC 文件 (上次没等到时间同步就断电, boot_sec 基准
@@ -949,9 +1441,9 @@ static void rec_bootstrap_thread(void *arg)
      * 这些文件时间不可知, 留着也无法在 APP 时间轴上正确呈现, 删掉更干净.
      * 注意: 必须在本次录像启动 (可能又往 UNSYNC 写) 之前做完. */
     {
-        void *ud = osal_opendir(REC_UNSYNC_DIR);
+        void *ud = rec_dir_open(REC_UNSYNC_DIR);
         if (ud) {
-            osal_closedir(ud);
+            rec_dir_close(ud);
             os_printf(KERN_WARNING "rec_bootstrap: found leftover UNSYNC dir from previous session, "
                                    "time unrecoverable, deleting it\n");
             osal_unlink_dir(REC_UNSYNC_DIR, 1 /*递归删目录内所有文件*/);
@@ -966,9 +1458,9 @@ static void rec_bootstrap_thread(void *arg)
               tot_mb, free_mb, REC_LOOP_REMAIN_MB);
 
     int cleanup_try = 0;
-    /* 单文件粒度: 每次循环删 1 个 MP4 + 同名 .alaw, 容量够了立即停.
+    /* 单文件粒度: 每次循环删除一个 MP4，容量够了立即停止。
      * 上限 5000 防死循环, 一般场景几十次就能达标 */
-    while (free_mb < REC_LOOP_REMAIN_MB && cleanup_try++ < 5000) {
+    while (!g_sd_formatting && free_mb < REC_LOOP_REMAIN_MB && cleanup_try++ < 5000) {
         if (rec_recycle_oldest() != 0) {
             os_printf(KERN_ERR "rec_bootstrap: no old files to delete, free=%dMB\n", free_mb);
             break;
@@ -986,7 +1478,7 @@ static void rec_bootstrap_thread(void *arg)
         } else {
             os_printf(KERN_ERR "rec_bootstrap: please insert a larger SD card\n");
         }
-        return;   /* 不启动录像 */
+        goto rec_bootstrap_background; /* 保持监测，换卡/格式化后仍可恢复。 */
     }
     if (cleanup_try > 0) {
         os_printf(KERN_INFO "rec_bootstrap: cleanup done, free=%dMB\n", free_mb);
@@ -1005,6 +1497,8 @@ static void rec_bootstrap_thread(void *arg)
         os_printf(KERN_INFO "rec_bootstrap: alarm mode, wait trigger\n");
     }
 
+rec_bootstrap_background:
+    rec_sd_leave();
     /* === 预删除常驻循环 ===
      * 周期性检查 SD 容量, 在 free_mb 触及"预删除阈值"时主动删 1 个最旧 MP4,
      * 把"运行时切文件同步删多文件"的阻塞从 mp4_encode_thread 卸载到这里.
@@ -1032,10 +1526,23 @@ static void rec_bootstrap_thread(void *arg)
      * 预删除按 REC_CLEANUP_CHECK_MS 间隔 (用累计 tick 控制), 不每轮都跑 */
     #define REC_TICK_MS         3000
     int32_t cleanup_acc_ms = 0;
-    rec_mode_t saved_mode_for_recovery = REC_MODE_OFF;  /* 故障停录像时记下原模式 */
 
+    uint8_t maintenance_entered = 0;
+    unsigned pending_scan_ticks = 0;
     while (1) {
+        if (maintenance_entered) { rec_sd_leave(); maintenance_entered = 0; }
         os_sleep_ms(REC_TICK_MS);
+        if (g_sd_unrecoverable && !g_sd_fault_pending) sd_storage_request_recovery();
+        rec_sd_recovery_step();
+        if (rec_sd_enter()) continue;
+        maintenance_entered = 1;
+
+        /* 每轮最多处理一个刚关闭文件。这是低优先级任务，
+         * 不再由 APP 列表查询或 mp4_encode 切片线程承担 mdhd IO。 */
+        rec_finalize_pending_run();
+        rec_idx_background();  /* 索引补建/整理放在低优先级任务，不放在编码线程。 */
+        if (++pending_scan_ticks >= 10) { pending_scan_ticks = 0; rec_pending_scan(); }
+        if (g_sd_formatting) continue;
 
         /* === NTP 时间同步 → 迁移 UNSYNC 录像到真实时间 (方案 A: 不打断活跃录像) ===
          * 关键教训: 旧实现在这里 _rp_record_stop() + migrate + _rp_record_start(),
@@ -1058,7 +1565,7 @@ static void rec_bootstrap_thread(void *arg)
          *     不会再触发 rec_create_file_cb, 必须在这里主动退出模式 + 排迁移.
          *     此时没有任何线程在写 UNSYNC, rename 安全. */
         if (g_rec_unsync_mode && time_sync_flag) {
-            if (g_rec_mode == REC_MODE_OFF || !g_rec_msi) {
+            if (!g_rec_msi && !g_rec_file_closing) {
                 g_rec_unsync_mode     = 0;
                 g_unsync_need_migrate = 1;
                 os_printf(KERN_INFO "rec_bootstrap: no active UNSYNC rec, exit UNSYNC mode, "
@@ -1071,49 +1578,26 @@ static void rec_bootstrap_thread(void *arg)
         /* === 执行 UNSYNC 迁移 (标志由 rec_create_file_cb 或上面置位) ===
          * 到这里保证: 已退出 UNSYNC 模式, 编码线程 (若在录) 已在真实目录写新文件,
          * UNSYNC 目录里的旧文件全部 fclose, 可安全 rename. 不碰任何 msi. */
-        if (g_unsync_need_migrate) {
+        if (g_unsync_need_migrate && !g_rec_file_closing) {
             g_unsync_need_migrate = 0;
             os_printf(KERN_INFO "rec_bootstrap: migrating UNSYNC files to real time dir\n");
             rec_unsync_migrate_all();
             os_printf(KERN_INFO "rec_bootstrap: UNSYNC migrate done (no record interruption)\n");
-            continue;
         }
 
         /* === 优先处理: SD 不可恢复故障监控 === */
         if (g_sd_unrecoverable) {
-            /* 持续打告警 (3s 间隔, 由 sleep 节奏保证) */
-            os_printf(KERN_ERR "[SD_FAULT] unrecoverable, recording disabled. "
-                              "null_streak=%u, rec_mode=%d. Will auto-recover when SD readable\n",
-                      (unsigned)g_create_null_streak, g_rec_mode);
-
-            /* 第一次进来: 主动停录像, 记下原模式 */
-            if (g_rec_mode != REC_MODE_OFF && g_rec_msi) {
-                saved_mode_for_recovery = g_rec_mode;
-                g_rec_mode = REC_MODE_OFF;
-                _rp_record_stop();
-                os_printf(KERN_ERR "[SD_FAULT] stopped recording, saved mode=%d for recovery\n",
-                          saved_mode_for_recovery);
-            }
-
-            /* 探测自恢复: SD 卡能读容量且非 0 → 视为恢复 */
-            uint32_t rtot = 0, rfre = 0;
-            if (sd_get_capacity(&rtot, &rfre) == 0 && rtot > 0) {
-                os_printf(KERN_WARNING "[SD_FAULT] SD readable again (tot=%uMB free=%uMB), "
-                                       "clear unrecoverable flag and resume recording\n",
-                          (unsigned)rtot, (unsigned)rfre);
-                g_sd_unrecoverable = 0;
-                g_create_null_streak = 0;
-                if (saved_mode_for_recovery != REC_MODE_OFF) {
-                    g_rec_mode = saved_mode_for_recovery;
-                    saved_mode_for_recovery = REC_MODE_OFF;
-                    if (g_rec_mode == REC_MODE_ALL_DAY) {
-                        _rp_record_start(ECEVENT_NONE);
-                    }
-                }
-            }
+            /* 下一轮先归还使用名额，再由统一恢复入口处理，不再凭容量直接复录。 */
+            sd_storage_request_recovery();
             continue;
         }
 
+        /* 无活跃录像时持续重试，覆盖格式化后收尾尚未完成、启动时卡满等情况。 */
+        if (g_rec_mode == REC_MODE_ALL_DAY && !g_rec_msi && !g_rec_file_closing) {
+            uint32_t cap, avail;
+            if (!sd_get_capacity_raw(&cap, &avail) && cap && avail >= 32)
+                _rp_record_start(ECEVENT_NONE);
+        }
         /* === 30s 间隔的预删除 (累加 tick 实现) === */
         cleanup_acc_ms += REC_TICK_MS;
         if (cleanup_acc_ms < REC_CLEANUP_CHECK_MS) {
@@ -1169,7 +1653,8 @@ int rec_playback_init(void)
     if (g_rp_inited)
         return 0;
 
-    g_rp_inited = 1;
+    os_mutex_init(&g_sd_gate);
+    rec_idx_init();
 
     /* 初始化回收 mutex. 必须在启动 rec_bootstrap_thread (含预删除循环) 之前完成,
      * 也必须在 rec_create_file_cb 第一次可能调 rec_recycle_oldest 之前 */
@@ -1185,6 +1670,8 @@ int rec_playback_init(void)
         recv->action = NULL;
         recv->enable = 1;
     }
+
+    g_rp_inited = 1;  /* 所有准入锁和接收队列就绪后才对外开放。 */
 
     /* 启动 bootstrap 任务: 等 SD 卡就绪后再真正开始录像;
      * 启动完后进入常驻循环, 兼做: 预删除 / SD 不可恢复故障监控 / UNSYNC 录像迁移.
@@ -1207,6 +1694,7 @@ int rec_playback_init(void)
 /* 向后兼容 (外部若调用不会出错) */
 int rec_index_rebuild(void)
 {
+    rec_idx_reset();  /* 下次查询重新核对目录，并排队补建当天索引。 */
     return 0;
 }
 
@@ -1214,85 +1702,11 @@ int rec_index_rebuild(void)
  * 录像启停
  * ========================================================================= */
 
-/* 取文件实际大小 (KB), 用于切片日志. 不存在返回 0 */
-static uint32_t rec_file_size_kb(const char *path)
-{
-    if (!path || !path[0]) return 0;
-    void *fp = osal_fopen(path, "rb");
-    if (!fp) return 0;
-    uint32_t sz = osal_fsize(fp);
-    osal_fclose(fp);
-    return (sz + 1023) / 1024;
-}
-
 /* mp4 encode 模块的 create_file 回调: 生成新文件并返回 FILE * */
 static void *rec_create_file_cb(struct file_process *fp, char *file_name, char *file_path, uint32_t file_size)
 {
-    /* 快照上一个 (即将被切走的) 文件路径, 后面统一打印实际大小, 便于在日志里
-     * 直接看到每个 MP4/.alaw 切片最终多大. 第一次创建时 fpath 为空, 不打印 */
-    char prev_mp4_path[96]  = {0};
-    char prev_alaw_path[96] = {0};
-    if (g_curfile.fpath[0]) {
-        os_strncpy(prev_mp4_path,  g_curfile.fpath,      sizeof(prev_mp4_path) - 1);
-        os_strncpy(prev_alaw_path, g_curfile.alaw_fpath, sizeof(prev_alaw_path) - 1);
-    }
-
-    /* === 清理上一次写卡失败遗留的空 mp4 文件 ===
-     * mp4_encode_thread 写卡失败异常退出后会立刻进入下一轮循环, 通过 SDK 调到
-     * 这里. 上一个 mp4 (g_curfile.fpath) 实际什么都没写或只写了 ftyp/moov 壳,
-     * 是个 < 16KB 的垃圾文件 (正常 60s mp4 至少几百 KB). 主动 unlink 不留卡上.
-     *
-     * 同时计数连续失败次数, 超过 REC_CREATE_FAIL_LIMIT 就 return NULL.
-     * SDK mp4_encode_thread (mp4_encode_msi2.c) 看到 fp=NULL 会走
-     * MP4_ENCODE_ERR_NO_SD 路径, 自己 os_event_wait 1s 再 retry.
-     *
-     * 不在本函数自己 sleep: 实测 5s sleep 期间上游 auto_h264 持续编帧
-     * (25fps × 5s × ~10KB = 1.2MB), mp4 fbq + h264 static_buf 满后走
-     * fallback STREAM_MALLOC av_psram, 把仅有 ~72KB 余量的 av_psram 吃光.
-     * SDK 自己的 1s 等待已经够防 CPU 空转.
-     *
-     * 16KB 阈值: 正常 60s mp4 >> 16KB, 不会误伤; ftyp+moov 空壳 <= 几 KB. */
-    #define REC_PREV_GARBAGE_KB     16U
-    #define REC_CREATE_FAIL_LIMIT   3U
-
-    static uint32_t s_create_fail_streak = 0;
-
-    if (prev_mp4_path[0]) {
-        uint32_t prev_kb = rec_file_size_kb(prev_mp4_path);
-        if (prev_kb < REC_PREV_GARBAGE_KB) {
-            s_create_fail_streak++;
-            os_printf(KERN_WARNING "rec_create_file: prev mp4 only %uKB (<%uKB), treat as failed write, "
-                                   "unlink it (streak=%u): %s\n",
-                      (unsigned)prev_kb, (unsigned)REC_PREV_GARBAGE_KB,
-                      (unsigned)s_create_fail_streak, prev_mp4_path);
-            osal_unlink(prev_mp4_path);
-            if (prev_alaw_path[0]) {
-                osal_unlink(prev_alaw_path);   /* 同名 .alaw 一起删, 忽略 err */
-            }
-            /* 已经清理, 不再打 "prev=0KB" 那行 */
-            prev_mp4_path[0]  = '\0';
-            prev_alaw_path[0] = '\0';
-
-            if (s_create_fail_streak >= REC_CREATE_FAIL_LIMIT) {
-                /* 连续 REC_CREATE_FAIL_LIMIT 次写卡都失败, 大概率是 SD 卡硬件/
-                 * FATFS 持续异常. return NULL 让 SDK mp4_encode_thread 走
-                 * MP4_ENCODE_ERR_NO_SD 路径, os_event_wait 1s 后自动 retry.
-                 * 计数器在这里清零, 下次再触发时从头计数 */
-                os_printf(KERN_ERR "rec_create_file: %u consecutive failed writes, return NULL "
-                                   "(SDK will retry in 1s). Check SD card health "
-                                   "(see osal_fwrite FRESULT logs)\n",
-                          (unsigned)s_create_fail_streak);
-                s_create_fail_streak = 0;
-                /* 清空 g_curfile, 让下一次 fpath 为空, 进来时 prev_*_path 也为空 */
-                os_memset(&g_curfile, 0, sizeof(g_curfile));
-                rec_create_fail_inc();
-                return NULL;
-            }
-        } else {
-            /* prev 大小正常, 重置连续失败计数 */
-            s_create_fail_streak = 0;
-        }
-    }
+    /* 上一段由 end_encode 投递；切片线程不再读旧文件、按大小误删或修复索引。 */
+    if (g_sd_formatting || g_sd_fault_pending) return NULL;
 
     /* 检查容量, 循环删旧 */
     uint32_t total_mb = 0, free_mb = 0;
@@ -1303,7 +1717,7 @@ static void *rec_create_file_cb(struct file_process *fp, char *file_name, char *
         return NULL;
     }
     int retry = 0;
-    while (free_mb < REC_LOOP_REMAIN_MB && retry++ < 10) {
+    while (!rec_pb_is_active() && !g_sd_formatting && free_mb < REC_LOOP_REMAIN_MB && retry++ < 2) {
         if (rec_recycle_oldest() != 0)
             break;
         sd_get_capacity(&total_mb, &free_mb);
@@ -1326,13 +1740,30 @@ static void *rec_create_file_cb(struct file_process *fp, char *file_name, char *
 
     char full_dir[48];
 
-    if (g_rec_unsync_mode && !time_sync_flag) {
-        /* === UNSYNC 模式: 时间没同步, 录到 0:/REC/UNSYNC/, 文件名用开机毫秒 ===
-         * 文件名 <boot_ms>_Eee_dd.MP4, boot_ms 单调递增可排序; NTP 同步后由
+    /* SDK 已保留首个有效 I 帧，frame_time 是采集时的低 32 位系统 tick。
+     * 同时读取 UTC 和单调时钟，扣除帧在队列/切片收尾中的等待时间。
+     * 必须先按毫秒相减再取秒，不能分别截断后相减；gettimeofday 在本工程
+     * 已加时区，这里使用未加时区的 os_systime，避免重复偏移。
+     * 极短临界区只读时钟，目录操作和写卡均在恢复中断之后执行。 */
+    struct timespec utc_now;
+    uint32_t irq_flags = disable_irq();
+    os_systime(&utc_now);
+    uint64_t boot_ticks = os_jiffies();
+    uint8_t synced = time_sync_flag;
+    enable_irq(irq_flags);
+    uint32_t age_ticks = (uint32_t)boot_ticks - fp->frame_time;
+    uint64_t age_ms = os_jiffies_to_msecs(age_ticks);
+    uint64_t utc_ms = (uint64_t)utc_now.tv_sec * 1000U + utc_now.tv_nsec / 1000000U;
+    uint32_t first_utc = (uint32_t)((utc_ms - age_ms) / 1000U);
+    uint32_t first_boot_sec = (uint32_t)((os_jiffies_to_msecs(boot_ticks) - age_ms) / 1000U);
+
+    if (g_rec_unsync_mode && !synced) {
+        /* === UNSYNC 模式: 时间没同步, 录到 0:/REC/UNSYNC/, 文件名用开机秒 ===
+         * 文件名 <boot_sec>_Eee_dd.REC, 关闭校验后发布为 MP4; NTP 同步后由
          * bootstrap_thread migrate 到真实日期目录 */
         os_strncpy(full_dir, REC_UNSYNC_DIR, sizeof(full_dir) - 1);
         full_dir[sizeof(full_dir) - 1] = '\0';
-        void *d = osal_opendir(full_dir);
+        void *d = rec_dir_open(full_dir);
         if (!d) {
             if (osal_fmkdir(full_dir) != FR_OK) {
                 os_printf(KERN_ERR "rec_create_file: mkdir %s fail\n", full_dir);
@@ -1340,20 +1771,19 @@ static void *rec_create_file_cb(struct file_process *fp, char *file_name, char *
                 return NULL;
             }
         } else {
-            osal_closedir(d);
+            rec_dir_close(d);
         }
-        /* 用开机秒 boot_sec (不是毫秒): 文件名长度受 FILE_NAME_LEN=17 限制,
-         * "<boot_sec>_Eee_dd.MP4" 中 boot_sec 7 位 (49 天内) → 16 字节, 刚好 <17.
-         * 秒级精度对录像文件时刻足够 (正常文件名本就是 HHMMSS 秒级). */
-        uint32_t boot_sec = (uint32_t)(os_jiffies_to_msecs(os_jiffies()) / 1000);
-        os_snprintf(file_name, FILE_NAME_LEN + 1, "%u_E%02d_%02d%s", boot_sec, ev, dur, REC_EXT_NAME);
+        /* 开机秒可能超过六位，不能套用正常 HHMMSS 文件名的 17 字节上限。
+         * SDK 提供的 file_name 缓冲区为 64 字节，此处最多使用 24 字节。 */
+        uint32_t boot_sec = first_boot_sec;  /* 未校时也使用首帧时间，迁移后不带启动等待偏差。 */
+        os_snprintf(file_name, 24, "%u_E%02d_%02d%s", boot_sec, ev, dur, REC_TEMP_EXT);
         os_snprintf(file_path, 96, "%s/%s", full_dir, file_name);
         /* g_curfile.t_start 在 UNSYNC 模式无真实意义, 存 boot_sec 占位 */
         g_curfile.t_start = boot_sec;
     } else {
         /* === 正常模式: 时间已同步, 真实日期目录 + HHMMSS 文件名 === */
-        /* UNSYNC→真实时间的切换点: 此刻是 mp4_encode_thread 自然切文件, 上一个
-         * UNSYNC 文件 (mp4 + .alaw) 已经 fclose, 是可安全 rename 的普通文件.
+        /* UNSYNC→真实时间的切换点: 此刻是 mp4_encode_thread 自然切文件，上一个
+         * UNSYNC MP4 已经 fclose，是可安全 rename 的普通文件。
          * 在这里退出 UNSYNC 模式 + 通知 bootstrap 异步迁移. 绝不在此 stop/destroy
          * msi (会触发 mp4_encode 线程 use-after-free), 让本函数正常返回新文件句柄,
          * 编码线程无缝继续录到真实目录. */
@@ -1363,14 +1793,14 @@ static void *rec_create_file_cb(struct file_process *fp, char *file_name, char *
             os_printf(KERN_INFO "rec_create_file: time synced, exit UNSYNC mode, "
                                 "new files go to real dir, migrate pending\n");
         }
-        time_t now = time(NULL);
+        time_t now = (time_t)first_utc;
         char   date_dir[16];
         char   hms[8];
         utc_to_dir((uint32_t) now, date_dir, sizeof(date_dir));
         utc_to_time((uint32_t) now, hms, sizeof(hms));
 
         os_snprintf(full_dir, sizeof(full_dir), "%s/%s", REC_ROOT_PATH, date_dir);
-        void *d = osal_opendir(full_dir);
+        void *d = rec_dir_open(full_dir);
         if (!d) {
             if (osal_fmkdir(full_dir) != FR_OK) {
                 os_printf(KERN_ERR "rec_create_file: mkdir %s fail\n", full_dir);
@@ -1378,9 +1808,9 @@ static void *rec_create_file_cb(struct file_process *fp, char *file_name, char *
                 return NULL;
             }
         } else {
-            osal_closedir(d);
+            rec_dir_close(d);
         }
-        os_snprintf(file_name, FILE_NAME_LEN + 1, "%s_E%02d_%02d%s", hms, ev, dur, REC_EXT_NAME);
+        os_snprintf(file_name, FILE_NAME_LEN + 1, "%s_E%02d_%02d%s", hms, ev, dur, REC_TEMP_EXT);
         os_snprintf(file_path, 96, "%s/%s", full_dir, file_name);
         g_curfile.t_start = (uint32_t) now;
     }
@@ -1393,22 +1823,12 @@ static void *rec_create_file_cb(struct file_process *fp, char *file_name, char *
     g_curfile.duration_sec = dur;
     g_curfile.extended = 0;
 
-    /* 关键: 先尝试 fopen MP4 (视频), 失败直接 return NULL 不再建 .alaw.
-     * 之前的 bug: 先建 .alaw 再 fopen MP4, MP4 失败时 .alaw 已存在且会被
-     * rec_alaw_action 持续写入, 留下"只有 .alaw 没 MP4"的孤儿文件. */
-    void *mp4_fp = osal_fopen(file_path, "a+");
+    /* 创建单个 MP4 文件，H264 和 AAC 由 miniMP4 共同写入这个句柄。 */
+    /* 独占创建，校时回拨/同秒重试也不能追加到已有录像。 */
+    void *mp4_fp = osal_open(file_path, 0, FA_CREATE_NEW | FA_READ | FA_WRITE);
     if (!mp4_fp) {
         os_printf(KERN_ERR "rec_create_file: mp4 fopen %s fail (SD likely full or fs error)\n",
                   file_path);
-        /* 同步关闭上一个文件遗留的 .alaw 句柄，避免继续写入旧文件。 */
-        if (g_rec_alaw_lock_inited) {
-            os_mutex_lock(&g_rec_alaw_lock, osWaitForever);
-            if (g_rec_alaw_fp) {
-                osal_fclose(g_rec_alaw_fp);
-                g_rec_alaw_fp = NULL;
-            }
-            os_mutex_unlock(&g_rec_alaw_lock);
-        }
         /* 清空 g_curfile, 表示当前没有有效的录像文件 */
         os_memset(&g_curfile, 0, sizeof(g_curfile));
         rec_create_fail_inc();
@@ -1417,40 +1837,26 @@ static void *rec_create_file_cb(struct file_process *fp, char *file_name, char *
     /* 成功 fopen mp4: 卡当前可用, 清不可恢复故障计数 */
     rec_create_fail_reset();
 
-    /* MP4 创建成功后同步创建 .alaw：与 MP4 同目录、同前缀。
-     * mp4 切片时 SDK 会先 fclose 旧 mp4 再 fopen 新 mp4, 再次调用 rec_create_file_cb,
-     * 这里同步切 .alaw 文件: 关闭旧的 → 打开新的, mutex 保护 alaw_action 写入不踩车. */
-    os_snprintf(g_curfile.alaw_fpath, sizeof(g_curfile.alaw_fpath),
-                "%s/%.*s%s", full_dir,
-                (int)(os_strlen(file_name) - os_strlen(REC_EXT_NAME)), file_name,
-                REC_AUDIO_EXT_NAME);
+    /* AAC 直接复用到已经打开的 mp4_fp，不创建任何伴随音频文件。 */
 
-    if (g_rec_alaw_lock_inited) {
-        os_mutex_lock(&g_rec_alaw_lock, osWaitForever);
-        if (g_rec_alaw_fp) {
-            osal_fclose(g_rec_alaw_fp);
-            g_rec_alaw_fp = NULL;
-        }
-        g_rec_alaw_fp = osal_fopen(g_curfile.alaw_fpath, "a+");
-        if (!g_rec_alaw_fp) {
-            /* .alaw 打开失败只警告, 不影响 MP4 录像继续 (这条录像就只有视频没音频).
-             * rec_alaw_action 内部会检查 g_rec_alaw_fp 为 NULL 时跳过写入 */
-            os_printf(KERN_WARNING "rec_create_file: alaw fopen %s fail, audio disabled for this slice\n",
-                      g_curfile.alaw_fpath);
-        }
-        os_mutex_unlock(&g_rec_alaw_lock);
-    }
-
-    /* 打印新文件 + 上一个文件实际大小 (KB). 切片日志里能直接看到每段录了多大 */
-    if (prev_mp4_path[0]) {
-        os_printf(KERN_INFO "rec_create_file: %s (+%s)  prev: mp4=%uKB alaw=%uKB\n",
-                  file_path, g_curfile.alaw_fpath,
-                  rec_file_size_kb(prev_mp4_path),
-                  rec_file_size_kb(prev_alaw_path));
-    } else {
-        os_printf(KERN_INFO "rec_create_file: %s (+%s)\n", file_path, g_curfile.alaw_fpath);
-    }
+    os_printf(KERN_INFO "rec_create_file: %s [H264+AAC]\n", file_path);
+    os_printf(KERN_INFO "rec_start: first_tick=%u age_ms=%u start=%u synced=%u\n",
+              fp->frame_time, (uint32_t)age_ms, g_curfile.t_start, synced);
     return mp4_fp;
+}
+
+/* 每段 MP4 关闭后投递后台校验；停止通知同时释放异步关闭标记。 */
+static int32_t rec_end_encode_cb(struct file_process *fp)
+{
+    (void)fp;
+    /* 已关闭的临时文件只投递，不在编码线程里扫描或修复。 */
+    if (g_curfile.fpath[0] && !g_sd_formatting)
+        rec_finalize_enqueue(g_curfile.fpath);
+    if (g_rec_file_closing && !g_rec_msi) {
+        os_memset(&g_curfile, 0, sizeof(g_curfile));
+        g_rec_file_closing = 0;
+    }
+    return RET_OK;
 }
 
 static void rec_loop_free_cb(void **loop)
@@ -1458,55 +1864,6 @@ static void rec_loop_free_cb(void **loop)
     (void) loop;
 }
 
-/* ==== 旧版音频录制: PCM fb → G.711A → 写 .alaw 文件 ====
- * 上游 S_AUADC (audio_adc.c) 每 40ms 吐一帧 PCM fb: 8kHz mono int16, 320 samples × 2B = 640B.
- * 转 G.711A 后每包 320B / 40ms, 直接追加到 g_rec_alaw_fp.
- * 用 msi_action 而非独立线程, 最省资源 */
-static int32_t rec_alaw_action(struct msi *msi, uint32_t cmd_id, uint32_t param1, uint32_t param2)
-{
-    switch (cmd_id) {
-    case MSI_CMD_TRANS_FB: {
-        struct framebuff *fb = (struct framebuff *) param1;
-        if (fb->mtype != F_AUDIO || fb->stype != FSTYPE_AUDIO_ADC) {
-            return RET_ERR;
-        }
-        if (!g_rec_alaw_fp) return RET_ERR;
-
-        /* PCM int16 → G.711A (linear2alaw 每次 1 样本 -> 1 字节) */
-        uint32_t samples = fb->len / 2;
-        if (samples == 0 || samples > 1024) return RET_ERR;
-        /* 栈上 buffer: 40ms @ 8kHz = 320B, 留点余量 */
-        static uint8_t alaw_buf[512];
-        if (samples > sizeof(alaw_buf)) samples = sizeof(alaw_buf);
-        int16_t *pcm = (int16_t *) fb->data;
-        for (uint32_t i = 0; i < samples; i++) {
-            alaw_buf[i] = linear2alaw(pcm[i]);
-        }
-
-        /* 写文件 (mutex 防止 rec_create_file_cb 切 fp 踩车) */
-        os_mutex_lock(&g_rec_alaw_lock, osWaitForever);
-        if (g_rec_alaw_fp) {
-            osal_fwrite(alaw_buf, 1, samples, g_rec_alaw_fp);
-            /* 每秒 fsync 一次, 跟 mp4_syn 节奏对齐. 避免突然断电时 .alaw 文件
-             * 元数据 (FAT 表 size/cluster chain) 没刷盘 → 文件大小变 0 → 回放
-             * 无声音. fsync 单次 ~10-30ms, 25 帧/秒里每 25 帧才同步一次, 平均
-             * 开销 1ms/帧, 可接受 */
-            static uint32_t s_alaw_sync_last_ms = 0;
-            uint32_t now_ms = (uint32_t)os_jiffies_to_msecs(os_jiffies());
-            if ((uint32_t)(now_ms - s_alaw_sync_last_ms) >= 1000) {
-                s_alaw_sync_last_ms = now_ms;
-                osal_fsync(g_rec_alaw_fp);
-//                os_sleep_ms(1);   /* fsync 后让出 CPU 给 WiFi 收 TCP 包 */
-            }
-        }
-        os_mutex_unlock(&g_rec_alaw_lock);
-        return RET_ERR;   /* 不占 fbq, 写完立即告诉上游失败丢弃 */
-    }
-    default:
-        break;
-    }
-    return RET_OK;
-}
 
 /* ==== 调试模式: DRY_RUN 模式下不写卡, 接收 fb 立刻返回 RET_ERR 丢弃 ====
  * 1 = 开启 DRY RUN (不写卡, 用于排查非写卡路径的问题)
@@ -1546,11 +1903,20 @@ static int32_t rec_dryrun_action(struct msi *msi, uint32_t cmd_id, uint32_t para
 }
 #endif
 
+static int rec_start_raw(uint8_t event_type);
 int _rp_record_start(uint8_t event_type)
 {
-    if (g_rec_msi) {
-        os_printf(KERN_INFO "record already started\n");
-        return 0;
+    if (rec_sd_enter()) return -1;
+    int ret = rec_start_raw(event_type);
+    rec_sd_leave();
+    return ret;
+}
+static int rec_start_raw(uint8_t event_type)
+{
+    if (g_sd_formatting) return -1;
+    if (g_rec_msi || g_rec_file_closing) {
+        os_printf(KERN_INFO "record already started or stopping\n");
+        return g_rec_msi ? 0 : -1;
     }
 
     g_rec_h264 = msi_find(AUTO_H264, 1);
@@ -1580,17 +1946,21 @@ int _rp_record_start(uint8_t event_type)
     return 0;
 
 #else
-    /* 初始化 alaw 文件互斥锁 (一次性) */
-    if (!g_rec_alaw_lock_inited) {
-        os_mutex_init(&g_rec_alaw_lock);
-        g_rec_alaw_lock_inited = 1;
-    }
 
     /* 初始化 g_curfile (先设置 event, create_file 时会用) */
     g_curfile.event = event_type;
     g_curfile.extended = 0;
 
-    /* MP4 只写 H264 视频，音频由独立 .alaw 文件保存。 */
+    /* 先准备 AAC encoder，再建立双轨 MP4 复用器。 */
+    uint32_t mp4_audio_encode = 0;
+    if (rec_aac_prepare() != RET_OK) {
+        os_printf(KERN_ERR "record_start: AAC encoder prepare failed\n");
+        msi_put(g_rec_h264);
+        g_rec_h264 = NULL;
+        return -1;
+    }
+    mp4_audio_encode = AAC_ENC;
+
     static struct file_process fp_cfg;
     os_memset(&fp_cfg, 0, sizeof(fp_cfg));
     fp_cfg.loop        = NULL;
@@ -1599,6 +1969,7 @@ int _rp_record_start(uint8_t event_type)
     fp_cfg.create_file = rec_create_file_cb;
     fp_cfg.loop_free   = rec_loop_free_cb;
     fp_cfg.lock_file   = NULL;
+    fp_cfg.end_encode  = rec_end_encode_cb;
 
     /* 录像 filter_type = REC_STREAM_STYPE, 由 project_config.h 的 REC_STREAM_TYPE 选:
      *   REC_STREAM_TYPE=0 → 主码流 (826: VPP_DATA0/720P;  828: VPP_DATA0/1080P)
@@ -1609,11 +1980,12 @@ int _rp_record_start(uint8_t event_type)
                                      FRAMEBUFF_SOURCE_CAMERA0,
                                      REC_STREAM_STYPE,
                                      rec_min,
-                                     0,
+                                     mp4_audio_encode,
                                      &fp_cfg,
                                      0);
     if (!g_rec_msi) {
         os_printf(KERN_ERR "record_start: mp4_encode init failed\n");
+        rec_aac_stop("sd_rec_mp4");
         msi_put(g_rec_h264);
         g_rec_h264 = NULL;
         return -1;
@@ -1621,20 +1993,20 @@ int _rp_record_start(uint8_t event_type)
 
     msi_add_output(g_rec_h264, NULL, "sd_rec_mp4");
 
-    /* 启动 video-only MP4，再创建独立 .alaw 写入 MSI。 */
+    /* H264/AAC 两路都接好后再启动，保证首个 MP4 从开始就是双轨文件。 */
+    if (rec_aac_attach("sd_rec_mp4") != RET_OK) {
+        os_printf(KERN_ERR "record_start: AAC attach failed\n");
+        msi_del_output(g_rec_h264, NULL, "sd_rec_mp4");
+        msi_destroy(g_rec_msi);
+        g_rec_msi = NULL;
+        rec_aac_stop("sd_rec_mp4");
+        msi_put(g_rec_h264);
+        g_rec_h264 = NULL;
+        return -1;
+    }
     msi_do_cmd(g_rec_msi, MSI_CMD_MEDIA_CTRL, MSI_MEDIA_CTRL_RECORD_START, 0);
 
-    /* 独立音频录制 msi: 订阅 S_AUADC 的 PCM fb, 在 action 里转 G.711A 写 .alaw */
-    g_rec_alaw = msi_new("sd_rec_alaw", 2, NULL);
-    if (g_rec_alaw) {
-        g_rec_alaw->action = rec_alaw_action;
-        g_rec_alaw->enable = 1;
-        auadc_msi_add_output(AUSYS_AUAD, "sd_rec_alaw");
-    } else {
-        os_printf(KERN_ERR "record_start: sd_rec_alaw create fail\n");
-    }
-
-    os_printf(KERN_INFO "record started (video-only MP4 + alaw), event=%d, min=%d\n",
+    os_printf(KERN_INFO "record started (single MP4: H264+AAC), event=%d, min=%d\n",
               event_type, rec_min);
     return 0;
 #endif
@@ -1648,35 +2020,22 @@ int _rp_record_stop(void)
     if (g_rec_h264)
         msi_del_output(g_rec_h264, NULL, "sd_rec_mp4");
 
-    /* 停止 alaw msi, 断开 S_AUADC → sd_rec_alaw 的投递 */
-    if (g_rec_alaw) {
-        /* 反向断开 S_AUADC 到 sd_rec_alaw 的绑定 */
-        struct msi *adc = get_auadc_msi(AUSYS_AUAD);
-        if (adc) {
-            msi_del_output(adc, NULL, "sd_rec_alaw");
-        }
-        msi_destroy(g_rec_alaw);
-        g_rec_alaw = NULL;
-    }
+    /* 先停止 AAC 输入，避免 MP4 收尾时还有音频 framebuff 进入队列。 */
+    rec_aac_stop("sd_rec_mp4");
 
-    /* 关闭 alaw 文件 */
-    if (g_rec_alaw_lock_inited) {
-        os_mutex_lock(&g_rec_alaw_lock, osWaitForever);
-        if (g_rec_alaw_fp) {
-            osal_fclose(g_rec_alaw_fp);
-            g_rec_alaw_fp = NULL;
-        }
-        os_mutex_unlock(&g_rec_alaw_lock);
-    }
-
-    msi_destroy(g_rec_msi);
+    /* msi_destroy 只发起异步销毁。先将全局句柄置空并保留
+     * g_curfile，等 rec_end_encode_cb 确认 mp4_deinit+fclose 后再投递校正。 */
+    struct msi *closing_msi = g_rec_msi;
+    g_rec_file_closing = 1;
     g_rec_msi = NULL;
+    msi_destroy(closing_msi);
     if (g_rec_h264) {
         msi_put(g_rec_h264);
         g_rec_h264 = NULL;
     }
+    if (!g_rec_file_closing)
+        os_memset(&g_curfile, 0, sizeof(g_curfile));
 
-    os_memset(&g_curfile, 0, sizeof(g_curfile));
     os_printf(KERN_INFO "record stopped\n");
     return 0;
 }
@@ -1720,6 +2079,10 @@ int rec_trigger_alarm(uint8_t event_type)
  * 录像文件列表 (按需扫描 + 合并相邻同类事件)
  * ========================================================================= */
 
+/* 切片达到计划时长后要等下一帧 I 帧，编码器最长允许约 3 秒；文件名又只有
+ * 秒级精度，因此列表合并额外保留 5 秒容差。超过该值仍视为真实缺录像。 */
+#define REC_LIST_MERGE_GAP_SEC  5U
+
 /* 内部: 遍历当日 day_arr, 按时间范围 + 相邻合并策略生成输出条目.
  * @param out_arr NULL 时仅统计数量 (pass1), 非 NULL 时填充 (pass2)
  * @return 产生的条目数 (pass1 模式下也有效), out_arr 满时停止 */
@@ -1727,44 +2090,42 @@ static int rec_list_fold_day(const scan_item_t *day_arr, uint32_t day_cnt,
                              uint32_t t_start, uint32_t t_end,
                              SAvExEvent *out_arr, int out_cap)
 {
-    int out_idx = -1;
+    int      out_cnt = 0;
+    uint8_t  merged_event = 0;
+    uint32_t merged_start = 0;
+    uint32_t merged_end = 0;
+
     for (uint32_t i = 0; i < day_cnt; i++) {
         uint32_t ft0 = day_arr[i].t_start;
         uint32_t ft1 = ft0 + day_arr[i].duration;
         if (ft1 < t_start) continue;
         if (ft0 >= t_end) break;
 
-        /* 尝试与上一条合并 (事件相同 && 时间连续允许 2s 误差) */
-        if (out_idx >= 0) {
-            uint8_t  prev_event;
-            uint32_t prev_t0, prev_end;
-            if (out_arr) {
-                prev_t0    = (uint32_t) TcuTimeDay2T(&out_arr[out_idx].start_time);
-                prev_end   = prev_t0 + out_arr[out_idx].file_len;
-                prev_event = out_arr[out_idx].event;
-            } else {
-                /* pass1 仅统计, 从 day_arr 往回找最近一个 "被留下" 的条目.
-                 * 这里简化: 假设合并只会发生在相邻 day_arr 元素 (实测录像命名连续成立) */
-                prev_t0    = day_arr[i - 1].t_start;       /* i>=1 因为 out_idx>=0 */
-                prev_end   = prev_t0 + day_arr[i - 1].duration;
-                prev_event = day_arr[i - 1].event;
-            }
-            if (prev_event == day_arr[i].event &&
-                ft0 >= prev_end - 2 && ft0 <= prev_end + 2) {
-                if (out_arr) out_arr[out_idx].file_len = ft1 - prev_t0;
-                continue;
-            }
+        /* 已按开始时间排序。只要当前片段与已合并区间重叠，或间隔不超过
+         * REC_LIST_MERGE_GAP_SEC，就并入同一条；结束时间取 max，避免嵌套/
+         * 重叠片段把区间错误缩短。pass1/pass2 共用同一状态，数量严格一致。 */
+        if (out_cnt > 0 && merged_event == day_arr[i].event &&
+            ft0 <= merged_end + REC_LIST_MERGE_GAP_SEC) {
+            if (ft1 > merged_end)
+                merged_end = ft1;
+            if (out_arr)
+                out_arr[out_cnt - 1].file_len = merged_end - merged_start;
+            continue;
         }
-        if (out_idx + 1 >= out_cap) break;
-        out_idx++;
+
+        if (out_cnt >= out_cap) break;
+        merged_start = ft0;
+        merged_end   = ft1;
+        merged_event = day_arr[i].event;
         if (out_arr) {
-            TcuT2TimeDay((time_t) ft0, &out_arr[out_idx].start_time);
-            out_arr[out_idx].file_len = day_arr[i].duration;
-            out_arr[out_idx].event    = day_arr[i].event;
-            out_arr[out_idx].flags    = 0;
+            TcuT2TimeDay((time_t) ft0, &out_arr[out_cnt].start_time);
+            out_arr[out_cnt].file_len = day_arr[i].duration;
+            out_arr[out_cnt].event    = day_arr[i].event;
+            out_arr[out_cnt].flags    = 0;
         }
+        out_cnt++;
     }
-    return out_idx + 1;
+    return out_cnt;
 }
 
 /* 单次查询只返回 t_start 所在那一天的条目 (本地日).
@@ -1774,7 +2135,17 @@ static int rec_list_fold_day(const scan_item_t *day_arr, uint32_t day_cnt,
  *     所以这里必须用 utc_to_dir(t_start) 推目录, 不能按 UTC 86400 对齐.
  *     之前按 UTC 对齐会扫到前一天 (北京 5-6 00:00 对应真实 UTC 5-5 16:00,
  *     86400 对齐后 day0 是 5-5 00:00 UTC, 目录是 "20260505"), 导致 0 records. */
+static int rec_list_get_raw(uint32_t t_start, uint32_t t_end, SAvExEvent **out_items);
 int rec_list_get(uint32_t t_start, uint32_t t_end, SAvExEvent **out_items)
+{
+    if (!out_items) return -1;
+    *out_items = NULL;
+    if (rec_sd_enter()) return -1;
+    int ret = rec_list_get_raw(t_start, t_end, out_items);
+    rec_sd_leave();
+    return ret;
+}
+static int rec_list_get_raw(uint32_t t_start, uint32_t t_end, SAvExEvent **out_items)
 {
     if (!out_items) return -1;
     *out_items = NULL;
@@ -1788,7 +2159,8 @@ int rec_list_get(uint32_t t_start, uint32_t t_end, SAvExEvent **out_items)
 
     scan_item_t *day_arr = NULL;
     uint32_t     day_cnt = 0;
-    if (scan_day_dir(date_dir, &day_arr, &day_cnt) != 0 || day_cnt == 0) {
+    if (rec_idx_get_day(date_dir, &day_arr, &day_cnt) != 0) return -1;
+    if (day_cnt == 0) {
         os_printf(KERN_INFO "rec_list_get: scan(%s) empty (t_start=%u)\n",
                   date_dir, t_start);
         if (day_arr) RP_FREE(day_arr);
@@ -1834,25 +2206,26 @@ static int day_dir_has_mp4(const char *date_dir)
 {
     char sub_path[64];
     os_snprintf(sub_path, sizeof(sub_path), "%s/%s", REC_ROOT_PATH, date_dir);
-    void *d = osal_opendir(sub_path);
-    if (!d) return 0;
+    void *d = rec_dir_open(sub_path);
+    if (!d) return -1;
 
     /* 快照正在录的文件名/路径, 和 scan_day_dir 逻辑一致 */
     char cur_fname_snap[FILE_NAME_LEN + 1] = {0};
     char cur_fpath_snap[96] = {0};
-    if (g_rec_msi) {
+    if (g_rec_msi || g_rec_file_closing) {
         os_strncpy(cur_fname_snap, g_curfile.fname, sizeof(cur_fname_snap) - 1);
         os_strncpy(cur_fpath_snap, g_curfile.fpath, sizeof(cur_fpath_snap) - 1);
     }
 
     int found = 0;
     void *fno;
-    while ((fno = osal_readdir(d)) != NULL) {
+    while ((fno = rec_dir_read(d)) != NULL) {
         char *fn = osal_dirent_name(fno);
         if (!fn || osal_dirent_isdir(fno)) continue;
         int nlen = os_strlen(fn);
         if (nlen < 5) continue;
         if (os_strcasecmp(fn + nlen - 4, REC_EXT_NAME) != 0) continue;
+        if (parse_filename(fn, NULL, NULL, NULL, NULL, NULL)) continue;
         /* 跳过正在录的文件 */
         if (cur_fname_snap[0] &&
             os_strcmp(fn, cur_fname_snap) == 0 &&
@@ -1862,32 +2235,47 @@ static int day_dir_has_mp4(const char *date_dir)
         found = 1;
         break;
     }
-    osal_closedir(d);
-    return found;
+    int failed = rec_dir_failed(d);
+    rec_dir_close(d);
+    return failed ? -1 : found;
 }
 
 /* 扫描 REC_ROOT_PATH 下的 YYYYMMDD 子目录, 返回有录像的日期列表.
  * 只统计"目录内至少有 1 个 MP4 文件"的合法日期目录 */
+static int rec_list_days_raw(SDay **out_days);
 int rec_list_days_get(SDay **out_days)
+{
+    if (!out_days) return -1;
+    *out_days = NULL;
+    if (rec_sd_enter()) return -1;
+    int ret = rec_list_days_raw(out_days);
+    rec_sd_leave();
+    return ret;
+}
+static int rec_list_days_raw(SDay **out_days)
 {
     if (!out_days) return -1;
     *out_days = NULL;
 
     /* 第一遍: 数数有多少个合法的 YYYYMMDD 目录且内含 MP4 */
-    void *dir = osal_opendir(REC_ROOT_PATH);
-    if (!dir) return 0;   /* REC 目录还没建, 没录像 */
+    void *dir = rec_dir_open(REC_ROOT_PATH);
+    if (!dir) return -1;
 
     uint32_t cnt = 0;
     void *fno;
-    while ((fno = osal_readdir(dir)) != NULL) {
+    while ((fno = rec_dir_read(dir)) != NULL) {
         char *name = osal_dirent_name(fno);
         if (!name || !osal_dirent_isdir(fno)) continue;
         uint16_t y; uint8_t mon, day;
         if (parse_dirname(name, &y, &mon, &day) != 0) continue;
-        if (!day_dir_has_mp4(name)) continue;   /* 空目录忽略 */
+        int has = day_dir_has_mp4(name);
+        if (has < 0) { rec_dir_close(dir); return -1; }
+        if (!has) continue;
         cnt++;
     }
-    osal_closedir(dir);
+    int failed = rec_dir_failed(dir);
+    rec_dir_close(dir);
+    if (failed) return -1;
     if (cnt == 0) return 0;
 
     /* 第二遍: 分配数组并填充 */
@@ -1895,22 +2283,26 @@ int rec_list_days_get(SDay **out_days)
     if (!arr) return -1;
     os_memset(arr, 0, sizeof(SDay) * cnt);
 
-    dir = osal_opendir(REC_ROOT_PATH);
+    dir = rec_dir_open(REC_ROOT_PATH);
     if (!dir) { RP_FREE(arr); return -1; }
 
     uint32_t idx = 0;
-    while ((fno = osal_readdir(dir)) != NULL && idx < cnt) {
+    while ((fno = rec_dir_read(dir)) != NULL && idx < cnt) {
         char *name = osal_dirent_name(fno);
         if (!name || !osal_dirent_isdir(fno)) continue;
         uint16_t y; uint8_t mon, day;
         if (parse_dirname(name, &y, &mon, &day) != 0) continue;
-        if (!day_dir_has_mp4(name)) continue;   /* 和第一遍保持一致 */
+        int has = day_dir_has_mp4(name);
+        if (has < 0) { rec_dir_close(dir); RP_FREE(arr); return -1; }
+        if (!has) continue;
         arr[idx].year  = y;
         arr[idx].month = mon;
         arr[idx].day   = day;
         idx++;
     }
-    osal_closedir(dir);
+    failed = rec_dir_failed(dir);
+    rec_dir_close(dir);
+    if (failed) { RP_FREE(arr); return -1; }
 
     /* 按日期升序排序 */
     if (idx > 1) {
@@ -1970,7 +2362,7 @@ static struct {
 /* 给 rec_bootstrap_thread 的预删除循环用 (它在 g_pb 之前定义, 无法直接读). */
 static int rec_pb_is_active(void)
 {
-    return g_pb.thread_alive ? 1 : 0;
+    return g_pb.thread_alive || mp4_demux_active_workers();
 }
 
 /* 按目标 UTC 时间, 查找要播放的文件.
@@ -1985,7 +2377,7 @@ static int pb_locate_file(uint32_t t_seek, char *out_date_dir, char *out_fname,
     char date_dir[16];
     utc_to_dir(t_seek, date_dir, sizeof(date_dir));
     scan_item_t *arr = NULL; uint32_t cnt = 0;
-    int sret = scan_day_dir(date_dir, &arr, &cnt);
+    int sret = pb_scan_day_retry(date_dir, &arr, &cnt);
     if (sret != 0 || cnt == 0) {
         os_printf(KERN_WARNING "pb_locate: scan(%s) ret=%d cnt=%u t_seek=%u\n",
                   date_dir, sret, cnt, t_seek);
@@ -2032,19 +2424,7 @@ static int pb_locate_file(uint32_t t_seek, char *out_date_dir, char *out_fname,
     return 0;
 }
 
-/* .alaw 独立文件读取回放
- *
- * 录像时 mp4 只存视频, 音频独立存成 .alaw 文件 (linear2alaw 转码). 回放时:
- *   1) pb_thread 拿 mp4 视频 fb, 同时打开同前缀的 .alaw 文件
- *   2) 按视频 ts 节奏读 320B/40ms alaw 发给 APP, 音频 ts 固定 40ms 递增
- *   3) 跨文件时关旧 .alaw 开新 .alaw, 和 mp4_demux 切换同步
- *
- * 好处: 完全绕开 AAC 解码器, G.711A 直接透传给 APP (APP 原生支持). */
-#define PB_PACK_BYTES        320     /* 单包 G.711A 字节数 (40ms @ 8kHz, 对齐直播) */
-#define PB_PACK_INTERVAL_MS  40      /* 每包音频间隔 40ms */
-static void    *g_pb_alaw_fp   = NULL;   /* 当前 .alaw 读取文件句柄 */
-static uint8_t  g_pb_alaw_buf[PB_PACK_BYTES];    /* 一包 alaw 读缓冲 */
-/* 下一包 G.711A 相对同步点的时间戳。 */
+/* MP4 中 AAC 帧的最近发送时间戳，用于回放诊断日志。 */
 static uint32_t g_pb_audio_ts  = 0;
 
 /* 反压机制: TciSendPbFrame 返回 TCE_NETWORK_BUSY (-10004001) 时, 说明探鸽 SDK
@@ -2056,7 +2436,6 @@ static uint32_t g_pb_audio_ts  = 0;
 #define TCE_NETWORK_BUSY_VAL  (-10004001)
 #define PB_BUSY_SLEEP_MS      200       /* 每次 BUSY 后的休眠间隔 (探鸽文档建议 300ms) */
 #define PB_BUSY_MAX_RETRY     20        /* 最多重试次数, 20*200ms=4s 兜底退出 */
-
 /* 预检 MP4 文件是否合法可播放.
  *
  * !!! 为什么要自己预检, 不直接交给 mp4_demux_msi_init 判定:
@@ -2066,43 +2445,207 @@ static uint32_t g_pb_audio_ts  = 0;
  *   (mp4_demux_thread 根本没启动就进 err 分支了) → 调用线程永久挂起.
  *   所以我们必须在调用 mp4_demux_msi_init 之前自己先判断.
  *
- * SDK 的 MP4_open_init 用 fast-start 布局: 文件头是 ftyp + moov + mdat,
- * moov 在文件开头. 所以扫开头 8KB 找 "moov" 4 字节签名即可.
+ * SDK 的 MP4_open_init 用 fast-start 布局: 文件头是 ftyp + moov + mdat。
+ * 这里只按 box header 层级跳转，读取 stts/stsz/stco 计数，不读 mdat。
  *
  * 额外: 正在录制中的文件, moov box 虽已写 header 但内容是预留空位, SPS/PPS
  * 还没填入. 这种文件"可以扫到 moov 签名"但 mp4_demux_msi_init 解析时仍会
  * SPS=0/PPS=0 导致 SDK 死锁. 所以当前正在录的文件必须在上层额外跳过
  * (见下方 pb_is_current_recording_file).
  *
- * 返回: 1=合法可播, 0=坏文件 / 不可读 */
-#define PB_MP4_SCAN_HEAD_SZ  (8 * 1024)   /* 扫头 8KB, ftyp+moov 合计通常 < 6KB */
+ * 返回: 1=合法可播, 0=结构不完整/不支持, -1=打开或读取失败。 */
+typedef struct {
+    uint32_t stts_samples;
+    uint32_t stsz_count;
+    uint32_t stco_count;
+    uint8_t  has_stts;
+    uint8_t  has_stsz;
+    uint8_t  has_stco;
+} pb_mp4_track_index_t;
+
+/* 扫描索引：0=有效，-1=结构异常，-2=读写失败。 */
+static int pb_mp4_scan_track_index(F_FILE *fp, uint32_t begin, uint32_t end,
+                                   uint8_t depth, pb_mp4_track_index_t *idx)
+{
+    uint32_t pos = begin;
+
+    if (!fp || !idx || depth > 4)
+        return -1;
+
+    while (pos <= end && end - pos >= 8U) {
+        uint8_t hdr[8];
+        uint32_t box_size;
+        uint32_t box_end;
+
+        if (osal_fseek(fp, pos) != FR_OK ||
+            osal_fread(hdr, 1, sizeof(hdr), fp) != sizeof(hdr))
+            return -2;
+
+        box_size = rec_mp4_be32(hdr);
+        if (box_size == 0U) {
+            box_end = end;
+        } else {
+            if (box_size == 1U || box_size < 8U || box_size > end - pos)
+                return -1;
+            box_end = pos + box_size;
+        }
+
+        if (rec_mp4_box_is(hdr + 4, "mdia") ||
+            rec_mp4_box_is(hdr + 4, "minf") ||
+            rec_mp4_box_is(hdr + 4, "stbl")) {
+            int ret = pb_mp4_scan_track_index(fp, pos + 8U, box_end,
+                                               depth + 1U, idx);
+            if (ret != 0) return ret;
+        } else if (rec_mp4_box_is(hdr + 4, "stsz")) {
+            uint8_t body[12]; /* 版本及标志 + 样本大小 + 样本数量 */
+            if (box_end - pos < 20U) return -1;
+            if (osal_fseek(fp, pos + 8U) != FR_OK ||
+                osal_fread(body, 1, sizeof(body), fp) != sizeof(body))
+                return -2;
+            /* 当前 demux 仅支持 sample_size=0（每帧单独记长度）。 */
+            if (rec_mp4_be32(body + 4) != 0U)
+                return -1;
+            idx->stsz_count = rec_mp4_be32(body + 8);
+            idx->has_stsz = 1;
+        } else if (rec_mp4_box_is(hdr + 4, "stco")) {
+            uint8_t body[8]; /* 版本及标志 + 索引条目数量 */
+            if (box_end - pos < 16U) return -1;
+            if (osal_fseek(fp, pos + 8U) != FR_OK ||
+                osal_fread(body, 1, sizeof(body), fp) != sizeof(body))
+                return -2;
+            idx->stco_count = rec_mp4_be32(body + 4);
+            idx->has_stco = 1;
+        } else if (rec_mp4_box_is(hdr + 4, "stts")) {
+            uint8_t body[8]; /* 版本及标志 + 索引条目数量 */
+            uint32_t entry_count;
+            uint32_t samples = 0;
+            uint32_t i;
+
+            if (box_end - pos < 16U) return -1;
+            if (osal_fseek(fp, pos + 8U) != FR_OK ||
+                osal_fread(body, 1, sizeof(body), fp) != sizeof(body))
+                return -2;
+            entry_count = rec_mp4_be32(body + 4);
+            if (entry_count > (box_end - pos - 16U) / 8U)
+                return -1;
+            for (i = 0; i < entry_count; i++) {
+                uint8_t ent[8];
+                uint32_t n;
+                if (osal_fseek(fp, pos + 16U + i * 8U) != FR_OK ||
+                    osal_fread(ent, 1, sizeof(ent), fp) != sizeof(ent))
+                    return -2;
+                n = rec_mp4_be32(ent);
+                if (samples > 0xffffffffU - n)
+                    return -1;
+                samples += n;
+            }
+            idx->stts_samples = samples;
+            idx->has_stts = 1;
+        }
+
+        if (box_end <= pos)
+            return -1;
+        pos = box_end;
+    }
+    return 0;
+}
+
 static int pb_mp4_is_playable(const char *mp4_full_path)
 {
-    void *fp = osal_fopen(mp4_full_path, "rb");
-    if (!fp) return 0;
-    uint32_t fsize = osal_fsize(fp);
-    if (fsize < 64) { osal_fclose(fp); return 0; }   /* 太小, 不可能是合法 mp4 */
+    F_FILE *fp = osal_fopen(mp4_full_path, "rb");
+    uint32_t fsize;
+    uint32_t pos = 0;
+    uint8_t found_moov = 0;
+    uint8_t track_count = 0;
+    pb_mp4_track_index_t tracks[2];
 
-    uint32_t scan_sz = (fsize < PB_MP4_SCAN_HEAD_SZ) ? fsize : PB_MP4_SCAN_HEAD_SZ;
-    /* 扫描 buffer 按芯片分池 (同 RP_MALLOC 规则):
-     *   826: SRAM (PSRAM 仅 4MB 极度紧张)
-     *   828: PSRAM (SRAM 紧张) */
-    uint8_t *buf = (uint8_t *) RP_MALLOC(scan_sz);
-    if (!buf) { osal_fclose(fp); return 0; }
-    int got = osal_fread(buf, 1, scan_sz, fp);
-    osal_fclose(fp);
+    if (!fp)
+        return -1;
+    fsize = osal_fsize(fp);
+    if (fsize < 64U) {
+        osal_fclose(fp);
+        return 0;
+    }
+    os_memset(tracks, 0, sizeof(tracks));
 
-    int ok = 0;
-    if (got >= 4) {
-        for (int i = 0; i <= got - 4; i++) {
-            if (buf[i] == 'm' && buf[i+1] == 'o' && buf[i+2] == 'o' && buf[i+3] == 'v') {
-                ok = 1;
-                break;
+    while (pos <= fsize && fsize - pos >= 8U) {
+        uint8_t hdr[8];
+        uint32_t box_size;
+        uint32_t box_end;
+
+        if (osal_fseek(fp, pos) != FR_OK ||
+            osal_fread(hdr, 1, sizeof(hdr), fp) != sizeof(hdr))
+            goto io_error;
+        box_size = rec_mp4_be32(hdr);
+        if (box_size == 0U) {
+            box_end = fsize;
+        } else {
+            if (box_size == 1U || box_size < 8U || box_size > fsize - pos)
+                goto invalid;
+            box_end = pos + box_size;
+        }
+
+        if (rec_mp4_box_is(hdr + 4, "moov")) {
+            uint32_t child = pos + 8U;
+            found_moov = 1;
+            while (child <= box_end && box_end - child >= 8U) {
+                uint8_t chdr[8];
+                uint32_t child_size;
+                uint32_t child_end;
+
+                if (osal_fseek(fp, child) != FR_OK ||
+                    osal_fread(chdr, 1, sizeof(chdr), fp) != sizeof(chdr))
+                    goto io_error;
+                child_size = rec_mp4_be32(chdr);
+                if (child_size < 8U || child_size > box_end - child)
+                    goto invalid;
+                child_end = child + child_size;
+
+                if (rec_mp4_box_is(chdr + 4, "trak")) {
+                    if (track_count >= 2U) goto invalid;
+                    int ret = pb_mp4_scan_track_index(fp, child + 8U, child_end,
+                                                      0, &tracks[track_count]);
+                    if (ret == -2) goto io_error;
+                    if (ret != 0) goto invalid;
+                    track_count++;
+                }
+                child = child_end;
             }
+            break;
+        }
+
+        if (box_end <= pos)
+            goto invalid;
+        pos = box_end;
+    }
+
+    if (!found_moov || track_count == 0U)
+        goto invalid;
+
+    for (uint8_t i = 0; i < track_count; i++) {
+        pb_mp4_track_index_t *idx = &tracks[i];
+        /* 本工程的 miniMP4 每个 sample 写一个 chunk，因此三者
+         * 必须一致。任意不一致都视为未完成/损坏文件，直接跳过。 */
+        if (!idx->has_stts || !idx->has_stsz || !idx->has_stco ||
+            idx->stsz_count == 0U ||
+            idx->stts_samples != idx->stsz_count ||
+            idx->stco_count != idx->stsz_count) {
+            os_printf(KERN_ERR "pb: invalid MP4 track %u: stts=%u stsz=%u stco=%u (%s)\n",
+                      i, idx->stts_samples, idx->stsz_count, idx->stco_count,
+                      mp4_full_path);
+            goto invalid;
         }
     }
-    RP_FREE(buf);
-    return ok;
+
+    osal_fclose(fp);
+    return 1;
+
+io_error:
+    osal_fclose(fp);
+    return -1;
+invalid:
+    osal_fclose(fp);
+    return 0;
 }
 
 /* 判断路径是否是当前正在录制中的文件. 正在录的文件 moov 内容尚未写入,
@@ -2110,32 +2653,230 @@ static int pb_mp4_is_playable(const char *mp4_full_path)
  * 等下次 APP 回放时它已经录完关闭就能正常播放. */
 static int pb_is_current_recording_file(const char *mp4_full_path)
 {
-    if (!mp4_full_path || !g_curfile.fpath[0]) return 0;
+    if (!mp4_full_path || (!g_rec_msi && !g_rec_file_closing) || !g_curfile.fpath[0]) return 0;
     return os_strcmp(mp4_full_path, g_curfile.fpath) == 0 ? 1 : 0;
 }
 
-/* 删除坏录像文件: mp4_demux_msi_init 失败最常见原因是断电残留, 文件内
- * 没有 moov box / SPS PPS 解析不出. 直接把该 .MP4 和同名 .alaw 一起删掉,
- * 下次扫描录像列表就不会再看到它, 也不会再触发 malloc sps or pps err.
- *
- * 二次保险: 正在录制的文件绝不删 (pb_is_current_recording_file). */
-static void pb_delete_bad_file(const char *mp4_full_path)
+/* 1=打开成功，0=结构无效（跳过），-1=读写或资源异常（停止）。
+ * 打开或读取失败不代表文件损坏，回放流程中不得删除录像文件。 */
+static int pb_open_checked(const char *demux_name, const char *path)
 {
-    if (!mp4_full_path || mp4_full_path[0] == 0) return;
-    if (pb_is_current_recording_file(mp4_full_path)) {
-        os_printf(KERN_WARNING "pb: %s is current recording, skip delete\n",
-                  mp4_full_path);
-        return;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (g_sd_formatting || g_pb.seek_req || g_pb.state == PB_ST_STOP_REQ || g_pb.state == PB_ST_IDLE)
+            return -1;
+        int valid = pb_mp4_is_playable(path);
+        if (valid == 0) return 0;
+        if (valid > 0) {
+            char attempt_name[32];
+            os_snprintf(attempt_name, sizeof(attempt_name), "%s_%u",
+                        demux_name, (unsigned)attempt);
+            g_pb.demux_msi = mp4_demux_msi_init(attempt_name, path);
+            if (g_pb.demux_msi) return 1;
+        }
+        os_printf(KERN_WARNING "pb: open/read/resource failure, keep file %s (attempt %d/3)\n",
+                  path, attempt + 1);
+        if (attempt < 2) {
+            for (int n = 0; n < 10; ++n) {
+                if (g_pb.seek_req || g_pb.state == PB_ST_STOP_REQ || g_pb.state == PB_ST_IDLE)
+                    return -1;
+                os_sleep_ms(10);
+            }
+        }
     }
-    FRESULT res = osal_unlink(mp4_full_path);
-    os_printf(KERN_WARNING "pb: delete bad mp4 %s res=%d\n", mp4_full_path, res);
-    int plen = os_strlen(mp4_full_path);
-    int elen = os_strlen(REC_EXT_NAME);
-    if (plen > elen) {
-        char alaw_path[96];
-        os_snprintf(alaw_path, sizeof(alaw_path), "%.*s%s",
-                    plen - elen, mp4_full_path, REC_AUDIO_EXT_NAME);
-        osal_unlink(alaw_path);   /* 忽略错误: 可能没有 .alaw */
+    return -1;
+}
+
+/* =========================================================================
+ * 卡回放音频: AAC → PCM → G.711A 转码
+ *
+ * 录像文件音频轨是 AAC-LC。APP 端 AAC 解码不稳定(卡顿/噪音), 因此回放时由
+ * 设备端解码成 PCM, 再用 linear2alaw 转 G.711A 发送, 与实时流音频格式一致
+ * (8kHz/16bit/mono, 每包 40ms = 320 字节)。
+ *
+ * 使用 SDK AAC 解码 MSI 的独立线程，PCM 保留 MP4 时间戳后打包发送。
+ * 输入必须是完整 ADTS 帧(7 字节头 + AU), demux 输出的 fb 正好是这个格式。
+ *
+ * AAC 一帧固定 1024 样本 = 128ms = 1024 字节 G.711A, 不是 320 的整数倍,
+ * 因此用累加器跨帧凑满 320 字节再发, 保证每包严格 40ms。
+ * ========================================================================= */
+#define PB_ALAW_PACK_BYTES      320     /* 一包 G.711A (40ms @ 8kHz mono) */
+#define PB_PACK_INTERVAL_MS     40      /* 每包 G.711A 对应 40ms (320B @ 8kHz) */
+#define PB_PCM_MAX_SAMPLES      2048    /* AAC 一帧最多 1024 样本, 留一倍余量 */
+#define PB_ALAW_ACC_BYTES       (PB_PCM_MAX_SAMPLES + PB_ALAW_PACK_BYTES)
+
+static uint8_t *g_pb_alaw_acc = NULL; /* 动态申请的 PSRAM 缓冲 */
+static int g_pb_alaw_acc_len = 0;
+static uint32_t g_pb_alaw_acc_ts = 0; /* 首个样本在文件中的 PTS，单位毫秒 */
+static struct msi *g_pb_aac_msi = NULL;
+static struct msi *g_pb_pcm_sink = NULL;
+
+/* 拖动或切换文件时丢弃跨越断点的残留样本。
+ * 解码器的生命周期由 pb_aac_msi_destroy/create 单独管理。 */
+static void pb_aac_reset(void)
+{
+    g_pb_alaw_acc_len = 0;
+    g_pb_alaw_acc_ts = 0;
+}
+
+/* 拆掉解码器 + PCM sink. 销毁 demux 之前必须先调用, 否则解码器的
+ * src_msi 指向已释放的 demux. */
+static void pb_aac_msi_destroy(void)
+{
+    if (g_pb_pcm_sink) { msi_destroy(g_pb_pcm_sink); g_pb_pcm_sink = NULL; }
+    if (g_pb_aac_msi)  { msi_destroy(g_pb_aac_msi);  g_pb_aac_msi  = NULL; }
+}
+
+/* 在当前 demux 上挂 AAC 解码器. demux 每次创建后调用一次.
+ * 解码器把 PCM 输出到 pb_pcm_sink, pb_thread 从那里取帧转 G.711A. */
+static int pb_aac_msi_create(void)
+{
+    if (g_pb_aac_msi) return 0;
+    if (!g_pb.demux_msi)  return -1;
+
+    /* sink 只负责把解码器的输出收进队列, 不做任何处理.
+     *
+     * !!! sink 名字必须每次唯一, 不能用固定名:
+     *   msi_destroy() 只发起"异步销毁", seek 时 pb_aac_msi_destroy() 之后
+     *   立刻重建, 旧 sink 往往还没真正析构完 —— 同名 msi_new 会失败, 表现
+     *   为离开第一个文件后 "AAC decode msi init fail" 刷屏. 与 demux 用
+     *   sd_pb_demux_%u 自增序号同理. */
+    static uint32_t sink_seq = 0;
+    char sink_name[24];
+    os_snprintf(sink_name, sizeof(sink_name), "pb_pcm_sink_%u", ++sink_seq);
+
+    g_pb_pcm_sink = msi_new(sink_name, 8, NULL);
+    if (!g_pb_pcm_sink) {
+        os_printf(KERN_ERR "pb: pcm sink create fail (%s)\n", sink_name);
+        return -1;
+    }
+    g_pb_pcm_sink->action = NULL;
+    g_pb_pcm_sink->enable = 1;
+
+    AUDEC_INIT ai;
+    os_memset(&ai, 0, sizeof(ai));
+    ai.track_type    = MEDIA_TRACK;
+    ai.priority      = play_interruptible;
+    ai.direct_to_dac = 0;    /* 不走 DAC, PCM 交给 sink 走 P2P */
+    ai.use_tpc       = 0;
+    ai.destroy_self  = 0;
+    ai.src_msi       = g_pb.demux_msi;   /* 关键: 解码器自己订阅 demux 输出 */
+
+    g_pb_aac_msi = audio_decode_init(AAC_DEC, 8000, &ai);
+    if (!g_pb_aac_msi) {
+        os_printf(KERN_ERR "pb: AAC decode msi init fail (src=%s)\n", g_pb.demux_msi->name);
+        msi_destroy(g_pb_pcm_sink);
+        g_pb_pcm_sink = NULL;
+        return -1;
+    }
+
+    if (msi_add_output(g_pb_aac_msi, NULL, sink_name) != RET_OK) {
+        os_printf(KERN_ERR "pb: attach pcm sink fail (%s)\n", sink_name);
+        pb_aac_msi_destroy();
+        return -1;
+    }
+    os_printf(KERN_INFO "pb: AAC decode msi ready (src=%s, sink=%s)\n",
+              g_pb.demux_msi->name, sink_name);
+    return 0;
+}
+
+static uint32_t pb_clock_ms(void)
+{
+    return (uint32_t)os_jiffies_to_msecs(os_jiffies());
+}
+
+#define PB_AV_MAX_DIFF_MS 100U
+#define PB_AUDIO_SAMPLES_PER_MS 8U
+
+typedef struct {
+    uint32_t packets, pause, errors, busy, decoded, dropped;
+    int last_ret;
+} pb_audio_stats_t;
+
+/* PCM 携带对应 AAC 样本的结束 PTS。打包时保留首个样本的真实 PTS，
+ * 解码失败或丢包造成的时间间隔也必须保留。 */
+static void pb_audio_pump(uint32_t base_ms, uint32_t elapsed_ms,
+                          uint32_t video_ts, uint8_t video_valid,
+                          uint32_t *audio_ts, uint8_t *audio_valid,
+                          pb_audio_stats_t *stat)
+{
+    if (!g_pb_pcm_sink || !g_pb_alaw_acc || !video_valid ||
+        g_pb.state != PB_ST_PLAYING || g_pb.seek_req)
+        return;
+
+    /* 每次处理次数有限，持有视频帧时不得阻塞等待 PCM 或网络。 */
+    for (int n = 0; n < 8; ++n) {
+        if (g_pb.speed != PB_SPEED_1X)
+            g_pb_alaw_acc_len = 0;
+        if (g_pb_alaw_acc_len < PB_ALAW_PACK_BYTES) {
+            struct framebuff *pfb = msi_get_fb(g_pb_pcm_sink, 0);
+            if (!pfb) return;
+            int16_t *pcm = (int16_t *)pfb->data;
+            uint32_t samples = pfb->len / sizeof(int16_t);
+            uint32_t duration = samples / PB_AUDIO_SAMPLES_PER_MS;
+            uint32_t start_ms = pfb->time >= duration ? pfb->time - duration : 0;
+            uint32_t trim = 0;
+            stat->decoded += samples;
+            if (!pcm || !samples || samples > PB_PCM_MAX_SAMPLES ||
+                g_pb.speed != PB_SPEED_1X) {
+                msi_delete_fb(NULL, pfb);
+                stat->dropped++;
+                continue;
+            }
+            if (start_ms < base_ms) {
+                uint32_t before_ms = base_ms - start_ms;
+                trim = before_ms >= duration ? samples :
+                       before_ms * PB_AUDIO_SAMPLES_PER_MS;
+                start_ms += trim / PB_AUDIO_SAMPLES_PER_MS;
+            }
+            if (trim < samples) {
+                uint32_t expected_ms = g_pb_alaw_acc_ts +
+                    (uint32_t)g_pb_alaw_acc_len / PB_AUDIO_SAMPLES_PER_MS;
+                int32_t gap_ms = (int32_t)(start_ms - expected_ms);
+                /* 不得把缺失 AAC 帧前后的样本直接拼接到一起。 */
+                if (g_pb_alaw_acc_len && (gap_ms < -1 || gap_ms > 1)) {
+                    g_pb_alaw_acc_len = 0;
+                    stat->dropped++;
+                }
+                if (!g_pb_alaw_acc_len) g_pb_alaw_acc_ts = start_ms;
+                for (uint32_t i = trim; i < samples; ++i)
+                    g_pb_alaw_acc[g_pb_alaw_acc_len++] = linear2alaw(pcm[i]);
+            }
+            msi_delete_fb(NULL, pfb);
+            if (g_pb_alaw_acc_len < PB_ALAW_PACK_BYTES) continue;
+        }
+        uint32_t pkt_ts = g_pb_alaw_acc_ts - base_ms;
+        int32_t av_delta = (int32_t)(pkt_ts - video_ts);
+        if (av_delta > (int32_t)PB_AV_MAX_DIFF_MS || pkt_ts > elapsed_ms)
+            return; /* 保留尚未到发送时间的音频，让视频继续推进。 */
+        int stale = av_delta < -(int32_t)PB_AV_MAX_DIFF_MS;
+        if (stale) {
+            stat->dropped++;
+        } else {
+            int ret = TciSendPbFrame(g_pb.handle, TCMEDIA_AUDIO_G711A,
+                                    g_pb_alaw_acc, PB_ALAW_PACK_BYTES, pkt_ts, 2);
+            stat->last_ret = ret;
+            if (ret == TCE_NETWORK_BUSY_VAL) {
+                stat->busy++;
+                return; /* 下次处理时重试，过期的音频包最终会被丢弃。 */
+            }
+            if (ret > 0) {
+                *audio_ts = pkt_ts;
+                *audio_valid = 1;
+                g_pb_audio_ts = pkt_ts;
+                stat->packets++;
+            } else if (ret == 0) {
+                stat->pause++;
+            } else {
+                stat->errors++;
+            }
+        }
+        /* 即使发送失败，时间戳也按已消耗的样本数量推进。 */
+        g_pb_alaw_acc_len -= PB_ALAW_PACK_BYTES;
+        g_pb_alaw_acc_ts += PB_PACK_INTERVAL_MS;
+        if (g_pb_alaw_acc_len)
+            os_memmove(g_pb_alaw_acc, g_pb_alaw_acc + PB_ALAW_PACK_BYTES,
+                       g_pb_alaw_acc_len);
+        if (!stale) return; /* 每次处理最多发送一个音频包。 */
     }
 }
 
@@ -2147,23 +2888,19 @@ static void pb_thread(void *arg)
     char demux_name[24];     /* demux msi 名字, 每次切文件加序号避免同名冲突 */
     static uint32_t demux_seq = 0;
 
-    /* 播放结束判定:
-     * mp4_demux_msi 不支持 MSI_CMD_GET_RUNNING 命令, 所以不能用它判断文件播完.
-     * 改用: 已消费到至少一帧 + 连续 N 次 (~1s) 取不到 fb, 认为当前文件播完 */
+    /* 播放结束判定由 demux 的 MSI_VIDEO_DEMUX_GET_STATUS 提供。旧实现按空队列
+     * 计数，注释按 5ms/次估算，但循环实际 sleep 20ms，造成约 4 秒切片空档。 */
     uint8_t  frames_consumed = 0;
-    uint32_t empty_fb_count  = 0;
-    const uint32_t EMPTY_FB_THRESHOLD = 200;  /* 200 * 5ms = 1s */
 
-    /* 无累积 buffer，每次直接读取一包 40ms G.711A。 */
+    /* 音频时间戳与每次 seek/切片后的首个 I 帧重新对齐。 */
     g_pb_audio_ts = 0;
-    /* g_pb_alaw_fp 在 seek/切文件分支里打开 */
-
     /* 直到收到第一帧 I 帧才真正开始发送: 探鸽 SDK 对回放首帧是 I 帧才放行.
      * sync_sent 在每次 seek/切文件后清零, 碰到第一帧 I 帧时:
      *   1) 先发同步帧 (utc_time = 该 I 帧实际对应的 UTC 秒)
      *   2) 再发 [SC SPS][SC PPS][SC IDR] 的完整 I 帧
      * pending_sync_t0 是当前文件的 UTC 起点(文件名时间), 用于算 I 帧的 utc */
     uint8_t  sync_sent       = 0;
+    uint8_t  sync_response   = 1;    /* 拖动定位时为 1，自动切换下一文件时为 0 */
     uint32_t pending_sync_t0 = 0;    /* 当前文件 t_start (文件名时间, UTC 秒) */
     uint32_t ts_base_ms      = 0;    /* 时间戳基准: 视频首 I 帧的 fb->time, 后续所有 ts 减去它归零
                                       * 目的: 保证音视频 ts 在同一基准, 且都从 0 开始 (同步帧 utc 对齐) */
@@ -2173,11 +2910,24 @@ static void pb_thread(void *arg)
      *   wall_start_ms + (fb->time - ts_base_ms)
      * 还没到 → sleep 等; 到了/迟了 → 立刻发. seek/切文件时清零重新对齐. */
     uint32_t wall_start_ms   = 0;
-    /* 软件丢帧开关: 正常情况用 SDK 原生 MSI_VIDEO_DEMUX_JMP_TIME seek, 这里保持 0.
-     * 之前 SDK JMP 崩溃原因是 video-only mp4 (audio_samplerate=0) 时除零, 已修. */
+    /* 软件丢帧开关: 正常情况用 SDK 原生 MSI_VIDEO_DEMUX_JMP_TIME seek，这里保持 0。 */
     uint32_t pending_jmp_ms  = 0;
+    /* 音视频共用首 I 帧的 PTS 归零；保留真实 PTS 差，不伪造时间戳。
+     * 最近发送的时间戳同时用于 100ms 音视频窗口和诊断。 */
+    uint32_t sent_video_ts = 0;
+    uint32_t sent_audio_ts = 0;
+    uint8_t  sent_video_valid = 0;
+    uint8_t  sent_audio_valid = 0;
 
     os_printf(KERN_INFO "pb_thread: start\n");
+
+    /* PCM 由解码器帧池持有，这里只需要 2368 字节的音频累加缓冲。
+     * 回放打包缓冲仍全部使用动态申请的 PSRAM。 */
+    if (!g_pb_alaw_acc)
+        g_pb_alaw_acc = (uint8_t *)_os_malloc_psram(PB_ALAW_ACC_BYTES);
+    pb_aac_reset();
+    if (!g_pb_alaw_acc)
+        os_printf(KERN_ERR "pb: PSRAM audio accumulator alloc failed, video only\n");
 
     /* sd_pb_recv 是 rec_playback_init 建的常驻 msi, 循环外 find 一次保持引用,
      * 避免每轮循环进 msi_find (全局 mutex + 遍历链表) 白烧 CPU.
@@ -2185,46 +2935,72 @@ static void pb_thread(void *arg)
     struct msi *recv = msi_find("sd_pb_recv", 1);
     if (!recv) {
         os_printf(KERN_ERR "pb_thread: sd_pb_recv not found, exit\n");
+        if (g_pb_alaw_acc) { _os_free_psram(g_pb_alaw_acc); g_pb_alaw_acc = NULL; }
+        g_pb.state = PB_ST_IDLE;
         g_pb.thread_alive = 0;
         return;
     }
 
     /* 诊断计数: 每秒打印一次, 看视频/音频 fb 流量是否正常 */
-    uint32_t pb_stat_t0 = os_jiffies();
+    uint32_t pb_stat_t0 = pb_clock_ms();
     uint32_t pb_stat_v  = 0;   /* 视频 fb 数 */
     uint32_t pb_stat_a  = 0;   /* 音频 fb 数 */
-    uint32_t pb_stat_pkt = 0;  /* 实际发出的 G.711A 包数 */
-    uint32_t pb_stat_busy = 0; /* NET BUSY 重试次数 (不丢帧, 每次 BUSY 计 1) */
+    uint32_t pb_stat_busy = 0;
+    pb_audio_stats_t audio_stat = {0};
+    uint8_t pb_aac_first_logged = 0;
+    uint32_t eof_wait_ms = 0;
+    uint8_t eof_waiting = 0;
+    uint32_t pause_start_ms = 0;
+    uint8_t was_paused = 0;
+    /* 同一文件最多自动恢复三次，不因偶尔吐出一帧就清零，避免坏点无限重播。 */
+    const uint32_t PB_NO_FRAME_TIMEOUT_MS = 5000U;
+    const uint32_t PB_RECOVER_MAX = 3U;
+    uint32_t last_frame_ms = pb_clock_ms();
+    uint32_t resume_pts_ms = 0;  /* 当前文件内最后成功发送的视频 PTS，不是 UTC。 */
+    uint32_t recover_count = 0;
+    uint8_t recover_pending = 0;
 
-    /* 保险 C: 每轮循环无条件让出 CPU 至少 PB_LOOP_YIELD_MS 毫秒.
-     *
-     * !!! 这里不能用 "测耗时补 sleep" 的方式: TciSendPbFrame 阻塞等 WiFi 发送时
-     *     单次循环耗时可能达 20-40ms, 超过 PB_LOOP_MIN_MS 就不会 sleep, 保险失效.
-     *     无条件 sleep 强制每轮给其他线程 2ms CPU 时间窗口.
-     *
-     * 代价分析: 视频 25fps = 40ms/帧. 处理一帧 TciSendPbFrame 典型 5-20ms + 2ms sleep
-     *          总周期 < 40ms, 能跟上 25fps; 最大吞吐 ~500Hz 循环, 远超实际需求. */
-    #define PB_LOOP_YIELD_MS  20
+    /* 每轮让出 CPU，5ms 检查周期用于平滑发送 40ms 音频包。 */
+    #define PB_LOOP_YIELD_MS  5
 
-    while (g_pb.state != PB_ST_STOP_REQ && g_pb.state != PB_ST_IDLE) {
+    while (!g_sd_formatting && !g_sd_fault_pending && g_pb.state != PB_ST_STOP_REQ && g_pb.state != PB_ST_IDLE) {
 
-        /* 处理 seek 请求 */
-        if (g_pb.seek_req) {
-            g_pb.seek_req = 0;
+        /* APP 拖动优先。自动恢复只复用当前路径和毫秒 PTS，不改写 APP 的 seek 请求。 */
+        if (g_pb.seek_req || (recover_pending && g_pb.state == PB_ST_PLAYING)) {
+            uint8_t recovering = !g_pb.seek_req;
+            uint32_t request_utc = g_pb.seek_t;
+            recover_pending = 0;
+            if (!recovering) {
+                g_pb.seek_req = 0;
+                recover_count = 0;
+                sync_response = 1;
+            } else {
+                if (recover_count >= PB_RECOVER_MAX) {
+                    os_printf(KERN_ERR "pb: recovery exhausted, stop; file preserved: %s\n", full_path);
+                    TciSendPbEndOfEvent(g_pb.handle);
+                    goto pb_exit;
+                }
+                ++recover_count;
+                /* 已同步的播放恢复不是 PLAY_START 应答；未出首帧时保留原应答语义。 */
+                if (sync_sent) sync_response = 0;
+                os_printf(KERN_WARNING "pb: recover %u/%u file=%s pts=%ums\n",
+                          recover_count, PB_RECOVER_MAX, full_path, resume_pts_ms);
+            }
             frames_consumed = 0;
-            empty_fb_count  = 0;
             sync_sent       = 0;
             ts_base_ms      = 0;
             g_pb_audio_ts   = 0;
             wall_start_ms   = 0;   /* pacing 基准重新对齐到下个首 I 帧 */
+            sent_video_ts = sent_audio_ts = 0;
+            sent_video_valid = sent_audio_valid = 0;
+            pb_aac_first_logged = 0;
+            os_memset(&audio_stat, 0, sizeof(audio_stat));
+            eof_waiting = was_paused = 0;
+            pb_aac_reset();        /* 丢弃跨 seek 的音频残留 */
             if (g_pb.demux_msi) {
+                pb_aac_msi_destroy();   /* 先拆解码器: 它的 src_msi 指向这个 demux */
                 msi_destroy(g_pb.demux_msi);
                 g_pb.demux_msi = NULL;
-            }
-            /* 关闭上一个 MP4 对应的 .alaw 文件。 */
-            if (g_pb_alaw_fp) {
-                osal_fclose(g_pb_alaw_fp);
-                g_pb_alaw_fp = NULL;
             }
             /* 清空 sd_pb_recv 里残留的 fb (切文件时旧 fb 的 ts 属于上一个文件,
              * 留在队列里下轮发出会让 APP 收到乱序/重复 ts, 且旧 fb 占着 fbpool) */
@@ -2238,8 +3014,23 @@ static void pb_thread(void *arg)
             char new_date_dir[16];
             char new_fname[FILE_NAME_LEN + 1];
             uint32_t new_t0 = 0;
-            if (pb_locate_file(g_pb.seek_t, new_date_dir, new_fname, &new_t0) != 0) {
-                os_printf(KERN_ERR "pb: seek %u no match\n", g_pb.seek_t);
+            if (recovering) {
+                /* 先释放旧 FIL 和解码链，留出 SD 重新挂载的时间；等待可被停止/拖动打断。 */
+                for (int n = 0; n < 100; ++n) {
+                    if (g_pb.seek_req || g_pb.state != PB_ST_PLAYING) break;
+                    os_sleep_ms(10);
+                }
+                if (g_pb.seek_req) goto pb_after_fb_handle;
+                if (g_pb.state != PB_ST_PLAYING) {
+                    recover_pending = 1;
+                    goto pb_after_fb_handle;
+                }
+                os_strncpy(new_date_dir, g_pb.cur_date_dir, sizeof(new_date_dir));
+                os_strncpy(new_fname, g_pb.cur_fname, sizeof(new_fname));
+                new_t0 = pending_sync_t0;
+            } else if (pb_locate_file(request_utc, new_date_dir, new_fname, &new_t0) != 0) {
+                if (g_pb.seek_req) goto pb_after_fb_handle;
+                os_printf(KERN_ERR "pb: seek %u lookup failed or no match\n", request_utc);
                 TciSendPbEndOfEvent(g_pb.handle);
                 break;
             }
@@ -2258,32 +3049,42 @@ static void pb_thread(void *arg)
                 while (1) {
                     /* 正在录制的文件 moov 尚未完整写入, 直接跳过 (不删). */
                     int is_recording = pb_is_current_recording_file(full_path);
-                    if (!is_recording && pb_mp4_is_playable(full_path)) {
+                    if (!is_recording) {
                         os_snprintf(demux_name, sizeof(demux_name),
                                     "sd_pb_demux_%u", ++demux_seq);
-                        g_pb.demux_msi = mp4_demux_msi_init(demux_name, full_path);
-                        if (g_pb.demux_msi) break;
+                        int opened = pb_open_checked(demux_name, full_path);
+                        if (opened > 0) break;
+                        if (opened < 0) {
+                            if (g_pb.seek_req) goto pb_after_fb_handle;
+                            if (recovering) {
+                                recover_pending = 1;
+                                goto pb_after_fb_handle;
+                            }
+                            os_printf(KERN_ERR "pb: SD/open failure, stop playback; file preserved\n");
+                            TciSendPbEndOfEvent(g_pb.handle);
+                            goto pb_exit;
+                        }
                     }
                     if (is_recording) {
                         os_printf(KERN_INFO "pb: skip current recording: %s\n", full_path);
                     } else {
-                        os_printf(KERN_ERR "pb: bad mp4: %s (skip %d)\n", full_path, skipped);
-                        pb_delete_bad_file(full_path);
+                        os_printf(KERN_ERR "pb: invalid mp4, skip without deleting: %s (skip %d)\n",
+                                  full_path, skipped);
                     }
                     if (++skipped >= MAX_SKIP) {
                         os_printf(KERN_ERR "pb: too many bad files, stop\n");
                         TciSendPbEndOfEvent(g_pb.handle);
                         goto pb_exit;
                     }
-                    /* 找下一个: 对于"正在录"跳过的情况, 当天没别的文件可播了,
-                     * pb_locate_file(seek_t) 会把那个同文件返回又进死循环.
-                     * 所以用 (new_t0 + 1) 找严格在它之后的文件; 没有就 stop. */
+                    /* 严格按文件名查找后续文件，避免用仍落在当前坏文件覆盖范围内的
+                     * 时间重复定位到同一文件。坏文件保留在卡上，不删除。 */
                     char nxt_date_dir[16];
                     char nxt_fname[FILE_NAME_LEN + 1];
                     uint32_t nxt_t0 = 0;
-                    uint32_t lookup_t = is_recording ? (new_t0 + 1) : g_pb.seek_t;
-                    if (pb_locate_file(lookup_t, nxt_date_dir, nxt_fname, &nxt_t0) != 0) {
-                        os_printf(KERN_ERR "pb: no more file after bad/recording, stop\n");
+                    os_strncpy(nxt_date_dir, g_pb.cur_date_dir, sizeof(nxt_date_dir));
+                    if (find_next_in_day(g_pb.cur_date_dir, g_pb.cur_fname,
+                                         nxt_fname, &nxt_t0) != 0) {
+                        os_printf(KERN_ERR "pb: next lookup failed or no later file, stop\n");
                         TciSendPbEndOfEvent(g_pb.handle);
                         goto pb_exit;
                     }
@@ -2292,22 +3093,27 @@ static void pb_thread(void *arg)
                     os_snprintf(full_path, sizeof(full_path), "%s/%s/%s",
                                 REC_ROOT_PATH, nxt_date_dir, nxt_fname);
                     new_t0 = nxt_t0;
+                    /* 已离开原文件，下一文件从头开始，恢复预算重新计算。 */
+                    recovering = 0;
+                    recover_count = 0;
                     skip_started = 1;
                 }
                 /* 若跳过了坏文件, seek 偏移语义失效 → 从文件头播 */
                 if (skip_started) {
                     jmp_ms = 0;
-                } else if (g_pb.seek_t > new_t0) {
-                    jmp_ms = (g_pb.seek_t - new_t0) * 1000;
+                } else if (recovering) {
+                    jmp_ms = resume_pts_ms;
+                } else if (request_utc > new_t0) {
+                    jmp_ms = (request_utc - new_t0) * 1000;
                 }
             }
+            resume_pts_ms = jmp_ms;
             /* 使用 SDK 原生 MSI_VIDEO_DEMUX_JMP_TIME: demux 内部直接定位到 jmp_ms
-             * 对应的关键帧, 不需要软件丢帧 + fast_output 这套绕行逻辑.
-             * 之前崩溃根因是 SDK 在 video-only mp4 (audio_samplerate=0) 时 JMP
-             * 分支里 "/ (1024*1000/audio_samplerate)" 触发除零; 已在 mp4_demux_msi.c
-             * 里加了保护. 现在 JMP_TIME 对 video-only 安全. */
+             * 对应的关键帧，不需要软件丢帧 + fast_output 绕行。 */
             pending_jmp_ms = 0;    /* 软件丢帧不再需要 */
             msi_add_output(g_pb.demux_msi, NULL, "sd_pb_recv");
+            if (g_pb_alaw_acc && pb_aac_msi_create() != 0)
+                os_printf(KERN_WARNING "pb: AAC decoder unavailable, video only\n");
             /* JMP_TIME 必须在 START 之前发, 否则 thread 已经在按 PTS 节奏跑了.
              * SDK 内部 set MP4_DEMUX_JMP 事件, thread 启动后走 JMP 分支定位 */
             if (jmp_ms > 0) {
@@ -2316,62 +3122,76 @@ static void pb_thread(void *arg)
             }
             msi_do_cmd(g_pb.demux_msi, MSI_CMD_VIDEO_DEMUX_CTRL, MSI_VIDEO_DEMUX_START, 0);
 
-            /* 打开对应 .alaw 文件（和 MP4 同前缀）。
-             * 不在这里 fseek, 等 sync_sent 触发时按真实 I 帧 fb->time 定位,
-             * 保证音画严格对齐 (软件 seek 落点 = 时间戳 >= jmp_ms 的首帧 I) */
-            {
-                char alaw_path[96];
-                int plen = os_strlen(full_path);
-                int elen = os_strlen(REC_EXT_NAME);
-                os_snprintf(alaw_path, sizeof(alaw_path), "%.*s%s",
-                            plen - elen, full_path, REC_AUDIO_EXT_NAME);
-                g_pb_alaw_fp = osal_fopen(alaw_path, "rb");
-                os_printf(KERN_INFO "pb: alaw file=%s fp=%p (fseek delayed to sync point)\n",
-                          alaw_path, g_pb_alaw_fp);
-            }
-
             pending_sync_t0 = new_t0;
+            last_frame_ms = pb_clock_ms();
             os_printf(KERN_INFO "pb: seek_t=%u, file_t0=%u, file=%s (waiting first I)\n",
-                      g_pb.seek_t, new_t0, full_path);
+                      request_utc, new_t0, full_path);
         }
 
-        /* 暂停状态 */
+        /* 暂停期间冻结发送计时，恢复后不突发发送积压帧。 */
         if (g_pb.state == PB_ST_PAUSED) {
-            os_sleep_ms(50);
+            last_frame_ms = pb_clock_ms();  /* 暂停不计入无帧超时。 */
+            if (!was_paused) {
+                pause_start_ms = pb_clock_ms();
+                was_paused = 1;
+                if (g_pb.demux_msi)
+                    msi_do_cmd(g_pb.demux_msi, MSI_CMD_VIDEO_DEMUX_CTRL, MSI_VIDEO_DEMUX_PAUSE, 0);
+            }
+            os_sleep_ms(10);
             continue;
+        }
+        if (was_paused) {
+            last_frame_ms = pb_clock_ms();
+            wall_start_ms += pb_clock_ms() - pause_start_ms;
+            if (g_pb.demux_msi)
+                msi_do_cmd(g_pb.demux_msi, MSI_CMD_VIDEO_DEMUX_CTRL, MSI_VIDEO_DEMUX_START, 0);
+            was_paused = 0;
         }
 
         /* 取 fb (recv 已在循环外 find, 这里直接用) */
         struct framebuff *fb = msi_get_fb(recv, 0);
 
         if (!fb) {
-            /* 还没消费过任何帧 = demux 还没准备好, 继续等.
-             * !!! 不能用 continue 直接跳过循环尾部, 否则 pend 里的音频会饿死.
-             *     goto 跳到 after_fb_handle, 走末尾的音频节流发送 + yield sleep */
-            if (!frames_consumed) {
+            int demux_status = g_pb.demux_msi ?
+                msi_do_cmd(g_pb.demux_msi, MSI_CMD_VIDEO_DEMUX_CTRL,
+                           MSI_VIDEO_DEMUX_GET_STATUS, 0) : 0;
+            /* IO 异常不能误判为播完；首次无帧也有超时，不能无限等首 I 帧。 */
+            if (demux_status < 0 ||
+                ((demux_status > 0 || !frames_consumed) &&
+                 (uint32_t)(pb_clock_ms() - last_frame_ms) >= PB_NO_FRAME_TIMEOUT_MS)) {
+                os_printf(KERN_WARNING "pb: stalled status=%d idle=%ums, schedule recovery\n",
+                          demux_status, (unsigned)(pb_clock_ms() - last_frame_ms));
+                recover_pending = 1;
+                continue;
+            }
+            /* demux 仍在按 PTS 等待下一帧时，短暂空队列是正常现象；只有线程已经
+             * 退出且下游队列也取空，才立即切下一个文件。 */
+            if (demux_status > 0 || !frames_consumed) {
                 goto pb_after_fb_handle;
             }
-            /* 已消费过, 连续 N 次没帧 = 文件播完 */
-            empty_fb_count++;
-            if (empty_fb_count < EMPTY_FB_THRESHOLD) {
-                goto pb_after_fb_handle;
+            /* 为异步解码的 PCM 尾部数据预留有限的发送时间。 */
+            if (!eof_waiting) {
+                eof_waiting = 1;
+                eof_wait_ms = pb_clock_ms();
             }
+            if ((uint32_t)(pb_clock_ms() - eof_wait_ms) < 200U)
+                goto pb_after_fb_handle;
+            eof_waiting = 0;
             /* 判定文件播完 */
             os_printf(KERN_INFO "pb: file end\n");
             if (g_pb.demux_msi) {
+                pb_aac_msi_destroy();   /* 先拆解码器: 它的 src_msi 指向这个 demux */
                 msi_destroy(g_pb.demux_msi);
                 g_pb.demux_msi = NULL;
             }
-            if (g_pb_alaw_fp) {
-                osal_fclose(g_pb_alaw_fp);
-                g_pb_alaw_fp = NULL;
-            }
-            empty_fb_count  = 0;
             frames_consumed = 0;
             sync_sent       = 0;
             ts_base_ms      = 0;
             g_pb_audio_ts   = 0;
             wall_start_ms   = 0;   /* 切下一文件: pacing 基准重新对齐 */
+            sent_video_ts = sent_audio_ts = 0;
+            sent_video_valid = sent_audio_valid = 0;
+            pb_aac_reset();        /* 跨文件: 丢弃音频残留 */
             /* 清空 sd_pb_recv 里残留的 fb */
             {
                 struct framebuff *rfb;
@@ -2400,48 +3220,37 @@ static void pb_thread(void *arg)
             const int MAX_SKIP = 8;
             int skipped = 0;
             g_pb.demux_msi = NULL;
-            /* 第一轮: 用 find_next_in_day(cur_fname) 找下一个;
-             * 后续若坏文件被删, cur_fname 在目录里找不到了, 改用 pb_locate_file
-             * 以坏文件的 t_start+1 为基准找当天后续最近文件. */
-            uint8_t first_lookup = 1;
             while (1) {
-                if (first_lookup) {
-                    if (find_next_in_day(g_pb.cur_date_dir, g_pb.cur_fname,
-                                         next_fname, &next_t0) != 0) {
-                        os_printf(KERN_INFO "pb: no next file in %s, stop\n",
-                                  g_pb.cur_date_dir);
-                        TciSendPbEndOfEvent(g_pb.handle);
-                        goto pb_exit;
-                    }
-                    first_lookup = 0;
-                } else {
-                    /* 上一轮 next_t0 就是刚删掉的坏文件 t_start, 以它+1 找下一个 */
-                    char tmp_date[16];
-                    if (pb_locate_file(next_t0 + 1, tmp_date,
-                                       next_fname, &next_t0) != 0) {
-                        os_printf(KERN_INFO "pb: no more file after bad, stop\n");
-                        TciSendPbEndOfEvent(g_pb.handle);
-                        goto pb_exit;
-                    }
-                    os_strncpy(g_pb.cur_date_dir, tmp_date, sizeof(g_pb.cur_date_dir));
+                if (find_next_in_day(g_pb.cur_date_dir, g_pb.cur_fname,
+                                     next_fname, &next_t0) != 0) {
+                    os_printf(KERN_INFO "pb: next lookup failed or no later file in %s, stop\n",
+                              g_pb.cur_date_dir);
+                    TciSendPbEndOfEvent(g_pb.handle);
+                    goto pb_exit;
                 }
                 os_strncpy(g_pb.cur_fname, next_fname, sizeof(g_pb.cur_fname));
                 os_snprintf(full_path, sizeof(full_path), "%s/%s/%s",
                             REC_ROOT_PATH, g_pb.cur_date_dir, next_fname);
                 int is_recording = pb_is_current_recording_file(full_path);
-                if (!is_recording && pb_mp4_is_playable(full_path)) {
+                if (!is_recording) {
                     os_snprintf(demux_name, sizeof(demux_name),
                                 "sd_pb_demux_%u", ++demux_seq);
-                    g_pb.demux_msi = mp4_demux_msi_init(demux_name, full_path);
-                    if (g_pb.demux_msi) break;
+                    int opened = pb_open_checked(demux_name, full_path);
+                    if (opened > 0) break;
+                    if (opened < 0) {
+                        if (g_pb.seek_req) goto pb_after_fb_handle;
+                        os_printf(KERN_ERR "pb: SD/open failure, stop playback; file preserved\n");
+                        TciSendPbEndOfEvent(g_pb.handle);
+                        goto pb_exit;
+                    }
                 }
                 if (is_recording) {
                     os_printf(KERN_INFO "pb: reached current recording %s, stop\n", full_path);
                     TciSendPbEndOfEvent(g_pb.handle);
                     goto pb_exit;
                 }
-                os_printf(KERN_ERR "pb: bad mp4: %s (skip %d)\n", full_path, skipped);
-                pb_delete_bad_file(full_path);
+                os_printf(KERN_ERR "pb: invalid mp4, skip without deleting: %s (skip %d)\n",
+                          full_path, skipped);
                 if (++skipped >= MAX_SKIP) {
                     os_printf(KERN_ERR "pb: too many bad files, stop\n");
                     TciSendPbEndOfEvent(g_pb.handle);
@@ -2449,28 +3258,27 @@ static void pb_thread(void *arg)
                 }
             }
             msi_add_output(g_pb.demux_msi, NULL, "sd_pb_recv");
+            if (g_pb_alaw_acc && pb_aac_msi_create() != 0)
+                os_printf(KERN_WARNING "pb: AAC decoder unavailable, video only\n");
             msi_do_cmd(g_pb.demux_msi, MSI_CMD_VIDEO_DEMUX_CTRL, MSI_VIDEO_DEMUX_START, 0);
-            /* 同步打开新 MP4 对应的 .alaw。 */
-            {
-                char alaw_path[96];
-                int plen = os_strlen(full_path);
-                int elen = os_strlen(REC_EXT_NAME);
-                os_snprintf(alaw_path, sizeof(alaw_path), "%.*s%s",
-                            plen - elen, full_path, REC_AUDIO_EXT_NAME);
-                g_pb_alaw_fp = osal_fopen(alaw_path, "rb");
-                os_printf(KERN_INFO "pb: next alaw=%s fp=%p\n", alaw_path, g_pb_alaw_fp);
-            }
             /* 同步帧等第一帧 I 帧到达再发, is_response_to_PLAY_START=0.
              * 自动切下一文件不涉及 seek, pending_jmp_ms 清零从头播 */
             pending_sync_t0 = next_t0;
+            resume_pts_ms = 0;
+            recover_count = 0;
+            last_frame_ms = pb_clock_ms();
+            sync_response  = 0;
             pending_jmp_ms  = 0;
+            pb_aac_first_logged = 0;
+            os_memset(&audio_stat, 0, sizeof(audio_stat));
             os_printf(KERN_INFO "pb: next file %s (waiting first I)\n", full_path);
             continue;
         }
 
         /* 取到 fb, 重置空闲计数并标记已消费 */
-        empty_fb_count  = 0;
         frames_consumed = 1;
+        last_frame_ms = pb_clock_ms();
+        eof_waiting = 0;
 
         /* 诊断计数 */
         if (fb->mtype == F_H264) pb_stat_v++;
@@ -2479,7 +3287,7 @@ static void pb_thread(void *arg)
         /* 探鸽 SDK 对回放流的首帧要求必须是 I 帧才放行, 所以:
          * 1) sync_sent=0 时, 非 I 帧的视频帧 和 所有音频帧 全部丢弃
          * 2) 软件 seek: fb->time < pending_jmp_ms 的 I 帧也丢, 等到时间达标的第一帧 I
-         * 3) 收到符合的第一帧 I 帧 -> 发送同步时间帧, sync_sent=1, 跳到 .alaw 对应偏移
+         * 3) 收到符合的第一帧 I 帧 -> 发送同步时间帧, sync_sent=1，对齐音频起点
          * 4) 之后正常发送视频 P 帧 + 音频 */
         if (!sync_sent) {
             if (fb->mtype == F_H264) {
@@ -2496,17 +3304,16 @@ static void pb_thread(void *arg)
                 }
                 /* I 帧到达且时间戳 >= pending_jmp_ms, 触发同步 */
                 uint32_t first_utc = pending_sync_t0 + fb->time / 1000;
-                TciSendPbSyncFrame(g_pb.handle, first_utc, 1);
+                TciSendPbSyncFrame(g_pb.handle, first_utc, sync_response);
                 sync_sent = 1;
                 ts_base_ms = fb->time;
                 /* PTS pacing 基准点: 首 I 帧此刻的 wall clock, 后续帧按
                  * (fb->time - ts_base_ms) 偏移到 wall_start_ms 上发送 */
-                wall_start_ms = (uint32_t)os_jiffies_to_msecs(os_jiffies());
-                /* alaw 文件定位到这个 I 帧对应时间: 8 字节/ms */
-                if (g_pb_alaw_fp) {
-                    osal_fseek(g_pb_alaw_fp, fb->time * 8);
-                }
-                g_pb_audio_ts = 0;   /* 音频 ts 从同步点起重新从 0 开始 */
+                wall_start_ms = pb_clock_ms();
+                g_pb_audio_ts = 0;   /* 音频 ts 从同步点重新起算 */
+                sent_video_ts = sent_audio_ts = 0;
+                sent_video_valid = sent_audio_valid = 0;
+                pb_aac_reset();      /* 同步点: 从干净状态重新开始累计 */
                 os_printf(KERN_INFO "pb: sync_sent utc=%u (file_t0=%u + fb_time=%u ms, ts_base=%u)\n",
                           first_utc, pending_sync_t0, fb->time, ts_base_ms);
                 /* 继续走下面的发送逻辑, 不 continue */
@@ -2529,24 +3336,49 @@ static void pb_thread(void *arg)
         }
 
         if (!skip) {
-            /* 视频 ts = fb->time - ts_base 归零；音频 ts 固定 40ms 步进。 */
-            uint32_t ts = (fb->time > ts_base_ms) ? (fb->time - ts_base_ms) : 0;
-
-            /* PTS pacing: 严格按文件原始时间节奏发, 防止 demux 出帧太快
-             * 把探鸽 P2P 缓冲撑爆 (p2pSendPbStream congestion).
-             * expected_wall = wall_start_ms + ts; 还没到就 sleep 等到那时. */
-            if (wall_start_ms && fb->mtype == F_H264) {
-                uint32_t now_ms = (uint32_t)os_jiffies_to_msecs(os_jiffies());
-                uint32_t expected_wall = wall_start_ms + ts;
-                int32_t delta = (int32_t)(expected_wall - now_ms);
-                if (delta > 0 && delta < 5000) {  /* 上限 5s 防异常 ts 跳变 */
-                    os_sleep_ms(delta);
-                }
-            }
-
             if (fb->mtype == F_H264) {
                 struct fb_h264_s *priv = (struct fb_h264_s *) fb->priv;
                 int flags = (priv && priv->type == 1) ? FF_KEYFRAME : 0;
+                /* 直接使用 MP4 文件里读出的 PTS(相对同步帧归零), 不做任何改写.
+                 * 视频与音频共用同一个 ts_base_ms, 保证文件里真实的音视频
+                 * 相对关系被原样送出. */
+                uint32_t send_ts = fb->time >= ts_base_ms ? fb->time - ts_base_ms : 0;
+                /* 等待视频帧发送时刻时，继续处理每包 40ms 的音频数据。 */
+                while (send_ts > (uint32_t)(pb_clock_ms() - wall_start_ms) &&
+                       g_pb.state == PB_ST_PLAYING && !g_pb.seek_req) {
+                    pb_audio_pump(ts_base_ms, pb_clock_ms() - wall_start_ms,
+                                  sent_video_ts, sent_video_valid,
+                                  &sent_audio_ts, &sent_audio_valid, &audio_stat);
+                    os_sleep_ms(PB_LOOP_YIELD_MS);
+                }
+                if (g_pb.seek_req || g_pb.state != PB_ST_PLAYING) {
+                    msi_delete_fb(NULL, fb);
+                    goto pb_after_fb_handle;
+                }
+
+                /* 有效音频不能落后下一视频帧超过 100ms。
+                 * 最多等待解码 100ms，音频缺失不能导致视频卡死。
+                 * 音频恢复后按当前 PTS 重新对齐。 */
+                uint32_t av_wait_start = pb_clock_ms();
+                while (g_pb.speed == PB_SPEED_1X && sent_audio_valid &&
+                       (int32_t)(send_ts - sent_audio_ts) > (int32_t)PB_AV_MAX_DIFF_MS &&
+                       g_pb.state == PB_ST_PLAYING && !g_pb.seek_req) {
+                    pb_audio_pump(ts_base_ms, pb_clock_ms() - wall_start_ms,
+                                  sent_video_ts, sent_video_valid,
+                                  &sent_audio_ts, &sent_audio_valid, &audio_stat);
+                    if ((int32_t)(send_ts - sent_audio_ts) <= (int32_t)PB_AV_MAX_DIFF_MS)
+                        break;
+                    if ((uint32_t)(pb_clock_ms() - av_wait_start) >= PB_AV_MAX_DIFF_MS) {
+                        sent_audio_valid = 0;
+                        os_printf(KERN_WARNING "pb: audio stalled, continue video and resync audio\n");
+                        break;
+                    }
+                    os_sleep_ms(PB_LOOP_YIELD_MS);
+                }
+                if (g_pb.seek_req || g_pb.state != PB_ST_PLAYING) {
+                    msi_delete_fb(NULL, fb);
+                    goto pb_after_fb_handle;
+                }
 
                 /* BUSY 重试: 不丢帧, sleep PB_BUSY_SLEEP_MS 后重发同一帧.
                  * 循环中同时检查 state/seek_req, 避免连接断时死循环. */
@@ -2554,7 +3386,7 @@ static void pb_thread(void *arg)
                 int send_ret;
                 while (1) {
                     send_ret = TciSendPbFrame(g_pb.handle, TCMEDIA_VIDEO_H264,
-                                              fb->data, fb->len, ts, flags);
+                                              fb->data, fb->len, send_ts, flags);
                     if (send_ret != TCE_NETWORK_BUSY_VAL) break;
                     pb_stat_busy++;
                     if (++retry >= PB_BUSY_MAX_RETRY ||
@@ -2563,67 +3395,54 @@ static void pb_thread(void *arg)
                         os_printf(KERN_WARNING "pb: video BUSY give up after %d retries\n", retry);
                         break;
                     }
-                    os_sleep_ms(PB_BUSY_SLEEP_MS);
+                    for (int waited = 0; waited < PB_BUSY_SLEEP_MS; waited += PB_LOOP_YIELD_MS) {
+                        if (g_pb.seek_req || g_pb.state != PB_ST_PLAYING) break;
+                        pb_audio_pump(ts_base_ms, pb_clock_ms() - wall_start_ms,
+                                      sent_video_ts, sent_video_valid,
+                                      &sent_audio_ts, &sent_audio_valid, &audio_stat);
+                        os_sleep_ms(PB_LOOP_YIELD_MS);
+                    }
+                    if (g_pb.seek_req || g_pb.state != PB_ST_PLAYING) break;
+                }
+                if (send_ret > 0) {
+                    sent_video_ts = send_ts;
+                    sent_video_valid = 1;
+                    /* 保存文件内的绝对 PTS；重建后重新发秒单位同步帧，再归零音视频时间戳。 */
+                    resume_pts_ms = fb->time;
                 }
 
-                /* 视频驱动音频: 每次收到视频帧后, 根据视频 ts 和音频 ts 的差值,
-                 * 补发对应数量的 .alaw 包, 实现音画同步.
-                 * 每个 alaw 包 40ms × 320B, 需要补几包就读几包.
-                 * 音频 BUSY 时同样 sleep 后重发, 不丢包 (保证音频时序). */
-                if (g_pb_alaw_fp) {
-                    int pkts_this_round = 0;
-                    while (g_pb_audio_ts < ts && pkts_this_round < 8) {
-                        int n = osal_fread(g_pb_alaw_buf, 1, PB_PACK_BYTES, g_pb_alaw_fp);
-                        if (n != PB_PACK_BYTES) {
-                            /* .alaw 文件读完 (视频比音频短) 或读失败, 本次停止.
-                             * n=0 时 fp 可能已失效 (FATFS reinit / 卷重挂),
-                             * fclose + NULL 化, 否则下次进来又会 fread 出 res:9 刷屏 */
-                            if (n == 0) {
-                                os_printf(KERN_WARNING "pb: alaw fread=0, close stale fp (may be FATFS reinit) fp=%p\n",
-                                          g_pb_alaw_fp);
-                                osal_fclose(g_pb_alaw_fp);
-                                g_pb_alaw_fp = NULL;
-                            }
-                            break;
-                        }
-                        int a_retry = 0;
-                        int aret;
-                        while (1) {
-                            aret = TciSendPbFrame(g_pb.handle, TCMEDIA_AUDIO_G711A,
-                                                  g_pb_alaw_buf, PB_PACK_BYTES,
-                                                  g_pb_audio_ts, 2);
-                            if (aret != TCE_NETWORK_BUSY_VAL) break;
-                            pb_stat_busy++;
-                            if (++a_retry >= PB_BUSY_MAX_RETRY ||
-                                g_pb.state == PB_ST_STOP_REQ || g_pb.state == PB_ST_IDLE ||
-                                g_pb.seek_req) {
-                                os_printf(KERN_WARNING "pb: audio BUSY give up after %d retries\n",
-                                          a_retry);
-                                break;
-                            }
-                            os_sleep_ms(PB_BUSY_SLEEP_MS);
-                        }
-                        g_pb_audio_ts += PB_PACK_INTERVAL_MS;
-                        pkts_this_round++;
-                        pb_stat_pkt++;
-                    }
-                }
             }
-            /* MP4 没有 F_AUDIO，音频完全由 .alaw 驱动。 */
+            /* 解码器已订阅 AAC 数据。下方每轮循环都处理 PCM，
+             * 不能只在新 AAC 帧到达时才处理。 */
         }
 
         msi_delete_fb(NULL, fb);
 
 pb_after_fb_handle:
+        if (sync_sent) {
+            pb_audio_pump(ts_base_ms, pb_clock_ms() - wall_start_ms,
+                          sent_video_ts, sent_video_valid,
+                          &sent_audio_ts, &sent_audio_valid, &audio_stat);
+            if (!pb_aac_first_logged && audio_stat.packets) {
+                os_printf(KERN_INFO "pb: AAC->G711A first ret=%d v_ts=%u a_ts=%u\n",
+                          audio_stat.last_ret, sent_video_ts, sent_audio_ts);
+                pb_aac_first_logged = 1;
+            }
+        }
         /* 每秒打印一次诊断 */
-        if (os_jiffies() - pb_stat_t0 >= 1000) {
-            os_printf(KERN_INFO "pb stat: v_fb=%u a_pkt=%u busy=%u audio_ts=%u\n",
-                      pb_stat_v, pb_stat_pkt, pb_stat_busy, g_pb_audio_ts);
-            pb_stat_v = 0;
-            pb_stat_a = 0;
-            pb_stat_pkt = 0;
-            pb_stat_busy = 0;
-            pb_stat_t0 = os_jiffies();
+        if ((uint32_t)(pb_clock_ms() - pb_stat_t0) >= 1000) {
+            int32_t av_diff_ms = 0;
+            if (sent_video_valid && sent_audio_valid)
+                av_diff_ms = (int32_t)sent_video_ts - (int32_t)sent_audio_ts;
+            os_printf(KERN_INFO
+                      "pb stat: v_fb=%u a_fb=%u a_ok=%u pause=%u err=%u busy=%u last_aret=%d v_ts=%u a_ts=%u diff=%dms dec=%u drop=%u\n",
+                      pb_stat_v, pb_stat_a, audio_stat.packets, audio_stat.pause,
+                      audio_stat.errors, pb_stat_busy + audio_stat.busy, audio_stat.last_ret,
+                      sent_video_ts, sent_audio_ts, (int)av_diff_ms,
+                      audio_stat.decoded, audio_stat.dropped);
+            pb_stat_v = pb_stat_a = pb_stat_busy = 0;
+            os_memset(&audio_stat, 0, sizeof(audio_stat));
+            pb_stat_t0 = pb_clock_ms();
         }
 
         /* 保险 C: 无条件让出 CPU, 无论前面处理了多久 */
@@ -2631,15 +3450,32 @@ pb_after_fb_handle:
     }
 
 pb_exit:
+    os_mutex_lock(&g_pb.lock, osWaitForever);
+    g_pb.state = PB_ST_STOP_REQ;
+    os_mutex_unlock(&g_pb.lock);
+    if (g_pb_alaw_acc) { _os_free_psram(g_pb_alaw_acc); g_pb_alaw_acc = NULL; }
+    pb_aac_reset();
+
     /* 清理: 只销毁 demux msi; sd_pb_recv 是 rec_playback_init 创建的
      * 常驻 msi, 不销毁以避免同名冲突 */
     if (g_pb.demux_msi) {
+        pb_aac_msi_destroy();   /* 先拆解码器: 它的 src_msi 指向这个 demux */
         msi_destroy(g_pb.demux_msi);
         g_pb.demux_msi = NULL;
     }
-    if (g_pb_alaw_fp) {
-        osal_fclose(g_pb_alaw_fp);
-        g_pb_alaw_fp = NULL;
+    /* STOP 只发出退出请求，底层可能仍在读卡。排空后才能宣布回放空闲，
+     * 否则删除旧文件/恢复挂载会越过仍持有文件的 worker。
+     * 等待期间持续回收队列，防止输出池满阻碍底层退出。 */
+    uint32_t close_log_ms = pb_clock_ms();
+    while (mp4_demux_active_workers()) {
+        struct framebuff *pending;
+        while ((pending = msi_get_fb(recv, 0)) != NULL)
+            msi_delete_fb(NULL, pending);
+        if ((uint32_t)(pb_clock_ms() - close_log_ms) >= 3000U) {
+            close_log_ms = pb_clock_ms();
+            os_printf(KERN_WARNING "pb_stop: waiting demux IO close\n");
+        }
+        os_sleep_ms(10);
     }
     /* 清空 sd_pb_recv 里残留的 fb (下次 pb_start 看到旧帧会混乱), 复用循环外的 recv */
     {
@@ -2649,12 +3485,25 @@ pb_exit:
         }
     }
     msi_put(recv);
+    os_mutex_lock(&g_pb.lock, osWaitForever);
     g_pb.state = PB_ST_IDLE;
     g_pb.thread_alive = 0;
+    os_mutex_unlock(&g_pb.lock);
     os_printf(KERN_INFO "pb_thread: exit\n");
 }
 
+static int pb_start_raw(void *handle, uint32_t t_seek, uint8_t mode_bit);
 int pb_start(void *handle, uint32_t t_seek, uint8_t mode_bit)
+{
+    if (rec_sd_enter()) return -1;
+    /* 与删除旧文件互斥，先发布回放占用标记再允许回收线程继续。 */
+    os_mutex_lock(&g_recycle_lock, osWaitForever);
+    int ret = g_sd_formatting ? -1 : pb_start_raw(handle, t_seek, mode_bit);
+    os_mutex_unlock(&g_recycle_lock);
+    rec_sd_leave();
+    return ret;
+}
+static int pb_start_raw(void *handle, uint32_t t_seek, uint8_t mode_bit)
 {
     if (!g_rp_inited) return -1;
 
@@ -2666,6 +3515,11 @@ int pb_start(void *handle, uint32_t t_seek, uint8_t mode_bit)
     }
 
     os_mutex_lock(&g_pb.lock, -1);
+
+    if (g_pb.thread_alive && g_pb.state == PB_ST_STOP_REQ) {
+        os_mutex_unlock(&g_pb.lock);
+        return -1; /* 旧会话未排空时不能用 seek 把停止状态改回播放。 */
+    }
 
     if (g_pb.thread_alive) {
         /* 已有线程: 触发 seek */
@@ -2691,10 +3545,20 @@ int pb_start(void *handle, uint32_t t_seek, uint8_t mode_bit)
 
     /* 栈交给 OS 自动分配 (stack=NULL 触发 krhino_task_dyn_create): 走 kernel
      * 系统堆 (SRAM), task 自然 return 时 OS 自动回收, 不会泄漏.
-     * 4KB 足够 FatFS + mp4_demux + TciSendPbFrame 链路 */
+     *
+     * 8KB: 原先 4KB 只够 FatFS + mp4_demux + TciSendPbFrame. 现在 AAC 解码
+     * (audio_decode_data) 是内联跑在本线程栈上的 —— SDK 自己的 aac_decode
+     * 线程单独就要 2KB 栈, 两者叠加会溢出. 栈溢出会静默打死本线程
+     * (日志表现为 pb_thread 突然不再输出任何信息). */
+    g_pb.thread_alive = 1; /* 创建前发布，格式化不能错过尚未被调度的任务。 */
     void *hdl = os_task_create("pb_thread", (os_task_func_t)pb_thread, NULL,
-                               OS_TASK_PRIORITY_NORMAL, 0, NULL, 4096);
-    (void)hdl;  /* 不保存 handle, pb_stop 通过 g_pb.thread_alive 同步退出 */
+                               OS_TASK_PRIORITY_NORMAL, 0, NULL, 8192);
+    if (!hdl) {
+        g_pb.thread_alive = 0;
+        g_pb.state = PB_ST_IDLE;
+        os_mutex_unlock(&g_pb.lock);
+        return -1;
+    }
 
     os_mutex_unlock(&g_pb.lock);
     return 0;
@@ -2702,34 +3566,52 @@ int pb_start(void *handle, uint32_t t_seek, uint8_t mode_bit)
 
 int pb_stop(void)
 {
-    if (!g_pb.thread_alive) return 0;
-    g_pb.state = PB_ST_STOP_REQ;
+    if (!g_pb.thread_alive) return mp4_demux_active_workers() ? -1 : 0;
+    os_mutex_lock(&g_pb.lock, osWaitForever);
+    if (g_pb.thread_alive) g_pb.state = PB_ST_STOP_REQ;
+    os_mutex_unlock(&g_pb.lock);
     int wait = 0;
     while (g_pb.thread_alive && wait++ < 100)
         os_sleep_ms(10);
+    if (rec_pb_is_active()) {
+        os_printf(KERN_WARNING "pb_stop: pending, SD handles still active\n");
+        return -1;
+    }
     return 0;
 }
 
 int pb_pause(void)
 {
+    if (!g_pb.thread_alive) return 0;
+    os_mutex_lock(&g_pb.lock, osWaitForever);
     if (g_pb.state == PB_ST_PLAYING) {
         g_pb.state = PB_ST_PAUSED;
         os_printf(KERN_INFO "pb_pause\n");
     }
+    os_mutex_unlock(&g_pb.lock);
     return 0;
 }
 
 int pb_resume(void)
 {
+    if (!g_pb.thread_alive) return 0;
+    os_mutex_lock(&g_pb.lock, osWaitForever);
     if (g_pb.state == PB_ST_PAUSED) {
         g_pb.state = PB_ST_PLAYING;
         os_printf(KERN_INFO "pb_resume\n");
     }
+    os_mutex_unlock(&g_pb.lock);
     return 0;
 }
 
 int pb_set_forward(uint32_t param)
 {
+    if (!g_pb.thread_alive) return -1;
+    os_mutex_lock(&g_pb.lock, osWaitForever);
+    if (g_pb.state == PB_ST_STOP_REQ) {
+        os_mutex_unlock(&g_pb.lock);
+        return -1;
+    }
     if (param == 0) g_pb.speed = PB_SPEED_1X;
     else if (param == 1) g_pb.speed = PB_SPEED_2X;
     else if (param == 2) g_pb.speed = PB_SPEED_4X;
@@ -2745,7 +3627,8 @@ int pb_set_forward(uint32_t param)
     } else {
         os_printf(KERN_INFO "pb_set_forward: speed=%d\n", g_pb.speed);
     }
+    os_mutex_unlock(&g_pb.lock);
     return 0;
 }
 
-#endif /* !REC_MP4AAC_SINGLE_FILE */
+#endif /* REC_MP4AAC_SINGLE_FILE */
