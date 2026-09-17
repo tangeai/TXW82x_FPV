@@ -12,6 +12,6 @@
 //主版本号
 #define _TCISDKVER_MAJOR_ 369
 //用于分支的版本号 0~99(0表示为主分支, >0为表示分枝上的修改)
-#define _TCISDKVER_REVISION_ 7
+#define _TCISDKVER_REVISION_ 8
 
 #define TCISDKVERSION (_TCISDKVER_MAJOR_*100 + _TCISDKVER_REVISION_)
