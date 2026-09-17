@@ -7,7 +7,10 @@
 #include "aac_code.h"
 
 #define MAX_AAC_ENCODE_RXBUF    4
-#define MAX_AAC_ENCODE_TXBUF    20
+/* tx_pool 存发送端 fb 元数据 (不含 payload). AAC 每 20ms 出一帧,
+ * 下游 (MP4 encode / rec_playback) 通常能立即消费, 无需太深的缓冲.
+ * 20 太浪费, 缩到 4 省 ~1.2KB 结构体空间 */
+#define MAX_AAC_ENCODE_TXBUF    4
 
 struct aac_encode_struct {
     struct fbpool tx_pool;
@@ -15,7 +18,7 @@ struct aac_encode_struct {
     struct msi *msi;
     struct msi *src_msi;
     void *task_hdl;
-    void *aac_fp;    
+    void *aac_fp;
     uint8_t direct_to_record;
     uint8_t stop_record;
     uint8_t destroy_self;
@@ -51,7 +54,7 @@ static void aac_encode_thread(void *d)
     msi_get(s->msi);
 
     aac_enc = audio_coder_open(AAC_ENC, s->samplerate, 1);
-    if (aac_enc == NULL) 
+    if (aac_enc == NULL)
         goto aac_encode_thread_end;
 
     s->audio_info.nsamples = 1024;
@@ -64,11 +67,11 @@ static void aac_encode_thread(void *d)
             clear_flag = 0;
             clear_finish = 0;
         }
-        if(s->next_status == AUCODEC_PAUSE) { 
+        if(s->next_status == AUCODEC_PAUSE) {
             if(s->current_status == AUCODEC_RUN) {
                 audio_coder_close(aac_enc);
                 aac_enc = audio_coder_open(AAC_ENC, s->samplerate, 1);
-                if (aac_enc == NULL) 
+                if (aac_enc == NULL)
                     goto aac_encode_thread_end;
             }
             s->current_status = AUCODEC_PAUSE;
@@ -79,10 +82,10 @@ static void aac_encode_thread(void *d)
         if(recv_frame_buf) {
             if(clear_finish == 0) {
                 inbuf_reslen = 2048;
-                inbuf_offset = 0;                
+                inbuf_offset = 0;
                 goto aac_encode_frame_end;
             }
-            if(s->next_status == AUCODEC_PAUSE) {          
+            if(s->next_status == AUCODEC_PAUSE) {
                 goto aac_encode_frame_end;
             }
             else {
@@ -102,7 +105,7 @@ static void aac_encode_thread(void *d)
                     os_memcpy(s->inbuf + (inbuf_offset/2), recv_data + (data_offset/2), inbuf_reslen);
                     data_len -= inbuf_reslen;
                     data_offset += inbuf_reslen;
-                    enc_bytes = audio_encode_data(aac_enc, s->inbuf, 1024, s->enc_buf);   
+                    enc_bytes = audio_encode_data(aac_enc, s->inbuf, 1024, s->enc_buf);
                     inbuf_reslen = 2048;
                     inbuf_offset = 0;
                     if(enc_bytes < 0) {
@@ -127,9 +130,9 @@ static void aac_encode_thread(void *d)
                             send_frame_buf->mtype = F_AUDIO;
                             send_frame_buf->time = audio_time;
                             send_frame_buf->priv = &(s->audio_info);
-                            ret = msi_output_fb(s->msi, send_frame_buf); 
-                            AAC_DEBUG("aac encode send framebuff:%p,ret:%d\r\n",send_frame_buf,ret);  
-                            send_frame_buf = NULL;   
+                            ret = msi_output_fb(s->msi, send_frame_buf);
+                            AAC_DEBUG("aac encode send framebuff:%p,ret:%d\r\n",send_frame_buf,ret);
+                            send_frame_buf = NULL;
                         }
                         audio_time += (1024 * 1000 / s->samplerate);
                         if(data_len == 0)
@@ -145,10 +148,10 @@ aac_encode_frame_end:
                     data_offset = 0;
                     data_len = 0;
                 }
-            }  
+            }
             AAC_DEBUG("aac encode delete framebuff:%p,len:%d,\r\n",recv_frame_buf,recv_frame_buf->len);
             msi_delete_fb(s->msi, recv_frame_buf);
-            recv_frame_buf = NULL; 
+            recv_frame_buf = NULL;
         }
         else {
             if(clear_finish == 0) {
@@ -188,7 +191,7 @@ aac_encode_thread_end:
     }
 
     if(s->next_status != AUCODEC_EXIT) {
-        msi_destroy(s->msi);    
+        msi_destroy(s->msi);
     }
 
     msi_put(s->msi);
@@ -204,35 +207,35 @@ static int32_t aac_encode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
             ret = RET_ERR;
 			if(aac_encode_s) {
 				uint32_t cmd_self = (uint32_t)param1;
-				switch(cmd_self) {	
+				switch(cmd_self) {
                     case MSI_AUCODER_PAUSE:
                     {
                         if(aac_encode_s->current_status == AUCODEC_RUN) {
                             aac_encode_s->next_status = AUCODEC_PAUSE;
                         }
-                        ret = RET_OK;  
-                        break;                      
+                        ret = RET_OK;
+                        break;
                     }
                     case MSI_AUCODER_CONTINUE:
                     {
                         if(aac_encode_s->current_status == AUCODEC_PAUSE) {
                             aac_encode_s->next_status = AUCODEC_RUN;
                         }
-                        ret = RET_OK;  
-                        break;                      
+                        ret = RET_OK;
+                        break;
                     }
                     case MSI_AUCODER_GET_STATUS:
                     {
                         *((uint32_t*)param2) = (uint32_t)(aac_encode_s->current_status);
-                        ret = RET_OK;  
-                        break;                      
+                        ret = RET_OK;
+                        break;
                     }
                     case MSI_AUCODER_CLEAR_STREAM:
                     {
                         os_event_set(&aac_encode_s->event, coder_clear_event, NULL);
                         os_event_wait(&aac_encode_s->event, coder_clear_finish_event, NULL, OS_EVENT_WMODE_OR | OS_EVENT_WMODE_CLEAR, osWaitForever);
-                        ret = RET_OK;  
-                        break;                                
+                        ret = RET_OK;
+                        break;
                     }
                     case MSI_AUCODER_SET_SRCMSI:
                     {
@@ -250,8 +253,8 @@ static int32_t aac_encode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
 					{
                         aac_encode_s->stop_record = param2;
                         msi_destroy(msi);
-                        ret = RET_OK; 	
-						break;					
+                        ret = RET_OK;
+						break;
 					}
 					default:
 						break;
@@ -265,9 +268,9 @@ static int32_t aac_encode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
             struct framebuff *frame_buf = (struct framebuff *)param1;
             if(frame_buf->mtype == F_AUDIO) {
                 ret = RET_OK;
-            } 
+            }
             break;
-        }            
+        }
         case MSI_CMD_FREE_FB:
         {
             ret = RET_ERR;
@@ -279,15 +282,15 @@ static int32_t aac_encode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
                 }
                 fbpool_put(&aac_encode_s->tx_pool, frame_buf);
             }
-            break; 
-        } 
+            break;
+        }
         case MSI_CMD_PRE_DESTROY:
         {
             if(aac_encode_s && aac_encode_s->task_hdl) {
                 aac_encode_s->next_status = AUCODEC_EXIT;
             }
             break;
-        }       
+        }
 		case MSI_CMD_POST_DESTROY:
         {
             if(aac_encode_s) {
@@ -312,16 +315,16 @@ static int32_t aac_encode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
                 AAC_CODE_FREE(aac_encode_s);
                 aac_encode_s = NULL;
             }
-            break; 
-        }         
+            break;
+        }
         default:
-            break;    
+            break;
     }
     return ret;
 }
 
 struct msi *aac_encode_init(char *filename, uint32_t samplerate, uint8_t direct_to_record, AUENC_INIT *auenc_init)
-{ 
+{
 #if AUDIO_EN
     uint8_t msi_isnew = 0;
     struct aac_encode_struct *aac_encode_s = NULL;
@@ -333,17 +336,17 @@ struct msi *aac_encode_init(char *filename, uint32_t samplerate, uint8_t direct_
             if((samplerate != aac_encode_s->samplerate) || (direct_to_record && aac_encode_s->direct_to_record)) {
                 AAC_INFO("aac_encode_init conflict!\r\n");
                 goto aac_encode_init_err;
-            }               
-        }      		
+            }
+        }
 	}
-    else if(msi && msi_isnew) {  
+    else if(msi && msi_isnew) {
         aac_encode_s = (struct aac_encode_struct *)AAC_CODE_ZALLOC(sizeof(struct aac_encode_struct));
         if(!aac_encode_s) {
             AAC_INFO("aac_encode_s malloc fail!\r\n");
-            goto aac_encode_init_err;	
+            goto aac_encode_init_err;
         }
         msi->priv = aac_encode_s;
-        msi->action = (msi_action)aac_encode_msi_action; 
+        msi->action = (msi_action)aac_encode_msi_action;
         fbpool_init(&aac_encode_s->tx_pool, MAX_AAC_ENCODE_TXBUF);
         for(uint32_t i=0; i<MAX_AAC_ENCODE_TXBUF; i++) {
             struct framebuff *frame_buf = (aac_encode_s->tx_pool.pool)+i;
@@ -377,7 +380,7 @@ struct msi *aac_encode_init(char *filename, uint32_t samplerate, uint8_t direct_
 	}
     else if(direct_to_record && !filename) {
         AAC_INFO("aac record file is null!\r\n");
-        goto aac_encode_init_err;	
+        goto aac_encode_init_err;
     }
     else if(!direct_to_record && filename) {
         AAC_INFO("aac record direct_to_record is 0!\r\n");
@@ -396,7 +399,7 @@ struct msi *aac_encode_init(char *filename, uint32_t samplerate, uint8_t direct_
 		}
 	}
 	return msi;
-    
+
 aac_encode_init_err:
 	msi_destroy(msi);
 #endif

@@ -1,8 +1,7 @@
 #ifndef __SDK_PROJECT_CONFIG_H__
 #define __SDK_PROJECT_CONFIG_H__
 
-
-#define CUSTOMER_ID 1
+#define CUSTOMER_ID 3
 
 /*
  * CUSTOMER_ID :
@@ -13,17 +12,17 @@
  * 4 82xApp_1080P_Demo
  * 5 82xApp_720P_to_1080P_Demo
  * 6 82xApp_UVC_Demo
- * 7 82xApp_walkie_talkie_Demo 
+ * 7 82xApp_walkie_talkie_Demo
  * 8 82xApp_LCD_Demo
  * 9 82xApp_baby_monitor_lcd_Demo
  * 10 82xApp_baby_monitor_cam_Demo
  * 11 82xApp_LCD_MP4_Player_Demo
 */
-#if (CUSTOMER_ID == 1)
+#if 0//(CUSTOMER_ID == 1)
 #define SYS_APP_FPV
-#define DEFAULT_SYS_CLK                 (192*1000000) 
+#define DEFAULT_SYS_CLK                 (192*1000000)
 #define PSRAM_HEAP          //如果需要psram当作heap,需要打开这个宏
-#define AV_PSRAM_HEAP    
+#define AV_PSRAM_HEAP
 #define AV_HEAP
 #define CONFIG_PSRAM_AVHEAP_SIZE        (7*1024*1024)
 #define CONFIG_AVHEAP_SIZE              (80*1024)
@@ -116,7 +115,7 @@
 
 #define RTP_SOUND                       (1&&AUDIO_EN)
 
-#define MJPEG_VIDEO                     (1 &&OPENDML_EN&&FS_EN&&SDH_EN&&JPG_EN)          //基于框架的mjpeg录像    
+#define MJPEG_VIDEO                     (1 &&OPENDML_EN&&FS_EN&&SDH_EN&&JPG_EN)          //基于框架的mjpeg录像
 #define UVC_VIDEO                       (1 &&OPENDML_EN&&FS_EN&&SDH_EN&&USB_EN)          //基于框架的uvc录像
 
 #define VFS_EN                          0           //VFS的文件系统,支持多个文件系统共用同一套接口(littlefs、fatfs)
@@ -201,7 +200,7 @@
 //是能5m/20m共存和自动带宽切换，
 //#define WIFI_FEM_CHIP     LMAC_FEM_GSR2401C
 //#define LMAC_BGN_PCF
-            
+
 /***********************************************************
  * BLE
  * ********************************************************/
@@ -212,7 +211,7 @@
 #define DEV_SENSOR_GC2053               1
 #define LCD_ST7701S_MIPI_EN 1
 
-#elif (CUSTOMER_ID == 2)
+#elif 0 //(CUSTOMER_ID == 2)
 /***************************************************************
  * 打开PIN_FROM_PARAM,通过脚本和config.cfg去生成对应的io配置信息
  * 请查看重要的文件:pin_param.h、config.cfg两个文件
@@ -229,9 +228,9 @@
  * CONFIG_PSRAM_AVHEAP_SIZE:为应用分配的psram宏,需要根据应用场景分配
  * PSRAM_HEAP:如果需要用到psram,需要打开PSRAM_HEAP
  ********************************************************************/
-#define DEFAULT_SYS_CLK                 (192*1000000) 
+#define DEFAULT_SYS_CLK                 (192*1000000)
 #define PSRAM_HEAP          //如果需要psram当作heap,需要打开这个宏
-#define AV_PSRAM_HEAP    
+#define AV_PSRAM_HEAP
 #define AV_HEAP
 #define CONFIG_PSRAM_AVHEAP_SIZE        (3*1024*1024 + 600*1024)
 #define CONFIG_AVHEAP_SIZE              (120*1024)
@@ -285,7 +284,7 @@
 #define DEV_SENSOR_GC2053               1
 #define DEV_SENSOR_GC1084               1
 
-/************************************************************ 
+/************************************************************
  * mipi相关
 INPUT_MODE:
 #define YUV422                          0
@@ -294,7 +293,7 @@ INPUT_MODE:
 #define RAW12                           3
 
 DOUBLE_LANE ：
-1 : 双个数据lane 
+1 : 双个数据lane
 0 : 单个数据lane
 ************************************************************/
 #define INPUT_MODE                      2   //RAW10
@@ -334,10 +333,12 @@ DOUBLE_LANE ：
  其他分辨率,根据实际情况去配置
  * ********************************************************/
 #define JPG_NODE_COUNT      20
-#define TARGET_JPG_LEN      100000   
+#define TARGET_JPG_LEN      100000
 /*================== end =================*/
 
 #elif (CUSTOMER_ID == 3)
+#define __TXW826__ 1
+
 /*****************************************************************************
  * 720P摄像头(帧率主要看摄像头配置表,SDK默认1084 25帧)
  * 主码流(H264):1280x720 @ 25fps
@@ -364,9 +365,9 @@ DOUBLE_LANE ：
  * CONFIG_PSRAM_AVHEAP_SIZE:为应用分配的psram宏,需要根据应用场景分配
  * PSRAM_HEAP:如果需要用到psram,需要打开PSRAM_HEAP
  ********************************************************************/
-#define DEFAULT_SYS_CLK                 (192*1000000) 
+#define DEFAULT_SYS_CLK                 (192*1000000)
 #define PSRAM_HEAP          //如果需要psram当作heap,需要打开这个宏
-#define AV_PSRAM_HEAP    
+#define AV_PSRAM_HEAP
 #define AV_HEAP
 
 
@@ -383,7 +384,9 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 
 由于MJPG与H264共用,会造成一定碎片化,可以适当将空间h264和MJPG独立分开,默认SDK没有分开
 *********************************************************************************************************************************************/
-#define CONFIG_PSRAM_AVHEAP_SIZE        (7*1024*1024+512*1024)
+//#define CONFIG_PSRAM_AVHEAP_SIZE        (7*1024*1024+512*1024)
+#define CONFIG_PSRAM_AVHEAP_SIZE        (2*1024*1024+800*1024)
+
 
 /**********************************************************************************************************************************************
  * 不同镜头以及功能不一样
@@ -391,13 +394,13 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
  * 720P镜头:  60K(VPP_DATA0)(1080P h264) = 60k
 			  辅码流:  12K(gen420) = 12K
 			  其他:  10K(解码) + 其他(某些结构体用到) ≈ 15K
-				
+
     total:  95K(没有额外功能,可以运行,如果空间足够,尽量到100K)
-	
-				
- 
+
+
+
  *********************************************************************************************************************************************/
-#define CONFIG_AVHEAP_SIZE              (100*1024)
+#define CONFIG_AVHEAP_SIZE              ((100-16)*1024)
 
 /******************************************************************************
  * wifi的必要参数配置
@@ -406,7 +409,7 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 #define WIFI_RF_PWR_LEVEL               0           //选择WIFI功率
 #define WIFI_RTS_THRESHOLD              -1          //RTS阈值，-1等效于不用RTS
 #define WIFI_RTS_MAX_RETRY              2           //RTS重试次数，范围为2~16
-#define WIFI_TX_MAX_RETRY               15          //最大传输次数，范围为1~31
+#define WIFI_TX_MAX_RETRY               10          //最大传输次数，范围为1~31
 
 #define WIFI_TX_SUPP_RATE               0x0FFFFF    //TX速率支持，每1bit对应一种速率
 #define WIFI_MULICAST_RETRY             0           //组播帧传输次数
@@ -431,7 +434,12 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 /***************************************************************
  * 蓝牙
  **************************************************************/
-//#define BLE_SUPPORT                 1
+/* BLE 蓝牙配网 (探鸽云协议): 走 GATT 通道接收 0x8006 配网包, 透传
+ * TciProcessRegInfo, 与 AP 热点配网并存. 见 ble_tange_netcfg.c */
+#define BLE_SUPPORT                 1
+#define BLE_UUID_128                1   /* 自定义 128 位 UUID 服务 */
+#define SYS_APP_BLENC               1   /* 启用 ble_netconfig.c 业务 (覆盖 sys_config.h 默认 0) */
+
 
 /****************************************************************
  * wifi速率配置,根据不同场景需要距离等去配置特定速率算法
@@ -462,20 +470,22 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 /*******************************************************************
  * 打开拍照模式(紧紧支持录风者模式)
  ******************************************************************/
-#define TAKEPHOTO_EN                      1
-
-
-/*******************************************************************
- * 支持h264的副码流
- ******************************************************************/
-#define SUB_STREAM_EN 					1
+//#define TAKEPHOTO_EN                      1
 
 
 /*****************************************************************
- * sd使能
+ * sd使能 (SD 卡录像 + 探鸽 P2P 回放依赖)
  ***************************************************************/
 #define SDH_EN                          1
 #define FS_EN                           1
+
+/* ============================================================================
+ * 卡录像码流选择 (icam365 rec_playback 模块用)
+ *   0 = 主码流 (高画质, SD 占用大)
+ *     - 826: 1280x720 @ 15fps, 主码流走 VPP_DATA0
+ *   1 = 子码流 (默认, 低带宽低 SD 占用)
+ *     - 826: 子码流走 gen420 路径, stype = FSTYPE_H264_GEN420_DATA */
+#define REC_STREAM_TYPE                 0
 
 
 
@@ -501,13 +511,14 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 #define DEV_SENSOR_F37P                 0
 #define DEV_SENSOR_TP9950               0
  ***************************************************************************************************************************/
-//#define DEV_SENSOR_SC1346               1
+#define DEV_SENSOR_SC1346               1
 #define DEV_SENSOR_GC1084               1
 #define DEV_SENSOR_GC2053               1
+#define DEV_SENSOR_H63S                 1
 
 
 
-/************************************************************ 
+/************************************************************
  * mipi相关
 INPUT_MODE:
 #define YUV422                          0
@@ -524,7 +535,24 @@ INPUT_MODE:
  *音频及功放使能io配置
  * ********************************************************/
 #define AUDIO_EN                        1
-#define AAC_ENC_CTRL 					1
+
+/***********************************************************
+ * AAC 编解码使能 (0 = NO_RUN, 1 = CPU0, 2 = CPU1)
+ *
+ * Plan B 之后 IPC 卡录像/回放不再依赖 AAC:
+ *   - 录像: MP4 video-only, 音频独立存为 .alaw (G.711A)
+ *   - 回放: pb_thread 直接读 .alaw 透传, 不需要 AAC 解码
+ * 关掉 AAC 节省 PSRAM (解码器 buffer 几十 KB 级).
+ * 如果后期需要 AAC (比如对讲走 AAC 格式), 改回 1 即可. */
+#define AAC_ENC_CTRL                    0
+#define AAC_DEC_CTRL                    0
+
+/***********************************************************
+ * 抓拍实现选择 (和 CUSTOMER_ID==4 保持一致)
+ *   1 = 旧路径 (auto_jpg_msi + jpg_concat + snapshot_msi), 约 100KB 常驻
+ *   0 = 新路径 (snapshot_bare.c 裸调 JPG 硬件), 仅 25KB node 池常驻
+ * ********************************************************/
+#define SNAPSHOT_USE_LEGACY             0
 
 /***********************************************************
  *默认mjpeg的节点数量,要根据mjpeg启动的分辨率去考虑
@@ -533,13 +561,13 @@ INPUT_MODE:
  1080P:算mjpeg大小100-150K,给20个节点足够
  其他分辨率,根据实际情况去配置
  * ********************************************************/
-#define JPG_NODE_COUNT 30
+#define JPG_NODE_COUNT 4
 
 /*************************************************************
  * 节省sram内存,将部分模块强制使用psram
  * 优点:节省sram内存
  * 缺点:psram读写慢,可能会影响性能
- 
+
  1080P的sram内存不足,将部分数据放到了psram
  ************************************************************/
 #define MORE_SRAM
@@ -549,6 +577,7 @@ INPUT_MODE:
  * 720P的辅码流是h264(gen420),注意SUB_STREAM_WIDTH需要是与镜头
    等比例关系,包括是H(sdk默认这个是等比例,所以不需要配置H)
  ************************************************************/
+#define SUB_STREAM_EN 1
 #define VPP_BUF1_EN 1
 #define PSRAM_FRAME_SAVE 1
 #define SUB_STREAM_WIDTH    640
@@ -557,9 +586,9 @@ INPUT_MODE:
 * 配置解码最大的size,如果不需要特殊size解码,这个配置320x180(缩略图用)
 * 配置解码缓冲区节点数量(预分配空间,没有解码要求,默认1个节点就够了)
  ************************************************************************/
-#define DECODE_MAX_W    320
-#define DECODE_MAX_H    180
-#define MAX_DECODE_YUV_TX 1
+//#define DECODE_MAX_W    320
+//#define DECODE_MAX_H    180
+//#define MAX_DECODE_YUV_TX 1
 
 /************************************************************************
 * 配置MP4录制最大文件的size
@@ -577,7 +606,35 @@ INPUT_MODE:
  ************************************************************************/
 #define USE_FAT_CACHE 1
 
+//网络模块相关参数调整
+#define CONFIG_CORE_HEAP_SIZE          (40*1024)
+#define CONFIG_CORE_SKB_POOL_SIZE      (120*1024)
+
+#define TCPIP_MBOX_SIZE                 128
+#define DEFAULT_UDP_RECVMBOX_SIZE       64
+#define DEFAULT_TCP_RECVMBOX_SIZE       64
+#define DEFAULT_ACCEPTMBOX_SIZE         16
+
+#define MEM_SIZE                        160*1024
+#define MEMP_NUM_PBUF                   120
+#define MEMP_NUM_NETCONN                16
+#define MEMP_NUM_NETBUF                 120
+#define MEMP_NUM_UDP_PCB                8
+#define MEMP_NUM_TCP_PCB                8
+#define MEMP_NUM_TCP_SEG                200//320
+#define PBUF_POOL_SIZE                  80//80
+
+#define TCP_SND_BUF                    (40 * TCP_MSS)
+#define TCP_WND                        (40 * TCP_MSS)
+#define TCP_TMR_INTERVAL                50
+
+#define DNS_MAX_NAME_LENGTH 256
+#define TCPIP_THREAD_PRIO           OS_TASK_PRIORITY_HIGH
+#define DNS_TABLE_SIZE       4
+
 #elif (CUSTOMER_ID == 4)
+#define __TXW828__ 1
+
 /*****************************************************************************
  * 1080P摄像头(帧率主要看摄像头配置表,SDK默认2053 25帧)
  * 主码流(H264):1920x1080 @ 25fps
@@ -604,9 +661,9 @@ INPUT_MODE:
  * CONFIG_PSRAM_AVHEAP_SIZE:为应用分配的psram宏,需要根据应用场景分配
  * PSRAM_HEAP:如果需要用到psram,需要打开PSRAM_HEAP
  ********************************************************************/
-#define DEFAULT_SYS_CLK                 (192*1000000) 
+#define DEFAULT_SYS_CLK                 (192*1000000)
 #define PSRAM_HEAP          //如果需要psram当作heap,需要打开这个宏
-#define AV_PSRAM_HEAP    
+#define AV_PSRAM_HEAP
 #define AV_HEAP
 
 
@@ -623,19 +680,26 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 
 由于MJPG与H264共用,会造成一定碎片化,可以适当将空间h264和MJPG独立分开,默认SDK没有分开
 *********************************************************************************************************************************************/
-#define CONFIG_PSRAM_AVHEAP_SIZE        (7*1024*1024+512*1024)
+//#define CONFIG_PSRAM_AVHEAP_SIZE        (7*1024*1024+512*1024)
+#define CONFIG_PSRAM_AVHEAP_SIZE        (4*1024*1024+350*1024)
+
+/* 模拟实际产品 PSRAM 8MB (开发板硬件是 16MB).
+ * 开启后 system_psram_init() 会把 psram_heap 限制到这么大,
+ * 调试完毕做正式 16MB 板烧录时注释掉. */
+#define SIMULATE_PSRAM_SIZE_MB          8
 
 /**********************************************************************************************************************************************
  * 不同镜头以及功能不一样
  * 没有考虑大分辨拍照模式
  * 1080P镜头:  90K(VPP_DATA0)(1080P h264) + 52.5K(VPP_DATA1)(720P拍照) ≈ 142.5K
 				其他:  12K(gen420)+10K(解码) + 其他(某些结构体用到) ≈ 22K(动态使用,gen420和解码可以分时复用)
-				
+
     total:  170K
-				
- 
+
+
  *********************************************************************************************************************************************/
-#define CONFIG_AVHEAP_SIZE              (100*1024 + 70*1024)
+//#define CONFIG_AVHEAP_SIZE              (100*1024 + 70*1024)
+#define CONFIG_AVHEAP_SIZE              (100*1024 + 30*1024)
 
 
 /******************************************************************************
@@ -670,7 +734,12 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 /***************************************************************
  * 蓝牙
  **************************************************************/
-//#define BLE_SUPPORT                 1
+/* BLE 蓝牙配网 (探鸽云协议): 走 GATT 通道接收 0x8006 配网包, 透传
+ * TciProcessRegInfo, 与 AP 热点配网并存. 见 ble_tange_netcfg.c */
+#define BLE_SUPPORT                 1
+#define BLE_UUID_128                1   /* 自定义 128 位 UUID 服务 */
+#define SYS_APP_BLENC               1   /* 启用 ble_netconfig.c 业务 (覆盖 sys_config.h 默认 0) */
+
 
 /****************************************************************
  * wifi速率配置,根据不同场景需要距离等去配置特定速率算法
@@ -701,7 +770,7 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 /*******************************************************************
  * 打开拍照模式(紧紧支持录风者模式)
  ******************************************************************/
-#define TAKEPHOTO_EN                      1
+//#define TAKEPHOTO_EN                      1
 
 
 /*****************************************************************
@@ -709,6 +778,17 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
  ***************************************************************/
 #define SDH_EN                          1
 #define FS_EN                           1
+
+/* ============================================================================
+ * 卡录像码流选择 (icam365 rec_playback 模块用)
+ *   0 = 主码流 (高画质, SD 占用大)
+ *     - 828: 1920x1080 @ 15fps 2Mbps, 15MB/min, 30GB SD ≈ 34 小时
+ *     - 切主码流前必须确认: sdk/app/mp4/mp4_encode.c 的 MDAT_SIZE 足够大
+ *       (主码流 60s 约 15MB, MDAT_SIZE 默认 8MB 会让 mdat box 越界写)
+ *     - 同时建议 REC_LOOP_REMAIN_MB 增大以避免清理过于频繁
+ *   1 = 子码流 (默认, 低带宽低 SD 占用)
+ *     - 828: 640x360 @ 15fps 250kbps, 1.8MB/min, 30GB SD ≈ 40 天 */
+#define REC_STREAM_TYPE                 0
 
 
 
@@ -740,7 +820,7 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 
 
 
-/************************************************************ 
+/************************************************************
  * mipi相关
 INPUT_MODE:
 #define YUV422                          0
@@ -757,7 +837,17 @@ INPUT_MODE:
  *音频及功放使能io配置
  * ********************************************************/
 #define AUDIO_EN                        1
-#define AAC_ENC_CTRL 					1
+
+/* AAC 编/解码控制.
+ * 0=AUCODER_NO_RUN  1=AUCODER_RUN_IN_CPU0  2=AUCODER_RUN_IN_CPU1
+ *
+ * Plan B 之后 IPC 卡录像/回放不再依赖 AAC:
+ *   - 录像: MP4 video-only (audio_encode=0), 音频独立存为 .alaw (G.711A)
+ *   - 回放: pb_thread 直接读 .alaw 透传给 APP, 不需要 AAC 解码
+ * 关掉 AAC 节省 PSRAM (解码器内部 buffer 几十 KB 级).
+ * 如果后期需要 AAC (比如对讲走 AAC 格式), 改回 1 即可. */
+#define AAC_ENC_CTRL                    0
+#define AAC_DEC_CTRL                    0
 
 /***********************************************************
  *默认mjpeg的节点数量,要根据mjpeg启动的分辨率去考虑
@@ -766,14 +856,30 @@ INPUT_MODE:
  1080P:算mjpeg大小100-150K,给20个节点足够
  其他分辨率,根据实际情况去配置
  * ********************************************************/
-#define JPG_NODE_COUNT 30
+#define JPG_NODE_COUNT 4
+
+
+/**********************************************************************
+ * 抓拍代码选择:
+ *   1 = 使用老的 msi 抓拍路径 (auto_jpg_msi + jpg_concat + snapshot_msi)
+ *       优点: 稳定, SDK 已验证
+ *       代价: 约 100KB PSRAM 常驻 (auto_jpg/snapshot msi + jpg_static_pool
+ *             64KB + jpg_concat_buf 30KB)
+ *   0 = 使用新的裸调硬件抓拍 (project/icam365/snapshot_bare.c)
+ *       优点: 常驻内存极小 (仅 node 池 SNAP_NODE_COUNT*SNAP_NODE_LEN),
+ *             node 在 snapshot_init 一次性申请, 多次抓拍复用, 不反复
+ *             malloc/free; 抓拍路径直接, 不受 SDK msi 调度影响
+ *       代价: 自己管理 JPG 硬件中断/node
+ * 两种实现对外都是 snapshot_capture()/snapshot_release() 同名接口
+ *********************************************************************/
+#define SNAPSHOT_USE_LEGACY     0
 
 
 /*************************************************************
  * 节省sram内存,将部分模块强制使用psram
  * 优点:节省sram内存
  * 缺点:psram读写慢,可能会影响性能
- 
+
  1080P的sram内存不足,将部分数据放到了psram
  ************************************************************/
 #define MORE_SRAM
@@ -784,8 +890,10 @@ INPUT_MODE:
  * 设置图传辅码流的size(1080P辅码流是mjpg),注意SUB_STREAM_WIDTH需要是与镜头
    等比例关系,包括是H(sdk默认这个是等比例,所以不需要配置H)
  ************************************************************************/
+#define SUB_STREAM_EN 1
 #define VPP_BUF1_EN 1
-#define SUB_STREAM_WIDTH    1280
+#define SUB_STREAM_WIDTH    640
+
 
 /************************************************************************
 * 配置解码最大的size,如果不需要特殊size解码,这个配置320x180(缩略图用)
@@ -803,7 +911,7 @@ INPUT_MODE:
 /************************************************************************
  * 1080P摄像头的mjpeg辅码流
  * 录风者设置图传是mjpeg,则RECORDER_MODE等于1即可
- ************************************************************************/
+// ************************************************************************/
 #define RECORDER_MODE 1
 
 
@@ -812,11 +920,44 @@ INPUT_MODE:
  ************************************************************************/
 #define USE_FAT_CACHE 1
 
-#elif (CUSTOMER_ID == 5)
+/* 网络模块参数 */
+
+#define LWIP_WND_SCALE              1
+#define TCP_RCV_SCALE               2
+
+#define CONFIG_CORE_HEAP_SIZE          (48*1024)
+#define CONFIG_CORE_SKB_POOL_SIZE      (768*1024)
+
+#define TCPIP_MBOX_SIZE                 320
+#define DEFAULT_UDP_RECVMBOX_SIZE       256
+#define DEFAULT_TCP_RECVMBOX_SIZE       64
+#define DEFAULT_ACCEPTMBOX_SIZE         16
+
+#define MEM_SIZE                        320*1024
+#define MEMP_NUM_PBUF                   256
+#define MEMP_NUM_NETCONN                20
+#define MEMP_NUM_NETBUF                 256
+#define MEMP_NUM_UDP_PCB                8
+#define MEMP_NUM_TCP_PCB                12
+#define MEMP_NUM_TCP_SEG                256
+#define PBUF_POOL_SIZE                  160
+
+#define TCP_SND_BUF                    (80 * TCP_MSS)
+#define TCP_WND                        (40 * TCP_MSS)
+#define TCP_SNDLOWAT                   (40 * TCP_MSS)
+#define TCP_SND_QUEUELEN               (192)
+#define TCP_SNDQUEUELOWAT              (96)            /* QUEUELEN/2 */
+#define TCP_TMR_INTERVAL                50
+
+#define DNS_MAX_NAME_LENGTH 256
+#define TCPIP_THREAD_PRIO           OS_TASK_PRIORITY_HIGH
+#define DNS_TABLE_SIZE       4
+
+#elif 0//(CUSTOMER_ID == 5)
 /*****************************************************************************
  * 720P摄像头,插值到1080P(帧率主要看摄像头配置表,SDK默认1084 25帧)
  * 主码流(H264):1920x1080 @ 25fps
- * 辅码流(H264):640x360   @ 25fps 
+ * 辅码流(H264):640x360   @ 25fps
  * 录卡(MP4):主码流+aac音频(8KHz/16bit)
  * 拍照(MJPG):1280x720
  * 图传:RTSP  辅码流  默认地址:rtsp://ip:554/h264?1
@@ -839,9 +980,9 @@ INPUT_MODE:
  * CONFIG_PSRAM_AVHEAP_SIZE:为应用分配的psram宏,需要根据应用场景分配
  * PSRAM_HEAP:如果需要用到psram,需要打开PSRAM_HEAP
  ********************************************************************/
-#define DEFAULT_SYS_CLK                 (192*1000000) 
+#define DEFAULT_SYS_CLK                 (192*1000000)
 #define PSRAM_HEAP          //如果需要psram当作heap,需要打开这个宏
-#define AV_PSRAM_HEAP    
+#define AV_PSRAM_HEAP
 #define AV_HEAP
 
 
@@ -866,11 +1007,11 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
  * 720P镜头:  60K(VPP_DATA0)(1080P h264) = 60k
 			  辅码流:  12K(gen420) = 12K
 			  其他:  10K(解码) + 其他(某些结构体用到) ≈ 15K
-				
+
     total:  95K(没有额外功能,可以运行,如果空间足够,尽量到100K)
-	
-				
- 
+
+
+
  *********************************************************************************************************************************************/
 #define CONFIG_AVHEAP_SIZE              (100*1024)
 
@@ -975,7 +1116,7 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 
 
 
-/************************************************************ 
+/************************************************************
  * mipi相关
 INPUT_MODE:
 #define YUV422                          0
@@ -1009,7 +1150,7 @@ INPUT_MODE:
  * 节省sram内存,将部分模块强制使用psram
  * 优点:节省sram内存
  * 缺点:psram读写慢,可能会影响性能
- 
+
  1080P的sram内存不足,将部分数据放到了psram
  ************************************************************/
 #define MORE_SRAM
@@ -1065,7 +1206,7 @@ INPUT_MODE:
  ************************************************************************/
 #define USE_FAT_CACHE 1
 
-#elif (CUSTOMER_ID == 6)
+#elif 0//(CUSTOMER_ID == 6)
 /***************************************************************************************************************************************
  * UVC摄像头
  * UVC镜头: 与usb支持分辨率有关
@@ -1091,9 +1232,9 @@ INPUT_MODE:
  * CONFIG_PSRAM_AVHEAP_SIZE:为应用分配的psram宏,需要根据应用场景分配
  * PSRAM_HEAP:如果需要用到psram,需要打开PSRAM_HEAP
  ********************************************************************/
-#define DEFAULT_SYS_CLK                 (192*1000000) 
+#define DEFAULT_SYS_CLK                 (192*1000000)
 #define PSRAM_HEAP          //如果需要psram当作heap,需要打开这个宏
-#define AV_PSRAM_HEAP    
+#define AV_PSRAM_HEAP
 #define AV_HEAP
 
 /*********************************************************************
@@ -1113,10 +1254,10 @@ total:3M
 
 /************************************************************
  * 不同镜头以及功能不一样
- 
+
  gen420:12K
  mjpeg解码:10K
- 
+
  total≈20K(相当于分时复用,如果空间足够需要多给点)
  ************************************************************/
 #define CONFIG_AVHEAP_SIZE              (20*1024)
@@ -1227,12 +1368,12 @@ UVC的配置
 #define MAX_DECODE_YUV_TX 1
 
 
-#elif (CUSTOMER_ID == 7)
+#elif 0//(CUSTOMER_ID == 7)
 
 #define SYS_APP_WALKIE_TALKIE
-#define DEFAULT_SYS_CLK                 (240*1000000) 
+#define DEFAULT_SYS_CLK                 (240*1000000)
 #define PSRAM_HEAP          //如果需要psram当作heap,需要打开这个宏
-#define AV_PSRAM_HEAP    
+#define AV_PSRAM_HEAP
 #define AV_HEAP
 #define CONFIG_PSRAM_AVHEAP_SIZE        (3*1024*1024+600*1024)
 #define CONFIG_AVHEAP_SIZE              (145*1024)
@@ -1325,11 +1466,11 @@ UVC的配置
 #define DEV_SENSOR_GC1084               1
 
 #if DUAL_EN
-    #define ISP_SENOR_NUM               2   
-    #define ISP_DMA_EN                  1       
+    #define ISP_SENOR_NUM               2
+    #define ISP_DMA_EN                  1
 #else
     #define ISP_SENOR_NUM               1
-    #define ISP_DMA_EN                  1   
+    #define ISP_DMA_EN                  1
 #endif
 
 //#define VCAM_33
@@ -1344,7 +1485,7 @@ UVC的配置
 #define RATE_CONTROL_SELECT     RATE_CONTROL_IPC
 
 #define IPF_EN					                1
-#define VPP_INPUT_FROM       			IN_DVP0   
+#define VPP_INPUT_FROM       			IN_DVP0
 #define VPP_BUF1_EN                     1
 #define PSRAM_FRAME_SAVE                1
 
@@ -1362,7 +1503,7 @@ UVC的配置
 #define WIFI_FEM_CHIP     LMAC_FEM_GSR2701_5V
 #define LMAC_BGN_PCF
 
-#elif (CUSTOMER_ID == 8)
+#elif 0//(CUSTOMER_ID == 8)
 
 /***************************************************************
  * 打开PIN_FROM_PARAM,通过脚本和config.cfg去生成对应的io配置信息
@@ -1381,9 +1522,9 @@ UVC的配置
  * CONFIG_PSRAM_AVHEAP_SIZE:为应用分配的psram宏,需要根据应用场景分配
  * PSRAM_HEAP:如果需要用到psram,需要打开PSRAM_HEAP
  ********************************************************************/
-#define DEFAULT_SYS_CLK                 (192*1000000) 
+#define DEFAULT_SYS_CLK                 (192*1000000)
 #define PSRAM_HEAP          //如果需要psram当作heap,需要打开这个宏
-#define AV_PSRAM_HEAP    
+#define AV_PSRAM_HEAP
 #define AV_HEAP
 
 /*********************************************************************
@@ -1403,10 +1544,10 @@ total:3M
 
 /************************************************************
  * 不同镜头以及功能不一样
- 
+
  gen420:12K
  mjpeg解码:10K
- 
+
  total≈20K(相当于分时复用,如果空间足够需要多给点)
  ************************************************************/
 #define CONFIG_AVHEAP_SIZE              (150*1024)
@@ -1528,7 +1669,7 @@ UVC的配置
 #define DEV_SENSOR_GC2053               1
 #define DEV_SENSOR_GC1084               1
 
-/************************************************************ 
+/************************************************************
  * mipi相关
 INPUT_MODE:
 #define YUV422                          0
@@ -1575,12 +1716,12 @@ INPUT_MODE:
 
 #define LCD_ST7701S_MIPI_EN 			1
 
-#elif (CUSTOMER_ID == 9)
+#elif 0//(CUSTOMER_ID == 9)
 
 #define SYS_APP_BBM_LCD
-#define DEFAULT_SYS_CLK                 (240*1000000) 
+#define DEFAULT_SYS_CLK                 (240*1000000)
 #define PSRAM_HEAP          //如果需要psram当作heap,需要打开这个宏
-#define AV_PSRAM_HEAP    
+#define AV_PSRAM_HEAP
 #define AV_HEAP
 #define CONFIG_PSRAM_AVHEAP_SIZE        (7*1024*1024)
 #define CONFIG_AVHEAP_SIZE              (170*1024)
@@ -1683,12 +1824,12 @@ INPUT_MODE:
 
 #define DEFINE_UI    					BBM_UI
 
-#elif (CUSTOMER_ID == 10)
+#elif 0 //(CUSTOMER_ID == 10)
 
 #define SYS_APP_BBM_CAM
-#define DEFAULT_SYS_CLK                 (240*1000000) 
+#define DEFAULT_SYS_CLK                 (240*1000000)
 #define PSRAM_HEAP          //如果需要psram当作heap,需要打开这个宏
-#define AV_PSRAM_HEAP    
+#define AV_PSRAM_HEAP
 #define AV_HEAP
 #define CONFIG_PSRAM_AVHEAP_SIZE        (3*1024*1024+600*1024)
 #define CONFIG_AVHEAP_SIZE              (150*1024)
@@ -1778,11 +1919,11 @@ INPUT_MODE:
 #define DEV_SENSOR_GC1084               1
 
 #if DUAL_EN
-    #define ISP_SENOR_NUM               2   
-    #define ISP_DMA_EN                  1       
+    #define ISP_SENOR_NUM               2
+    #define ISP_DMA_EN                  1
 #else
     #define ISP_SENOR_NUM               1
-    #define ISP_DMA_EN                  1   
+    #define ISP_DMA_EN                  1
 #endif
 
 //#define VCAM_33
@@ -1799,7 +1940,7 @@ INPUT_MODE:
 #define VPP_BUF1_EN 1
 #define PSRAM_FRAME_SAVE 1
 
-#define VIDEO_YUV_RANGE_TYPE            (0)  
+#define VIDEO_YUV_RANGE_TYPE            (0)
 
 
 //是能5m/20m共存和自动带宽切换，
@@ -1808,7 +1949,7 @@ INPUT_MODE:
 
 #define WIFI_MODE_DEFAULT               WIFI_MODE_STA
 
-#elif (CUSTOMER_ID == 11)
+#elif 0//(CUSTOMER_ID == 11)
 /*****************************************************************************
  * 1080P摄像头(帧率主要看摄像头配置表,SDK默认2053 25帧)
  * 主码流(H264):1920x1080 @ 25fps
@@ -1835,9 +1976,9 @@ INPUT_MODE:
  * CONFIG_PSRAM_AVHEAP_SIZE:为应用分配的psram宏,需要根据应用场景分配
  * PSRAM_HEAP:如果需要用到psram,需要打开PSRAM_HEAP
  ********************************************************************/
-#define DEFAULT_SYS_CLK                 (192*1000000) 
+#define DEFAULT_SYS_CLK                 (192*1000000)
 #define PSRAM_HEAP          //如果需要psram当作heap,需要打开这个宏
-#define AV_PSRAM_HEAP    
+#define AV_PSRAM_HEAP
 #define AV_HEAP
 
 
@@ -1861,10 +2002,10 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
  * 没有考虑大分辨拍照模式
  * 1080P镜头:  90K(VPP_DATA0)(1080P h264) + 52.5K(VPP_DATA1)(720P拍照) ≈ 142.5K
 				其他:  12K(gen420)+10K(解码) + 其他(某些结构体用到) ≈ 22K(动态使用,gen420和解码可以分时复用)
-				
+
     total:  165K
-				
- 
+
+
  *********************************************************************************************************************************************/
 #define CONFIG_AVHEAP_SIZE              (100*1024 + 50*1024)
 
@@ -1971,7 +2112,7 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 
 
 
-/************************************************************ 
+/************************************************************
  * mipi相关
 INPUT_MODE:
 #define YUV422                          0
@@ -2003,7 +2144,7 @@ INPUT_MODE:
  * 节省sram内存,将部分模块强制使用psram
  * 优点:节省sram内存
  * 缺点:psram读写慢,可能会影响性能
- 
+
  1080P的sram内存不足,将部分数据放到了psram
  ************************************************************/
 #define MORE_SRAM
@@ -2046,4 +2187,3 @@ INPUT_MODE:
 #endif
 
 #endif
-

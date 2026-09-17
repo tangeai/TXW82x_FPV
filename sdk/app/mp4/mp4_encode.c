@@ -1,3 +1,4 @@
+#include "project_config.h"
 #include "lib/fs/fatfs/osal_file.h"
 #include "lib/heap/av_psram_heap.h"
 #include "osal/string.h"
@@ -73,6 +74,19 @@ uint32_t mp4_write(void *buf, uint32_t size, uint32_t n, F_FILE *fp)
     uint32_t ret              = 1;
     uint32_t write_size_total = size * n;
     ret                       = osal_fwrite(buf, 1, write_size_total, fp);
+
+//    /* SD 卡 SPI DMA 期间关中断 → WiFi/lwIP 无法收 TCP 包 → 云存断连.
+//     * 每累积写 16KB 后 os_sleep_ms(1) 让出 CPU, 给 WiFi 任务处理 TCP 收发包.
+//     * 1080p 25fps 每帧 ~8-20KB, 约每秒 yield 15-25 次, 开销 ~15-25ms/s. */
+//    {
+//        static uint32_t s_write_acc = 0;
+//        s_write_acc += write_size_total;
+//        if (s_write_acc >= 16384) {
+//            s_write_acc = 0;
+//            os_sleep_ms(1);
+//        }
+//    }
+
     return !ret;
 }
 
@@ -95,6 +109,9 @@ void mp4_truncate(F_FILE *fp, uint32_t offset)
 void mp4_file_syn(F_FILE *fp)
 {
     osal_fsync(fp);
+    /* fsync 是 SD 卡最重的操作 (刷 FAT 表 + 目录项, 多扇区写入),
+     * 完成后让出 CPU 给 WiFi 任务处理 TCP 收发包. */
+//    os_sleep_ms(1);
 }
 
 #define ATOM(x)                                                                                                                                                                                        \
@@ -124,12 +141,42 @@ void mp4_file_syn(F_FILE *fp)
 #define BIG2_ENDIAN(X) (((X) & 0xFF00) >> 8 | ((X) & 0x00FF) << 8)
 #define BIG1_ENDIAN(X) ((X))
 
-#define STTS_COUNT (0x2000)
+/* MP4 moov 内 stbl 子表的预分配容量 (条数). SDK 在写文件头时 truncate 出
+ * COUNT * entry_size 的连续磁盘空间, 实际录像时只用前面 N 条, 后面的预留
+ * 空间永久浪费 (mp4_deinit 不收缩).
+ *
+ * !!! 容量打小风险: SDK 在 stxx_count >= STXX_COUNT 时, mp4_syn 内 ret++,
+ *     一路传回 write_h264_nal 触发 WRITE_ERR 让 mp4_encode_thread 提前切片,
+ *     表现是录像短于 rec_time 就切下一个文件. 见 ret 处理 mp4_encode.c:921 等.
+ *
+ * 按 IPC 实际参数核算 (rec_time=60s, 视频实际帧率 ≤15fps 但有抖动, GOP=30):
+ *   STTS: 时间增量条目, 帧间隔每变化一次就新增一条. 帧率抖动剧烈时最坏每帧
+ *         一条 entry, 按 30fps×60s = 1800 条 + 2 倍余量 → 4096
+ *   STSZ: 每帧大小, 同样按 30fps×60s 估上限 → 4096
+ *   STCO: 每帧 chunk 偏移, 同 STSZ → 4096
+ *   STSS: 关键帧索引, GOP=30/15fps = 2s/I帧, 60s=30 条; I 帧密度突增时
+ *         可能更多, 512 留 ~16 倍余量
+ *   STSC: 不动 (1 已经够)
+ * 合计预分配 66KB (vs 原 1.3MB), 单文件仍节省 ~1.23MB.
+ * 若以后改大 rec_time 或提高 fps, 需相应放大. */
+#define STTS_COUNT (4096)
 #define STSC_COUNT (1)
-#define STSZ_COUNT (0x20000)
-#define STCO_COUNT (0x20000)
-#define STSS_COUNT (0x10000)
-#define MDAT_SIZE  (8 * 1024 * 1024)
+#define STSZ_COUNT (4096)
+#define STCO_COUNT (4096)
+#define STSS_COUNT (512)
+/* MDAT_SIZE: 单文件 mdat box 预分配上限 (mp4_mdat_write 时 truncate 出此空间).
+ * 实际写入超过会 mdat box 边界错位损坏文件. mp4_deinit 关闭时会 truncate 回
+ * 真实写入位置, 不浪费 SD 空间.
+ *
+ * 按 REC_STREAM_TYPE (project_config.h) 取值:
+ *   0 = 主码流 → 24MB (容纳 1080P 2Mbps × 60s ≈ 15MB + 余量)
+ *   1 = 子码流 → 8MB  (子码流 250kbps × 60s ≈ 1.8MB, 8MB 充裕)
+ * REC_STREAM_TYPE 没定义时按子码流 8MB 兜底 (含其他 CUSTOMER_ID 老配置) */
+#if defined(REC_STREAM_TYPE) && (REC_STREAM_TYPE == 0)
+#define MDAT_SIZE  (24 * 1024 * 1024)
+#else
+#define MDAT_SIZE  (8  * 1024 * 1024)
+#endif
 // #define MAX_MDAT_SIZE (10*1024*1024)
 
 static const char          language[4] = "und";
@@ -621,7 +668,7 @@ uint32_t mp4_stsc_write(F_FILE *fp, uint32_t offset, mp4_key_msg *msg)
 #if 0
     //fseek预留足够空间
     mp4_seek(fp,STSC_COUNT*sizeof(stsc.end)-1,SEEK_CUR);
-    
+
     mp4_write(&zero_data,1,1,fp);
 #else
     mp4_write(&entries, 1, sizeof(entries), fp);
@@ -1135,23 +1182,40 @@ uint32_t write_h264_nal(F_FILE *fp, mp4_key_msg *msg, uint8_t *nal_buf, uint32_t
 
     mp4_seek(fp, msg->mdat_nowoffset, SEEK_SET);
     uint32_t big_size = BIG4_ENDIAN(size);
-    uint32_t buf_size = size;
-    // 直接拷贝数据直接写入
-    if (buf_size <= 512 - 4)
+    uint32_t total    = size + 4;                         /* 4B 长度头 + payload */
+    uint32_t aligned  = (total + 0x1ff) & (~0x1ff);       /* 对齐到 512B */
+
+    /* 优先走单次 fwrite 聚合路径: nal_wr_buf 预分配且容量够 */
+    if (msg->nal_wr_buf && aligned <= msg->nal_wr_buf_size)
     {
-        hw_memcpy(msg->cache + 4, nal_buf, buf_size - 4);
-        memcpy(msg->cache, &big_size, 4);
-        ret |= mp4_write(msg->cache, 1, 512, fp);
+        memcpy(msg->nal_wr_buf, &big_size, 4);
+        hw_memcpy(msg->nal_wr_buf + 4, nal_buf, size);
+        /* 对齐尾部补零，避免 FatFS 读-改-写扇区 */
+        if (aligned > total)
+        {
+            memset(msg->nal_wr_buf + total, 0, aligned - total);
+        }
+        ret |= mp4_write(msg->nal_wr_buf, 1, aligned, fp);
     }
-    // 分段写入
+    /* 回退: 超大 I 帧或 nal_wr_buf 未分配, 走原"头512B + 尾对齐"两次写 */
     else
     {
-        hw_memcpy(msg->cache + 4, nal_buf, 512 - 4);
-        memcpy(msg->cache, &big_size, 4);
-        ret |= mp4_write(msg->cache, 1, 512, fp);
+        uint32_t buf_size = size;
+        if (buf_size <= 512 - 4)
+        {
+            hw_memcpy(msg->cache + 4, nal_buf, buf_size - 4);
+            memcpy(msg->cache, &big_size, 4);
+            ret |= mp4_write(msg->cache, 1, 512, fp);
+        }
+        else
+        {
+            hw_memcpy(msg->cache + 4, nal_buf, 512 - 4);
+            memcpy(msg->cache, &big_size, 4);
+            ret |= mp4_write(msg->cache, 1, 512, fp);
 
-        buf_size -= (512 - 4);
-        ret |= mp4_write(nal_buf + 512 - 4, 1, ((buf_size + 0x1ff) & (~0x1ff)), fp);
+            buf_size -= (512 - 4);
+            ret |= mp4_write(nal_buf + 512 - 4, 1, ((buf_size + 0x1ff) & (~0x1ff)), fp);
+        }
     }
     ret |= update_stbl_subbox(fp, msg, size + 4, duration, keyflag);
     if (ret)
@@ -1303,7 +1367,34 @@ uint32_t write_h264_data(mp4_key_msg *msg, uint8_t *nal_buf, uint32_t size, uint
 uint32_t mp4_deinit(mp4_key_msg *msg)
 {
     mp4_syn(msg);
+    /* mp4_mdat_write 启动时把文件预分配到 MDAT_SIZE (默认 8MB) 或 file_max_size,
+     * 避免 FAT 碎片. 但实际写入通常远小于此 (子码流 250kbps×60s 仅 ~1.8MB).
+     * 关闭前必须截断回真实末尾, 否则文件物理占用永远是 MDAT_SIZE.
+     *
+     * !!! 不能用 msg->msg_end: 它在 mp4_mdat_write 里被 mp4_truncate 后的
+     *     ftell 锚定到预分配末尾 (MDAT_SIZE), 之后 write_h264_nal 写数据
+     *     根本不更新 msg_end. 之前用 msg_end 判断 truncate 完全不生效.
+     *
+     * MP4 box 顺序: ftyp → moov(含 stts/stsz/stco 索引) → mdat(裸帧).
+     * mdat 在文件最后, 所以"实际文件末尾 = mdat_nowoffset" (SDK 每写一帧
+     * 都会推进 mdat_nowoffset). 用它做真实截断位置.
+     *
+     * 同时修正 mdat box 的 size 字段: mp4_mdat_write 写的是预分配大小,
+     * truncate 后必须改成实际数据大小, 否则播放器读 box 越界. */
+    if (msg->mdat_offset > 0 && msg->mdat_nowoffset > msg->mdat_offset) {
+        /* 1. 回写真实 mdat box size = nowoffset - offset (mdat box 头 + 数据) */
+        uint32_t actual_mdat_size = msg->mdat_nowoffset - msg->mdat_offset;
+        uint32_t mdat_size_be = BIG4_ENDIAN(actual_mdat_size);
+        mp4_seek(msg->fp, msg->mdat_offset, SEEK_SET);
+        mp4_write(&mdat_size_be, 1, sizeof(mdat_size_be), msg->fp);
+        /* 2. 截断到 mdat 实际末尾 */
+        osal_fseek(msg->fp, msg->mdat_nowoffset);
+        osal_ftruncate(msg->fp);
+    }
     mp4_seek(msg->fp, 0, SEEK_END);
+    /* nal_wr_buf 是全局单例, 不在这里释放, 常驻复用 */
+    msg->nal_wr_buf      = NULL;
+    msg->nal_wr_buf_size = 0;
     STREAM_FREE(msg);
     return 0;
 }
@@ -1333,6 +1424,24 @@ uint32_t mp4_video_cfg_init(mp4_key_msg *msg, uint16_t w, uint16_t h)
 
 // mp4初始化,没什么用,应该是预分配一下内存空间
 // 因为其他数据实际的index需要获取到第一帧I帧才能知道分辨率,pps和sps
+/* 一次 fwrite 聚合缓冲: 覆盖绝大多数 P 帧, 超过容量的大 I 帧自动回退到分段写
+ * TXW828 1080P@2Mbps  P帧 ~10KB, I帧 40-60KB  -> 64KB 基本全覆盖
+ * TXW826 720P        P帧 ~5KB,  I帧 20-30KB  -> 32KB 够用
+ * 从系统 PSRAM 堆申请 (os_malloc_psram), 不占 av_psram_heap */
+#ifndef MP4_NAL_WR_BUF_SIZE
+#if defined(__TXW828__)
+#define MP4_NAL_WR_BUF_SIZE (32 * 1024)
+#else
+#define MP4_NAL_WR_BUF_SIZE (20 * 1024)
+#endif
+#endif
+
+/* 全局单例 NAL 聚合缓冲: lazy init, 首次录像时申请, 此后常驻 PSRAM
+ * 所有 encoder 实例共享同一块 buffer (普通录像/缩时录影同一时刻只会有一个活跃 encoder)
+ * 好处: 每次切换 MP4 文件不再反复 malloc/free, 避免 PSRAM 堆碎片和分配失败风险 */
+static uint8_t *s_nal_wr_buf      = NULL;
+static uint32_t s_nal_wr_buf_size = 0;
+
 void *MP4_open_init(F_FILE *fp, uint8_t audio_en)
 {
     mp4_key_msg *msg = STREAM_MALLOC(sizeof(mp4_key_msg));
@@ -1341,6 +1450,25 @@ void *MP4_open_init(F_FILE *fp, uint8_t audio_en)
         memset(msg, 0, sizeof(mp4_key_msg));
         msg->fp           = fp;
         msg->audio_enable = audio_en;
+
+        /* 首次调用时才申请, 后续复用 */
+        if (!s_nal_wr_buf)
+        {
+            s_nal_wr_buf = (uint8_t *) os_malloc_psram(MP4_NAL_WR_BUF_SIZE);
+            if (s_nal_wr_buf)
+            {
+                s_nal_wr_buf_size = MP4_NAL_WR_BUF_SIZE;
+                os_printf(KERN_INFO "MP4 nal_wr_buf: alloc %dKB @ %p (resident)\n",
+                          MP4_NAL_WR_BUF_SIZE / 1024, s_nal_wr_buf);
+            }
+            else
+            {
+                s_nal_wr_buf_size = 0;
+                os_printf(KERN_WARNING "MP4_open_init: nal_wr_buf alloc fail, fallback to legacy write\n");
+            }
+        }
+        msg->nal_wr_buf      = s_nal_wr_buf;
+        msg->nal_wr_buf_size = s_nal_wr_buf_size;
     }
     return (void *) msg;
 }

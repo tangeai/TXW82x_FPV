@@ -13,10 +13,10 @@ static int32 ble_adv_parse_data(uint8 *data, int32 len)
 	}else {
 		return 0;
 	}
-	if(ble_ctrl->adv_info.header_info.pdu_type != ADV_DISCOVER_TYPE) {   
+	if(ble_ctrl->adv_info.header_info.pdu_type != ADV_DISCOVER_TYPE) {
 		return 0;
-	} 
-	if(ble_ctrl->adv_info.payload_info.manufacturer_id != ADV_MANUFACTURER_ID) { 
+	}
+	if(ble_ctrl->adv_info.payload_info.manufacturer_id != ADV_MANUFACTURER_ID) {
 		return 0;
 	}
 	#if (ADV_IDENTIFY_SET_LEN > 0 && ADV_IDENTIFY_SET_LEN < ADV_IDENTIFY_MAX_LEN)
@@ -73,10 +73,10 @@ int32 ble_adv_rx_data(uint8 *data, uint32 len)
 
     //dump_hex("ble adv rx adv_data:\r\n", data, len, 1);
 	if (ble_adv_parse_data(data, len)) {
-   		data_len = ble_adv_get_data(&ncdata);
-   		if (data_len && ncdata) {
-       		ble_adv_parse_param(ncdata, data_len);
-   		}
+        data_len = ble_adv_get_data(&ncdata);
+        if (data_len && ncdata) {
+            ble_adv_parse_param(ncdata, data_len);
+        }
 	}
     return RET_OK;
 }
@@ -94,7 +94,7 @@ int32 ble_adv_tx_data(uint8 *data, int32 len)
 	if((data == NULL) || (len <= 0) || (len > 250 * ADV_MAX_SECTION_LEN)) { //section_num:1byte(255)
 		return RET_ERR;
 	}
-	
+
 	section_num = (len + ADV_MAX_SECTION_LEN - 1) / ADV_MAX_SECTION_LEN;
 	last_section_len = len - (section_num - 1) * ADV_MAX_SECTION_LEN;
 	adv_info.header_info.pdu_type = ADV_DISCOVER_TYPE;
@@ -105,7 +105,7 @@ int32 ble_adv_tx_data(uint8 *data, int32 len)
 	adv_info.payload_info.manufacturer_id = ADV_MANUFACTURER_ID;
 	memcpy(adv_info.payload_info.identify_info, adv_identify_info, ADV_IDENTIFY_SET_LEN);
 
-	
+
 	while(1) {
 		start_pos = section_idx * ADV_MAX_SECTION_LEN;
 		if(section_idx < section_num - 1) {
@@ -151,6 +151,7 @@ int32 ble_adv_ctrl_destory(void)
 {
 	if (ble_ctrl) {
 		os_free(ble_ctrl);
+        ble_ctrl = NULL;
 	}
 	return RET_OK;
 }

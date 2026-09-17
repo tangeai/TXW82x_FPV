@@ -301,6 +301,194 @@ enum video_app_h264_enum
 #define STREAM_FREE   av_psram_free
 #define STREAM_ZALLOC av_psram_zalloc
 
+/*******************************************************************************
+ * H264 输出 buffer 静态池
+ * 目的：消除每帧 malloc/free 导致的 av_psram 碎片化
+ * 设计：预分配 N 块固定大小 PSRAM buffer，每帧从池取一块，下游消费完归还
+ *       如果池满或单帧超过单块大小，回退到 STREAM_MALLOC（极少触发）
+ *
+ ******************************************************************************/
+/* ----- 三层静态池设计 -----
+ * 目的: 消除 av_psram_heap 上的 h264 帧 alloc/free, 根治碎片化.
+ *
+ * P 帧 size 实测分布:
+ *   826 720P (~7200 帧):  <8K=91.9%  8-16K=7.9%  16-24K=0.14%  >=24K=0.08%
+ *                         I 帧 max ~38KB
+ *   828 1080P (~2800 帧): <8K=79.6%  8-16K=18.9%  16-24K=2.1%  >=24K=0.08%
+ *                         I 帧 max ~42KB
+ *
+ * 分 3 层避免用大块装小帧浪费, 同时小池块数足以容纳 mp4 fbq 堆积:
+ *   SMALL: 覆盖绝大多数小 P 帧 (实际命中率 ~90%)
+ *   MID:   覆盖中等 P 帧 + 小池满时的应急
+ *   BIG:   覆盖 I 帧 + 大 P 帧 + 中池满时的应急
+ */
+#if defined(__TXW828__)
+/* 828: 1080P 主码流 */
+#define H264_SMALL_BUF_SIZE     (8  * 1024)
+#define H264_SMALL_BUF_COUNT    23
+#define H264_MID_BUF_SIZE       (16 * 1024)
+#define H264_MID_BUF_COUNT      12
+#define H264_BIG_BUF_SIZE       (80 * 1024)
+#define H264_BIG_BUF_COUNT      2
+#else
+/* 826: 720P 主码流, 实测 91.9% P 帧 < 8K */
+#define H264_SMALL_BUF_SIZE     (8  * 1024)
+#define H264_SMALL_BUF_COUNT    23
+#define H264_MID_BUF_SIZE       (16 * 1024)
+#define H264_MID_BUF_COUNT      6
+#define H264_BIG_BUF_SIZE       (60 * 1024)
+#define H264_BIG_BUF_COUNT      2
+#endif
+
+static uint8_t          *h264_small_buf[H264_SMALL_BUF_COUNT] = {NULL};
+static volatile uint8_t  h264_small_buf_busy[H264_SMALL_BUF_COUNT] = {0};
+static uint8_t          *h264_mid_buf[H264_MID_BUF_COUNT] = {NULL};
+static volatile uint8_t  h264_mid_buf_busy[H264_MID_BUF_COUNT] = {0};
+static uint8_t          *h264_big_buf[H264_BIG_BUF_COUNT] = {NULL};
+static volatile uint8_t  h264_big_buf_busy[H264_BIG_BUF_COUNT] = {0};
+static volatile uint8_t  h264_static_buf_inited = 0;
+
+static int h264_static_buf_init(void)
+{
+    if (h264_static_buf_inited)
+        return 0;
+    for (int i = 0; i < H264_SMALL_BUF_COUNT; i++)
+    {
+        h264_small_buf[i] = (uint8_t *) STREAM_MALLOC(H264_SMALL_BUF_SIZE);
+        if (!h264_small_buf[i])
+        {
+            os_printf(KERN_ERR "h264_small_buf: alloc failed at %d\r\n", i);
+            for (int j = 0; j < i; j++) { STREAM_FREE(h264_small_buf[j]); h264_small_buf[j] = NULL; }
+            return -1;
+        }
+        sys_dcache_invalid_range((uint32_t *) h264_small_buf[i], H264_SMALL_BUF_SIZE);
+    }
+    for (int i = 0; i < H264_MID_BUF_COUNT; i++)
+    {
+        h264_mid_buf[i] = (uint8_t *) STREAM_MALLOC(H264_MID_BUF_SIZE);
+        if (!h264_mid_buf[i])
+        {
+            os_printf(KERN_ERR "h264_mid_buf: alloc failed at %d\r\n", i);
+            for (int j = 0; j < i; j++) { STREAM_FREE(h264_mid_buf[j]); h264_mid_buf[j] = NULL; }
+            for (int j = 0; j < H264_SMALL_BUF_COUNT; j++) { STREAM_FREE(h264_small_buf[j]); h264_small_buf[j] = NULL; }
+            return -1;
+        }
+        sys_dcache_invalid_range((uint32_t *) h264_mid_buf[i], H264_MID_BUF_SIZE);
+    }
+    for (int i = 0; i < H264_BIG_BUF_COUNT; i++)
+    {
+        h264_big_buf[i] = (uint8_t *) STREAM_MALLOC(H264_BIG_BUF_SIZE);
+        if (!h264_big_buf[i])
+        {
+            os_printf(KERN_ERR "h264_big_buf: alloc failed at %d\r\n", i);
+            for (int j = 0; j < i; j++) { STREAM_FREE(h264_big_buf[j]); h264_big_buf[j] = NULL; }
+            for (int j = 0; j < H264_MID_BUF_COUNT; j++) { STREAM_FREE(h264_mid_buf[j]); h264_mid_buf[j] = NULL; }
+            for (int j = 0; j < H264_SMALL_BUF_COUNT; j++) { STREAM_FREE(h264_small_buf[j]); h264_small_buf[j] = NULL; }
+            return -1;
+        }
+        sys_dcache_invalid_range((uint32_t *) h264_big_buf[i], H264_BIG_BUF_SIZE);
+    }
+    h264_static_buf_inited = 1;
+    os_printf(KERN_INFO "h264_static_buf: init ok, small=%dx%d mid=%dx%d big=%dx%d (total %dKB)\r\n",
+              H264_SMALL_BUF_COUNT, H264_SMALL_BUF_SIZE,
+              H264_MID_BUF_COUNT,   H264_MID_BUF_SIZE,
+              H264_BIG_BUF_COUNT,   H264_BIG_BUF_SIZE,
+              (H264_SMALL_BUF_COUNT * H264_SMALL_BUF_SIZE +
+               H264_MID_BUF_COUNT   * H264_MID_BUF_SIZE +
+               H264_BIG_BUF_COUNT   * H264_BIG_BUF_SIZE) / 1024);
+    return 0;
+}
+
+/* 三层池 alloc, 按 size 选合适层, 失败逐层向上应急:
+ *   size <= SMALL : 先小池 → 失败再中池 → 再大池
+ *   SMALL < size <= MID : 中池 → 失败再大池
+ *   MID < size <= BIG : 大池
+ *   size > BIG : NULL (caller fallback STREAM_MALLOC)
+ * 返回池内 buffer 指针, 或 NULL */
+static uint8_t *h264_static_buf_alloc(uint32_t size)
+{
+    if (!h264_static_buf_inited)
+    {
+        if (h264_static_buf_init() != 0)
+            return NULL;
+    }
+    if (size > H264_BIG_BUF_SIZE) {
+        os_printf(KERN_INFO "h264 frame size %u > big buf %d, fallback\r\n",
+                  size, H264_BIG_BUF_SIZE);
+        return NULL;
+    }
+
+    uint32_t ie = disable_irq();
+    /* 1) 小池 (size 合适时优先, 不浪费大块) */
+    if (size <= H264_SMALL_BUF_SIZE) {
+        for (int i = 0; i < H264_SMALL_BUF_COUNT; i++) {
+            if (!h264_small_buf_busy[i]) {
+                h264_small_buf_busy[i] = 1;
+                enable_irq(ie);
+                return h264_small_buf[i];
+            }
+        }
+    }
+    /* 2) 中池 (8-16K 帧 + 小池满应急) */
+    if (size <= H264_MID_BUF_SIZE) {
+        for (int i = 0; i < H264_MID_BUF_COUNT; i++) {
+            if (!h264_mid_buf_busy[i]) {
+                h264_mid_buf_busy[i] = 1;
+                enable_irq(ie);
+                return h264_mid_buf[i];
+            }
+        }
+    }
+    /* 3) 大池 (I 帧 + 大 P 帧 + 中池满应急) */
+    for (int i = 0; i < H264_BIG_BUF_COUNT; i++) {
+        if (!h264_big_buf_busy[i]) {
+            h264_big_buf_busy[i] = 1;
+            enable_irq(ie);
+            return h264_big_buf[i];
+        }
+    }
+    enable_irq(ie);
+
+    /* 三层都满, 节流报告 miss. 持续 miss 说明池上限设置不够, 需调大. */
+    static uint32_t s_miss_cnt  = 0;
+    static uint32_t s_miss_last = 0;
+    uint32_t now = os_jiffies_to_msecs(os_jiffies());
+    s_miss_cnt++;
+    if ((uint32_t)(now - s_miss_last) >= 1000) {
+        s_miss_last = now;
+        os_printf(KERN_INFO "[h264-pool] miss=%u/s size=%u (all 3 pools exhausted)\r\n",
+                  (unsigned)s_miss_cnt, (unsigned)size);
+        s_miss_cnt = 0;
+    }
+    return NULL;
+}
+
+/* 尝试归还到静态池 (小/中/大池), 返回 1 表示已归还, 0 表示不在池内 (caller 走 STREAM_FREE) */
+static int h264_static_buf_free(void *ptr)
+{
+    if (!h264_static_buf_inited || !ptr)
+        return 0;
+    for (int i = 0; i < H264_SMALL_BUF_COUNT; i++) {
+        if (h264_small_buf[i] == ptr) {
+            h264_small_buf_busy[i] = 0;
+            return 1;
+        }
+    }
+    for (int i = 0; i < H264_MID_BUF_COUNT; i++) {
+        if (h264_mid_buf[i] == ptr) {
+            h264_mid_buf_busy[i] = 0;
+            return 1;
+        }
+    }
+    for (int i = 0; i < H264_BIG_BUF_COUNT; i++) {
+        if (h264_big_buf[i] == ptr) {
+            h264_big_buf_busy[i] = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // 结构体申请空间函数
 #ifdef MORE_SRAM
 #define STREAM_LIBC_MALLOC av_psram_malloc
@@ -459,8 +647,13 @@ static int8_t h264_output_msi(struct list_head *get_f, struct video_h264_msi_s *
     fb = fbpool_get(&video_h264->tx_pool, 0, video_h264->msi);
     if (fb)
     {
-        // 先去msi寻找是否有空闲节点,如果有,才需要拷贝,否则就丢弃
-        uint8_t *h264_buf = (uint8_t *) STREAM_MALLOC(h264_len + SAVE_COUNT);
+        // 双层静态池 (小+大), 内部按 size 自动分发; 两池都满才 fallback STREAM_MALLOC
+        uint8_t *h264_buf = NULL;
+        uint32_t alloc_size = h264_len + SAVE_COUNT;
+        h264_buf = h264_static_buf_alloc(alloc_size);
+        if (!h264_buf)
+            h264_buf = (uint8_t *) STREAM_MALLOC(alloc_size);
+
         if (!h264_buf)
         {
             msi_delete_fb(NULL, fb);
@@ -651,7 +844,9 @@ static int32_t h264_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t param1
             struct framebuff *fb = (struct framebuff *) param1;
             if (fb->data)
             {
-                STREAM_FREE(fb->data);
+                // 先尝试归还到静态池, 不在池内则正常 free
+                if (!h264_static_buf_free(fb->data))
+                    STREAM_FREE(fb->data);
                 fb->data = NULL;
             }
             if (fb->priv)
@@ -903,9 +1098,57 @@ static int8_t h264_output_msi(struct list_head *get_f, struct video_h264_msi_s *
     fb = fbpool_get(&video_h264->tx_pool, 0, video_h264->msi);
     if (fb)
     {
-        // 先去msi寻找是否有空闲节点,如果有,才需要拷贝,否则就丢弃
         // MAX_BYTES是重新生成的sps和pps的最大空间
-        uint8_t *h264_buf = (uint8_t *) STREAM_MALLOC(h264_len + SAVE_COUNT + MAX_BYTES);
+        // 先从静态池分配, 避免 av_psram 碎片化; 失败再回退到 STREAM_MALLOC
+        uint8_t *h264_buf = NULL;
+        uint32_t alloc_size = h264_len + SAVE_COUNT + MAX_BYTES;
+
+//        if(alloc_size > H264_BIG_BUF_SIZE){
+//            os_printf(KERN_INFO "video frame size too big %u, drop it\r\n", alloc_size);
+//            msi_delete_fb(NULL, fb);
+//            goto h264_output_msi_end;
+//        }
+        /* P 帧 size 分布统计 (用于决定 h264_static_buf 块 size 改造).
+         * h264_type_frame: 1=I 帧, 其他=P 帧.
+         * 每 5 秒打一次, 6 个桶覆盖 8K 步进, I 帧单独计数. */
+//        {
+//            static uint32_t s_p_hist[6] = {0}; /* <8K, 8-16K, 16-24K, 24-32K, 32-48K, >=48K */
+//            static uint32_t s_i_max = 0;
+//            static uint32_t s_i_cnt = 0;
+//            static uint32_t s_last_ms = 0;
+//            if (h264_type_frame == 1) {
+//                s_i_cnt++;
+//                if (alloc_size > s_i_max) s_i_max = alloc_size;
+//            } else {
+//                uint32_t b;
+//                if      (alloc_size < 8u*1024)  b = 0;
+//                else if (alloc_size < 16u*1024) b = 1;
+//                else if (alloc_size < 24u*1024) b = 2;
+//                else if (alloc_size < 32u*1024) b = 3;
+//                else if (alloc_size < 48u*1024) b = 4;
+//                else                            b = 5;
+//                s_p_hist[b]++;
+//            }
+//            uint32_t now = os_jiffies_to_msecs(os_jiffies());
+//            if ((uint32_t)(now - s_last_ms) >= 5000) {
+//                s_last_ms = now;
+//                printf("[h264-size] P: <8K=%u 8-16K=%u 16-24K=%u 24-32K=%u 32-48K=%u >=48K=%u | I cnt=%u max=%u\r\n",
+//                       (unsigned)s_p_hist[0], (unsigned)s_p_hist[1],
+//                       (unsigned)s_p_hist[2], (unsigned)s_p_hist[3],
+//                       (unsigned)s_p_hist[4], (unsigned)s_p_hist[5],
+//                       (unsigned)s_i_cnt, (unsigned)s_i_max);
+//            }
+//        }
+
+        // 三层静态池, 内部按 size 自动分发; 三池都满才 fallback STREAM_MALLOC
+        h264_buf = h264_static_buf_alloc(alloc_size);
+        if (!h264_buf){
+            if(os_jiffies() > 5000){
+                os_printf(KERN_INFO "fallback STREAM_MALLOC %u\r\n", alloc_size);
+                h264_buf = (uint8_t *) STREAM_MALLOC(alloc_size);
+            }
+        }
+
         if (!h264_buf)
         {
             msi_delete_fb(NULL, fb);
@@ -1125,7 +1368,9 @@ static int32_t h264_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t param1
             struct framebuff *fb = (struct framebuff *) param1;
             if (fb->data)
             {
-                STREAM_FREE(fb->data);
+                // 先尝试归还到静态池, 不在池内则正常 free
+                if (!h264_static_buf_free(fb->data))
+                    STREAM_FREE(fb->data);
                 fb->data = NULL;
             }
             if (fb->priv)

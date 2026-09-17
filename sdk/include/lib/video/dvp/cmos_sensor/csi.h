@@ -32,7 +32,7 @@ typedef struct {
 	//_Sensor_Ident_ * sensor_init;
 	uint8 *sensor_init_table;
 	uint8 id,w_cmd,r_cmd,addr_num,data_num;
-	uint16 id_reg;	
+	uint16 id_reg;
 } P_XC7016_Fun;
 
 typedef struct
@@ -45,7 +45,7 @@ typedef struct
     _Sensor_CCM    *p_ccm;
 	_Sensor_AWB    *p_awb;
     _Sensor_AE     *p_ae;
-	_Sensor_DPC    *p_dpc;	
+	_Sensor_DPC    *p_dpc;
 	_Sensor_CSC    *p_csc;
 	_Sensor_GIC    *p_gic;
 	_Sensor_CSUPP  *p_csupp;
@@ -66,19 +66,19 @@ typedef struct {
 	uint8 *init;
 	uint32 init_len;
 	uint8 *preset;
-	
+
 	uint16 typ; //0: raw 1:yuv 2:mipi
 	uint32 mclk;
 	uint32 pclk_fir_en;
-	uint16 pixelw; 
+	uint16 pixelw;
 	uint16 pixelh;
     uint8  mipi_lane_num;
-	uint8 colrarray; 
-	bool hsyn; 
+	uint8 colrarray;
+	bool hsyn;
 	bool vsyn;
 	bool rduline;
-	bool rawwide; 
-	
+	bool rawwide;
+
 	/*void (*fp_rotate)(uint8 rotate);
 	uint32 (*fp_hvblank)(int8_t dh,int8_t dv);
 	Exp_Adapt exp_adapt;
@@ -94,7 +94,7 @@ typedef struct {
 	//DDC ddc_adapt;
 	//AWB awb_adapt;
 	//CCM ccm_adapt;
-	//YGAMA ygama_adapt; 	
+	//YGAMA ygama_adapt;
 	//RGB_GAMA rgbgama_adapt;
 	//EE ee_adapt;
 	//CCF ccf_adapt;
@@ -108,7 +108,7 @@ typedef struct {
 } _Sensor_Adpt_;
 
 typedef struct
-{       
+{
 	uint8 id,w_cmd,r_cmd,addr_num,data_num;
 	uint16 id_reg;
 }_Sensor_Ident_;
@@ -127,7 +127,7 @@ typedef struct
 	uint16 in_w;			//sensor pixel
 	uint16 in_h;
 	uint16 out0_w; 			//to jpg encode
-	uint16 out0_h;	
+	uint16 out0_h;
 	uint16 out1_w; 			//to jpg encode
 	uint16 out1_h;
 }Vpp_stream;
@@ -135,7 +135,7 @@ typedef struct
 
 typedef struct
 {
-	uint16 out_w; 
+	uint16 out_w;
 	uint16 out_h;
 }Output_photo;
 
@@ -171,7 +171,7 @@ void get_single_dvp(uint16_t *w,uint16_t *h);
 
 //////////////////////////////////////////COMMON//////////////////////////////////////////////////////////////////////
 
-#define IMAGE_W    1280     
+#define IMAGE_W    1280
 #define IMAGE_H    720
 
 #define IMAGE_FORMAT					0   //0:YUV422
@@ -179,7 +179,7 @@ void get_single_dvp(uint16_t *w,uint16_t *h);
 											//2:RAW10
 											//3:RAW12
 
-#define SCEN_EN                         0   
+#define SCEN_EN                         0
 
 #define FRAME_RATE                      0   //0:  100%
 											//1:  75%
@@ -209,13 +209,13 @@ void get_single_dvp(uint16_t *w,uint16_t *h);
 											 //3：VYUY
 
 
-											
+
 #define ONLY_Y							0
 
 ////////////////////////////////////////////////////////JPEG//////////////////////////////////////////////////////////////////
 #define JPEG_LEN                        2*1024
 #ifndef VPP_SCALE_WIDTH
-#define VPP_SCALE_WIDTH				1920//1920//1280	
+#define VPP_SCALE_WIDTH				1920//1920//1280
 #endif
 
 
@@ -345,6 +345,10 @@ void get_single_dvp(uint16_t *w,uint16_t *h);
 
 #ifndef DEV_SENSOR_H63P
 #define DEV_SENSOR_H63P                 0
+#endif
+
+#ifndef DEV_SENSOR_H63S
+#define DEV_SENSOR_H63S                 0
 #endif
 
 
@@ -519,6 +523,11 @@ extern const _Sensor_Ident_ h63p_init;
 extern SENSOR_OP_SECTION const _Sensor_Adpt_ h63p_cmd;
 #endif
 
+#if DEV_SENSOR_H63S
+extern const _Sensor_Ident_ h63s_init;
+extern SENSOR_OP_SECTION const _Sensor_Adpt_ h63s_cmd;
+#endif
+
 #if DEV_SENSOR_H66
 extern const _Sensor_Ident_ h66_init;
 extern SENSOR_OP_SECTION const _Sensor_Adpt_ h66_cmd;
@@ -608,5 +617,3 @@ extern SENSOR_OP_SECTION const _Sensor_Adpt_ cv2005_cmd;
 #endif
 
 #endif
-
-

@@ -41,7 +41,7 @@ struct  h264_cfg_t {
 	uint8_t    md_set_3dnr;
 	uint8_t    enc_runing;
 	uint8_t    move_keep_gop;   //still to move,keep x gop for mov_enc_bps
-	uint8_t    move_remain_gop;   
+	uint8_t    move_remain_gop;
 	volatile uint8_t    timeLapse_en:1,timeLapse_ready_kick:1,rev:6;	//分别是缩时录影的使能和是否可以kick(不能随便使用,除非知道流程)
 
 };
@@ -97,7 +97,7 @@ struct  h264_rc_ctl_t {
 
 //--- decoder related ---//
 enum nal_type {
-	pic_data= 1, 
+	pic_data= 1,
 	pic_idr = 5,
 	sps     = 7,
 	pps     = 8
@@ -114,16 +114,16 @@ struct  h264_header {
 	uint8_t    idr_flag      ;
 	uint16_t   sps_log2_max_fnum_minus4;
 	uint16_t   sps_log2_max_poc_lsb_minus4;
-	uint16_t   sps_pic_width ; 
-	uint16_t   sps_pic_height; 
+	uint16_t   sps_pic_width ;
+	uint16_t   sps_pic_height;
 	uint8_t    pps_qp_ini    ;
-	uint8_t    pps_cavlc_mode; 
+	uint8_t    pps_cavlc_mode;
 	int8_t    pps_chrom_qp_offset;
-	uint8_t    pic_slice_type; 
-	uint8_t    pic_qp        ; 
+	uint8_t    pic_slice_type;
+	uint8_t    pic_qp        ;
 };
 
-typedef struct 
+typedef struct
 {
 	struct list_head list;				//h264_frame的节点头
 	uint32 frame_len;						//帧长度
@@ -133,13 +133,13 @@ typedef struct
 	uint8 h264_num;						//2~255
 	//uint8 h264_type;					//1:I frame  2:P frame
 	uint8 h264_type: 2, which: 3,srcID: 3;		//h264_type暂时是I帧  P帧(兼容旧版本),which是指源头之类(可能从vpp0编码,可能从gen420编码,或者是vpp0的第二个摄像头,都有可能,暂时给3bit,可以代表7种)
-	uint8 h264_dev_id;	
+	uint8 h264_dev_id;
 	uint32_t timestamp;
 	uint16_t w,h;
 }h264_frame;
 
 typedef struct
-{     
+{
 	struct list_head list;
 	uint8* buf_addr;
 }h264_node;
@@ -158,11 +158,18 @@ struct stream_h264_data_s
 #define IMAGE_W_H264      1280//1920//
 #define IMAGE_H_H264	  720//1088//
 
-#define H264_BS_SIZE      512*1024                    //512K
 
 #define H264_NODE_LEN     16*1024                     //不要改
-#define H264_NODE_NUM     32
-#define H264_FRAME_NUM    4
+/* H264_NODE_NUM: BS 输出缓冲节点数, 每节点 16KB.
+ * 按实际 13fps + 1080P 2Mbps 计算:
+ *   - 平均帧 ~19KB ≈ 1.2 节点
+ *   - I 帧 ~42KB ≈ 2.7 节点 (峰值)
+ *   - 10 节点 = 160KB 可容 1 个 I 帧 + 5-6 个 P 帧未消费, ISR 处理延迟 100ms 内充足
+ * 从 15 → 10 节省 80KB PSRAM (av_psram_heap), 减轻碎片化压力. */
+#define H264_NODE_NUM     10//15//32
+#define H264_FRAME_NUM    3
+
+#define H264_BS_SIZE      (H264_NODE_LEN * H264_NODE_NUM)
 
 #define H264_DEV_0_ID     0
 #define H264_DEV_1_ID     1
@@ -204,7 +211,7 @@ void pps_setting(struct str_info *str, struct h264_header *head, uint8_t *pps, u
 void h264_rom_memcpy(uint8_t *rom_ptr, uint8_t *data, uint32_t len);
 void h264_decode_I_P_setting(struct str_info *str, struct h264_header *head, uint8_t *rom_ptr);
 void h264_dec_a_frame(struct h264_device *p_h264,uint32_t nal_length, struct h264_ctl_t *dec_ctl, struct h264_header *head, struct str_info *str,uint32 dataroom) ;
-void  h264_dec_flag_chk(uint32_t flags); 
+void  h264_dec_flag_chk(uint32_t flags);
 void h264_dec_src_room_set(struct h264_device *p_h264,uint32_t       buf_base, struct h264_cfg_t *dec_cfg,struct h264_ctl_t *dec_ctl);
 int h264_enc_with_timeLapse(uint32_t drv1_from,uint32_t drv1_w,uint32_t drv1_h,uint32_t timer);
 #endif

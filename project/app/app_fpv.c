@@ -53,6 +53,8 @@
 
 int32 atcmd_recv(uint8 *data, int32 len);
 void  user_workqueue_init(uint16 pri, void *stack, uint16 stack_size);
+extern int jpg_concat_buf_init(void);
+extern int jpg_static_pool_init(void);
 
 extern uint32 psrampool_start;
 extern uint32 psrampool_end;
@@ -153,6 +155,7 @@ __weak void user_protocol()
     spook_init();
     config_Viidure(80);
 }
+extern int rec_playback_init(void);
 
 // 应用程序初始化
 __init static void fpv_app_init(void)
@@ -168,34 +171,48 @@ __init static void fpv_app_init(void)
     cJSON_InitHooks(&hook);
 #endif
 
-    eloop_init();
-    os_task_create("eloop_run", user_eloop_run, NULL, OS_TASK_PRIORITY_NORMAL + 2, 0, NULL, 2048);
-    os_sleep_ms(1);
-    ota_Tcp_Server();
+//    eloop_init();
+//    os_task_create("eloop_run", user_eloop_run, NULL, OS_TASK_PRIORITY_NORMAL + 2, 0, NULL, 2048);
+//    os_sleep_ms(1);
+//    ota_Tcp_Server();
 
     // 独立的文件保存msi(独立线程,后续可以所有的fb需要保存都发到这个msi去执行)
     extern struct msi *file_msi_init(const char *msi_name);
     file_msi_init(R_FILE_MSI);
 #ifndef FORCE_SCALE_TO_H264
+#if defined(__TXW826__)
 #if H264_EN == 1
-    extern struct msi *auto_h264_msi_init(const char *auto_h264_name, uint8_t src_from0, uint16_t w0, uint16_t h0, uint8_t src_from1, uint16_t w1, uint16_t h1);
+                extern struct msi *auto_h264_msi_init(const char *auto_h264_name, uint8_t src_from0, uint16_t w0, uint16_t h0, uint8_t src_from1, uint16_t w1, uint16_t h1);
+    #if SUB_STREAM_EN == 1
+                    auto_h264_msi_init(AUTO_H264,VPP_DATA0,0,0,GEN420_DATA,640,360);
+    #else
+                    auto_h264_msi_init(AUTO_H264,VPP_DATA0,0,0,~0,0,0);
+    #endif
+#endif
+
+#elif defined(__TXW828__)
+#if H264_EN == 1
+            extern struct msi *auto_h264_msi_init(const char *auto_h264_name, uint8_t src_from0, uint16_t w0, uint16_t h0, uint8_t src_from1, uint16_t w1, uint16_t h1);
 #if SUB_STREAM_EN == 1
-    {
-        uint16_t h264_w, h264_h;
-        uint8_t  h264_ret = get_vpp1_w_h(&h264_w, &h264_h);
-        if (!h264_ret)
-        {
-            auto_h264_msi_init(AUTO_H264, VPP_DATA0, 0, 0, GEN420_DATA, h264_w, h264_h);
-        }
-        else
-        {
-            auto_h264_msi_init(AUTO_H264, VPP_DATA0, 0, 0, ~0, 0, 0);
-        }
-    }
+            {
+                uint16_t h264_w, h264_h;
+                uint8_t  h264_ret = get_vpp1_w_h(&h264_w, &h264_h);
+                if (!h264_ret)
+                {
+                    auto_h264_msi_init(AUTO_H264, VPP_DATA0, 0, 0, VPP_DATA1, h264_w, h264_h);
+                }
+                else
+                {
+                    auto_h264_msi_init(AUTO_H264, VPP_DATA0, 0, 0, ~0, 0, 0);
+                }
+            }
 #else
-    auto_h264_msi_init(AUTO_H264, VPP_DATA0, 0, 0, ~0, 0, 0);
+            auto_h264_msi_init(AUTO_H264, VPP_DATA0, 0, 0, ~0, 0, 0);
 #endif
 #endif
+#endif
+
+
 #else
     uint8_t  get_vpp_scale_w_h(uint16_t *w, uint16_t *h);
     uint16_t scale_w, scale_h;
@@ -260,15 +277,38 @@ __init static void fpv_app_init(void)
 #endif
 
 #if JPG_EN == 1
+
+    #if defined(__TXW826__)
+        takephoto_from = VPP_DATA0;
+        takephoto1_from = -1;
+    #elif defined(__TXW828__)
+        takephoto_from = VPP_DATA1;
+        takephoto1_from = -1;
+    #endif
+
+#if SNAPSHOT_USE_LEGACY
+    /* 老 JPG 抓拍路径 (auto_jpg_msi + jpg_concat + snapshot_msi).
+     * 常驻 ~100KB PSRAM. 由 project_config.h 的 SNAPSHOT_USE_LEGACY 控制 */
     if (takephoto_from >= 0)
     {
         auto_jpg_msi_init(AUTO_JPG, JPGID0, takephoto_from);
     }
-
     if (takephoto1_from >= 0)
     {
         auto_jpg_msi_init(AUTO_JPG1, JPGID1, takephoto1_from);
     }
+
+    //初始化抓图程序
+    jpg_static_pool_init();
+    jpg_concat_buf_init();
+    snapshot_init();
+#else
+    /* 新抓拍路径: 裸调 JPG 硬件 (snapshot_bare.c).
+     * node 池 (5*5KB=25KB) 在此一次性申请常驻 PSRAM, 多次抓拍复用 */
+    extern void snapshot_init(void);
+    snapshot_init();
+#endif
+
 #endif
 
 #if USB_JPG_ADD_WATERMARK
@@ -278,12 +318,19 @@ __init static void fpv_app_init(void)
         添加其他应用代码初始化
         ...
     */
+    extern void avstream_send_demo(void);
+    avstream_send_demo();
+
+#if SDH_EN && FS_EN
+    /* SD 卡录像 + 探鸽 P2P 回放模块 */
+    rec_playback_init();
+#endif
 
 #if ISP_TUNNING_EN
-    void isp_tunning_init(uint32 img_w, uint32 img_h);
-    isp_tunning_init(1920, 1080);
+//    void isp_tunning_init(uint32 img_w, uint32 img_h);
+//    isp_tunning_init(1920, 1080);
 #endif
-    user_protocol();
+//    user_protocol();
 }
 
 __weak void user_hardware_config()
@@ -340,14 +387,18 @@ void        hardware_init(uint8_t vcam)
     jpg_mutex_init();
     jpg_mem_init(32);
 #endif
-    // 默认打开gen420的模块
+    /* gen420 仅 TXW826 子码流路径 (auto_h264_msi_init 的 GEN420_DATA) 需要.
+     * TXW828 主+子码流都走 VPP_DATA0/1, JPG 抓拍也走 VPP_DATA1, 用不到 gen420.
+     * 条件编译掉可以省掉 gen420 常驻线程 + 中断 + 硬件开销 */
+#if defined(__TXW826__)
     gen420_hardware_msi_init();
+#endif
 
 #if SDH_EN && FS_EN
     extern bool fatfs_register();
     sd_open();
     fatfs_register();
-    file_ota();
+//    file_ota();
 #endif
 
 #if DEBUG_LOG_FILE_SAVE_EN
@@ -515,6 +566,7 @@ void        hardware_init(uint8_t vcam)
     lvgl_init_msi(osd_w, osd_h, rotate);
     // lcd_demo_thread(2);
 #endif
+
     user_hardware_config();
 }
 
@@ -554,12 +606,22 @@ static int32          sys_fpv_loop(struct os_work *work)
 void fpv_at_dbg()
 {
     // 是否打开对应sdk的dbg
-    atcmd_recv((uint8_t *) "at+print=1,7", 0);
-    atcmd_recv((uint8_t *) "AT+FPV_DBG=av_psram,0", 0);
-    atcmd_recv((uint8_t *) "AT+FPV_DBG=av_sram,0", 0);
-    atcmd_recv((uint8_t *) "AT+FPV_DBG=sram,0", 0);
-    atcmd_recv((uint8_t *) "AT+FPV_DBG=psram,0", 0);
-    atcmd_recv((uint8_t *) "AT+SYSDBG=top,0", 0);
+#if 1
+        atcmd_recv((uint8_t*)"at+print=1,7",13);
+        atcmd_recv((uint8_t*)"AT+FPV_DBG=av_psram,1",22);
+        atcmd_recv((uint8_t*)"AT+FPV_DBG=av_sram,1",21);
+        atcmd_recv((uint8_t*)"AT+FPV_DBG=sram,1",18);
+        atcmd_recv((uint8_t*)"AT+FPV_DBG=psram,1",19);
+        atcmd_recv((uint8_t*)"AT+SYSDBG=top,1",16);
+#else
+        atcmd_recv((uint8_t*)"at+print=1,7",0);
+        atcmd_recv((uint8_t*)"AT+FPV_DBG=av_psram,0",0);
+        atcmd_recv((uint8_t*)"AT+FPV_DBG=av_sram,0",0);
+        atcmd_recv((uint8_t*)"AT+FPV_DBG=sram,0",0);
+        atcmd_recv((uint8_t*)"AT+FPV_DBG=psram,0",0);
+        atcmd_recv((uint8_t*)"AT+SYSDBG=top,0",0);
+#endif
+
 
 #if 0
     //一次性命令
@@ -590,7 +652,7 @@ int sys_app_fpv_init(void)
     user_workqueue_init(OS_TASK_PRIORITY_HIGH, NULL, 2048);
     hardware_init(vcam);
     fpv_app_init();
-    fpv_at_dbg();
+//    fpv_at_dbg();
     OS_WORK_INIT(&fpv_wk, sys_fpv_loop, 0);
     os_run_work_delay(&fpv_wk, 1000);
     return 0;

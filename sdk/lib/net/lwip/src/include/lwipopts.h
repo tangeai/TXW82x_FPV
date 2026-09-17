@@ -184,7 +184,7 @@ extern void hw_memcpy(void *dest, const void *src, unsigned int size);
 // Each requires 92 bytes of RAM.
 #ifndef MEMP_NUM_PBUF
 #define MEMP_NUM_PBUF               10 //PBUF_REF/ROM
-#endif 
+#endif
 
 // Each netbuf requires 64 bytes of RAM.
 #ifndef MEMP_NUM_NETBUF
@@ -220,7 +220,7 @@ extern void hw_memcpy(void *dest, const void *src, unsigned int size);
 #if IP_NAT
 #define LWIP_WND_SCALE              1
 #define TCP_RCV_SCALE               3
-#else 
+#else
 #define LWIP_WND_SCALE              0
 #define TCP_RCV_SCALE               0
 #endif
@@ -263,7 +263,7 @@ extern void hw_memcpy(void *dest, const void *src, unsigned int size);
  * for callback/timeout API communication.
  * (only needed if you use tcpip.c)
  */
-#ifndef MEMP_NUM_TCPIP_MSG_API 
+#ifndef MEMP_NUM_TCPIP_MSG_API
 #define MEMP_NUM_TCPIP_MSG_API          10
 #endif
 
@@ -322,7 +322,7 @@ extern void hw_memcpy(void *dest, const void *src, unsigned int size);
 #endif
 
 #ifndef DNS_TABLE_SIZE
-#define DNS_TABLE_SIZE 1
+#define DNS_TABLE_SIZE  4
 #endif
 
 #ifndef LWIP_SOCKET
@@ -413,7 +413,7 @@ extern void hw_memcpy(void *dest, const void *src, unsigned int size);
 #define MAC2STR(a) (a)[0]&0xff, (a)[1]&0xff, (a)[2]&0xff, (a)[3]&0xff, (a)[4]&0xff, (a)[5]&0xff
 #define MACSTR "%02x:%02x:%02x:%02x:%02x:%02x"
 #endif
-    
+
 #ifndef STR2MAC
 #define STR2MAC(s, a) str2mac((const uint8 *)(s), (uint8 *)(a))
 #endif
