@@ -27,13 +27,18 @@ int32 sys_empty_atcmd(const char *cmd, char *argv[], uint32 argc)
         //执行自定义AT命令
     }else{ //默认传递给cpu1
         if(os_strncasecmp(str, "AT1+", 4) == 0){
-            str[1]='A'; str[2]='T'; 
+            str[1]='A'; str[2]='T';
             str++; len--;
         }
         cpu1_atcmd_recv(str, len);
     }
     return ATCMD_RESULT_DONE;
 }
+
+/* 示例事件任务共享状态；AT 测试命令在可选诊断补丁中。 */
+volatile uint32_t call_test_flag = 0;
+volatile uint32_t dev_status_test = 0;
+volatile uint32_t dev_status = 0;
 
 static const struct hgic_atcmd static_atcmds[] = {
     ///////////////////////////////////////////////////
@@ -62,10 +67,10 @@ static const struct hgic_atcmd static_atcmds[] = {
     { "AT+APHIDE", sys_wifi_atcmd_aphide },
     { "AT+HWMODE", sys_wifi_atcmd_hwmode },
 
-#if BLE_SUPPORT  
+#if BLE_SUPPORT
     { "AT+BLENC", sys_ble_atcmd_blenc },
     { "AT+BLE_COEXIST", sys_ble_atcmd_set_coexist_en },
-#endif    
+#endif
 //    { "AT+WIFICSA", sys_wifi_atcmd_wificsa },
 
     ///////////////////////////////////////////////////
@@ -103,7 +108,7 @@ static const struct hgic_atcmd static_atcmds[] = {
     { "AT+CHANGE_LARGE", atcmd_babyprotocol_change_larger },
 #endif
 
-#ifdef SYS_APP_BBM_CAM    
+#ifdef SYS_APP_BBM_CAM
     { "AT+RECORD", atcmd_bbm_client_record },
     { "AT+PLAYBACK", atcmd_bbm_client_playback },
 #endif
@@ -120,4 +125,3 @@ __init void sys_atcmd_init(void)
     setting.static_cmdcnt = ARRAY_SIZE(static_atcmds);
     atcmd_uart_init(ATCMD_UARTDEV, 921600, 5, &setting);
 }
-

@@ -8,7 +8,7 @@
 #include "lib/common/common.h"
 
 // 结构体申请空间函数
-#ifdef MORE_SRAM 
+#ifdef MORE_SRAM
 #define FILE_MALLOC os_malloc_psram
 #define FILE_FREE os_free_psram
 #define FILE_ZALLOC os_zalloc_psram
@@ -104,7 +104,7 @@ uint32_t osal_fwrite(void *ptr, uint32_t size, uint32_t nmemb, F_FILE *fp)
 #ifdef WIN32
     return fwrite(ptr, size, nmemb, fp);
 #else
-    uint32_t writeLen;
+    uint32_t writeLen = 0;
     uint32_t res = f_write(fp, ptr, size * nmemb, &writeLen);
     if (res == FR_OK)
     {
@@ -126,7 +126,7 @@ int osal_fclose(F_FILE *fp)
 #else
     int res = f_close(fp);
     FILE_FREE(fp);
-    if (!res)
+    if (res != FR_OK)
     {
         set_errno(res);
     }
@@ -474,13 +474,13 @@ FRESULT delete_directory_recursive(const TCHAR *path)
     DIR *dir = (DIR *)dir_buf;
     FILINFO *fno = (FILINFO *)(dir_buf + sizeof(DIR));
     TCHAR *full_path = (TCHAR *)(dir_buf + sizeof(DIR) + sizeof(FILINFO));
-    
+
     res = f_opendir(dir, path);
     if (res != FR_OK)
     {
         goto delete_directory_end;
     }
-    
+
     while (1)
     {
         res = f_readdir(dir, fno);

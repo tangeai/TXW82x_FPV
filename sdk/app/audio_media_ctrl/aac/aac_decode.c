@@ -6,6 +6,7 @@
 #include "autpc_msi/autpc_msi.h"
 #include "osal_file.h"
 #include "aac_code.h"
+#include "lib/audio/audio_code/aac_pb_diag.h"
 
 #define BUFF_SIZE   2048
 #define MAX_AAC_DECODE_RXBUF    4
@@ -15,7 +16,7 @@ struct aac_decode_struct {
     AUDIO_TRACK audio_track;
     struct fbpool tx_pool;
     struct os_event event;
-    struct msi *msi; 
+    struct msi *msi;
     struct msi *src_msi;
     struct msi *autpc_msi;
     char *msi_name;
@@ -31,12 +32,106 @@ struct aac_decode_struct {
     uint8_t current_status;
     uint8_t inbuf[BUFF_SIZE];
     int16_t dec_buf[1024*2];
+#if AAC_PB_DIAG
+    uint32_t diag_seen;
+    uint32_t diag_errors;
+    uint32_t diag_dumps;
+#endif
 };
+
+#if AAC_PB_DIAG
+/* 观察原始输入，不替换解码缓冲，也不重复尝试解码。
+ * MSI 模式下 inbuf 未使用，复用它保存长度受限的解码前数据快照。 */
+static int32_t aac_pb_diag_decode(struct aac_decode_struct *s, AUCODE_HDL *coder,
+                                struct framebuff *fb, AUCODE_FRAME_INFO *info)
+{
+    struct aac_pb_diag_frame *meta = (struct aac_pb_diag_frame *)fb->priv;
+    struct aac_pb_diag_frame saved = {0};
+    uint8_t head[7] = {0};
+    uint32_t len = fb->len;
+    uint32_t before = aac_pb_diag_hash(fb->data, len);
+    uint32_t raw = len >= 7 ? aac_pb_diag_hash(fb->data + 7, len - 7) : 0;
+    uint32_t copied = 0;
+    uint32_t adts_len, hlen, bad = 0, after;
+    int32_t samples;
+    int have_meta = meta && meta->magic == AAC_PB_DIAG_MAGIC;
+    if (have_meta)
+        saved = *meta;
+    os_memcpy(head, fb->data, len < 7 ? len : 7);
+    adts_len = ((uint32_t)(head[3] & 3) << 11) | ((uint32_t)head[4] << 3) | (head[5] >> 5);
+    hlen = (head[1] & 1) ? 7 : 9;
+    /* bad 标志：1=帧头、同步字或层标识异常，2=长度异常，4=CRC 或数据块数量异常，
+     *           8=ASC 配置不匹配，16=解复用输出后数据或长度发生变化。 */
+    if (len < 7 || head[0] != 0xff || (head[1] & 0xf6) != 0xf0)
+        bad |= 1;
+    if (adts_len != len || len < hlen)
+        bad |= 2;
+    if (hlen != 7 || (head[6] & 3))
+        bad |= 4;
+    if (have_meta) {
+        uint32_t aot = saved.dsi[0] >> 3;
+        uint32_t rate = ((saved.dsi[0] & 7) << 1) | (saved.dsi[1] >> 7);
+        uint32_t chan = (saved.dsi[1] >> 3) & 15;
+        if (((head[2] >> 6) + 1u) != aot || ((head[2] >> 2) & 15u) != rate ||
+            (((head[2] & 1u) << 2) | (head[3] >> 6)) != chan)
+            bad |= 8;
+        if (saved.len != len || saved.full_hash != before || saved.raw_hash != raw)
+            bad |= 16;
+    }
+    if (s->diag_dumps < AAC_PB_DIAG_DUMPS) {
+        copied = len < sizeof(s->inbuf) ? len : sizeof(s->inbuf);
+        os_memcpy(s->inbuf, fb->data, copied);
+    }
+    os_memset(info, 0, sizeof(*info));
+    samples = audio_decode_data(coder, fb->data, len, s->dec_buf, info);
+    after = aac_pb_diag_hash(fb->data, len);
+    s->diag_seen++;
+    if (samples <= 0)
+        s->diag_errors++;
+    if (s->diag_seen <= 8 || (s->diag_seen & 63u) == 0 ||
+        ((samples <= 0 || bad || before != after) &&
+         (s->diag_errors <= 8 || (s->diag_seen & 31u) == 0))) {
+        os_printf("[aacdiag:D] src=%s seen=%u n=%u off=%u pts=%u len=%u meta=%u read=%08x pre=%08x raw=%08x post=%08x bad=%u ret=%d used=%d sr=%u ch=%u errors=%u\n",
+                  fb->msi->name, (unsigned)s->diag_seen, (unsigned)saved.sample,
+                  (unsigned)saved.offset, (unsigned)fb->time, (unsigned)len,
+                  (unsigned)have_meta, (unsigned)saved.full_hash, (unsigned)before,
+                  (unsigned)raw, (unsigned)after, (unsigned)bad, (int)samples,
+                  (int)info->frame_bytes, (unsigned)info->samplerate,
+                  (unsigned)info->channels, (unsigned)s->diag_errors);
+        os_printf("[aacdiag:H] src=%s seen=%u hdr=%02x%02x%02x%02x%02x%02x%02x adts_len=%u\n",
+                  fb->msi->name, (unsigned)s->diag_seen, head[0], head[1], head[2],
+                  head[3], head[4], head[5], head[6], (unsigned)adts_len);
+    }
+    if (samples <= 0 && s->diag_dumps < AAC_PB_DIAG_DUMPS) {
+        static const char hex[] = "0123456789abcdef";
+        char line[65];
+        uint32_t offset, i, count;
+        s->diag_dumps++;
+        os_printf("[aacdiag:BEGIN] src=%s seen=%u n=%u off=%u pts=%u len=%u captured=%u hash=%08x meta=%u\n",
+                  fb->msi->name, (unsigned)s->diag_seen, (unsigned)saved.sample,
+                  (unsigned)saved.offset, (unsigned)fb->time, (unsigned)len,
+                  (unsigned)copied, (unsigned)before, (unsigned)have_meta);
+        for (offset = 0; offset < copied; offset += count) {
+            count = copied - offset;
+            if (count > 32) count = 32;
+            for (i = 0; i < count; ++i) {
+                line[i * 2] = hex[s->inbuf[offset + i] >> 4];
+                line[i * 2 + 1] = hex[s->inbuf[offset + i] & 15];
+            }
+            line[count * 2] = 0;
+            os_printf("[aacdiag:X] src=%s seen=%u at=%u %s\n",
+                      fb->msi->name, (unsigned)s->diag_seen, (unsigned)offset, line);
+        }
+        os_printf("[aacdiag:END] src=%s seen=%u\n", fb->msi->name, (unsigned)s->diag_seen);
+    }
+    return samples;
+}
+#endif
 
 static int32_t aac_file_read(struct aac_decode_struct *aac_decode_s, uint8_t *buf, uint32_t size)
 {
     int32_t read_len = 0;
-	
+
     read_len = osal_fread(buf, size, 1, aac_decode_s->aac_fp);
     return read_len;
 }
@@ -57,9 +152,9 @@ static void aac_file_decode(struct aac_decode_struct *s)
     AUCODE_HDL *aac_dec = NULL;
     AUCODE_FRAME_INFO aac_info;
 	AUDIO_TRACK *audac_fiter_track = NULL;
-     
+
     aac_dec = audio_coder_open(AAC_DEC, 0, 0);
-    if(!aac_dec) 
+    if(!aac_dec)
         return;
     enc_ptr = s->inbuf;
     while(1) {
@@ -88,7 +183,7 @@ static void aac_file_decode(struct aac_decode_struct *s)
             if(read_len <= 0) {
                 AAC_INFO("aac read fail,ret:%d,line:%d!\r\n",read_len,__LINE__);
                 endOfRead = 1;
-            }   
+            }
             else
                 unproc_data_size += read_len;
             enc_ptr = s->inbuf;
@@ -99,7 +194,7 @@ static void aac_file_decode(struct aac_decode_struct *s)
             while(!frame_buf) {
                 frame_buf = fbpool_get(&s->tx_pool, 0, s->msi);
                 if(!frame_buf)
-                    os_sleep_ms(1); 
+                    os_sleep_ms(1);
             }
             data = (int16_t*)frame_buf->data;
             dec_samples = audio_decode_data(aac_dec, enc_ptr+enc_ptr_offset, unproc_data_size, s->dec_buf, &aac_info);
@@ -111,7 +206,7 @@ static void aac_file_decode(struct aac_decode_struct *s)
                 continue;
             }
             if(aac_info.channels == 2) {
-                for(uint32_t i=0; i<dec_samples; i++) 
+                for(uint32_t i=0; i<dec_samples; i++)
                     data[i] = s->dec_buf[2*i];
             }
 			else {
@@ -134,18 +229,18 @@ static void aac_file_decode(struct aac_decode_struct *s)
                 }
                 msi_add_output(s->msi, NULL, s->autpc_msi->name);
             }
-            ret = msi_output_fb(s->msi, frame_buf);  
+            ret = msi_output_fb(s->msi, frame_buf);
             AAC_DEBUG("aac decode send framebuff:%p,ret:%d\r\n",frame_buf,ret);
             msi_cmd("R_AUDAC", MSI_CMD_AUDAC, MSI_AUDAC_GET_FILTER_TRACK, (uint32_t)(&audac_fiter_track));
             if(s->direct_to_dac && (!s->use_tpc) && (audac_fiter_track != (&(s->audio_track)))) {
                 interval_time = (frame_buf->len>>1)*1000/(aac_info.samplerate);
                 os_sleep_ms(interval_time);
-            }  
-            frame_buf = NULL;                 
+            }
+            frame_buf = NULL;
         }
         else if(endOfRead) {
             goto aac_decode_end;
-        }      
+        }
     }
 aac_decode_end:
     msi_output_cmd(s->msi,MSI_CMD_AUTPC,MSI_AUTPC_END_STREAM,(uint32_t)(&(s->audio_track)));
@@ -171,9 +266,9 @@ static void aac_msi_decode(struct aac_decode_struct *s)
     struct framebuff *send_frame_buf = NULL;
     AUCODE_HDL *aac_dec = NULL;
     AUCODE_FRAME_INFO aac_info;
-     
+
     aac_dec = audio_coder_open(AAC_DEC, 0, 1);
-    if(!aac_dec) 
+    if(!aac_dec)
         return;
     while(1) {
         os_event_wait(&s->event, coder_clear_event, &clear_flag, OS_EVENT_WMODE_OR | OS_EVENT_WMODE_CLEAR, 0);
@@ -186,7 +281,7 @@ static void aac_msi_decode(struct aac_decode_struct *s)
                 msi_output_cmd(s->msi,MSI_CMD_AUTPC,MSI_AUTPC_END_STREAM,(uint32_t)(&(s->audio_track)));
                 msi_cmd("R_AUDAC",MSI_CMD_AUDAC,MSI_AUDAC_END_STREAM,(uint32_t)(&(s->audio_track)));
                 aac_dec = audio_coder_open(AAC_DEC, 0, 1);
-                if(!aac_dec) 
+                if(!aac_dec)
                     return;
             }
             s->current_status = AUCODEC_PAUSE;
@@ -204,12 +299,18 @@ static void aac_msi_decode(struct aac_decode_struct *s)
                 while(!send_frame_buf) {
                     send_frame_buf = fbpool_get(&s->tx_pool, 0, s->msi);
                     if(!send_frame_buf)
-                        os_sleep_ms(1); 
+                        os_sleep_ms(1);
                 }
                 data_len = recv_frame_buf->len;
                 if(data_len > 0) {
                     enc_ptr = recv_frame_buf->data;
-                    dec_samples = audio_decode_data(aac_dec, enc_ptr, data_len, s->dec_buf, &aac_info); 
+#if AAC_PB_DIAG
+                    if (enc_ptr && recv_frame_buf->msi &&
+                        aac_pb_diag_source(recv_frame_buf->msi->name))
+                        dec_samples = aac_pb_diag_decode(s, aac_dec, recv_frame_buf, &aac_info);
+                    else
+#endif
+                    dec_samples = audio_decode_data(aac_dec, enc_ptr, data_len, s->dec_buf, &aac_info);
                 }
                 if((dec_samples <= 0) || (data_len <= 0)) {
                     msi_delete_fb(s->msi, send_frame_buf);
@@ -218,7 +319,7 @@ static void aac_msi_decode(struct aac_decode_struct *s)
                 }
                 send_data = (int16_t*)send_frame_buf->data;
                 if(aac_info.channels == 2) {
-                    for(uint32_t i=0; i<dec_samples; i++) 
+                    for(uint32_t i=0; i<dec_samples; i++)
                         send_data[i] = s->dec_buf[2*i];
                 }
                 else {
@@ -226,27 +327,29 @@ static void aac_msi_decode(struct aac_decode_struct *s)
                         send_data[i] = s->dec_buf[i];
                 }
                 send_frame_buf->len = dec_samples*2;
+                /* 异步解码后仍保留输入媒体帧的 PTS。 */
+                send_frame_buf->time = recv_frame_buf->time;
                 send_frame_buf->mtype = F_AUDIO;
                 send_frame_buf->stype = FSTYPE_AUDIO_PCM;
                 s->audio_track.samplerate = aac_info.samplerate;
                 if(s->use_tpc && !s->autpc_msi) {
                     s->autpc_msi = autpc_msi_init(s->audio_track.samplerate, s->speed, s->pitch, dec_samples, &(s->audio_track));
                     if(s->autpc_msi == NULL) {
-                        goto aac_decode_end;    
+                        goto aac_decode_end;
                     }
                     if(s->direct_to_dac) {
                         msi_add_output(s->autpc_msi, NULL, "R_AUDAC");
                     }
                     msi_add_output(s->msi, NULL, s->autpc_msi->name);
                 }
-                ret = msi_output_fb(s->msi, send_frame_buf); 
-                AAC_DEBUG("aac decode send framebuff:%p,ret:%d\r\n",send_frame_buf,ret); 
-                send_frame_buf = NULL;      
-            }        
+                ret = msi_output_fb(s->msi, send_frame_buf);
+                AAC_DEBUG("aac decode send framebuff:%p,ret:%d\r\n",send_frame_buf,ret);
+                send_frame_buf = NULL;
+            }
 aac_decode_frame_end:
             AAC_DEBUG("aac decode delete framebuff:%p,len:%d,\r\n",recv_frame_buf,recv_frame_buf->len);
             msi_delete_fb(s->msi, recv_frame_buf);
-            recv_frame_buf = NULL; 
+            recv_frame_buf = NULL;
         }
         else {
             if(clear_finish == 0) {
@@ -260,7 +363,7 @@ aac_decode_frame_end:
             s->current_status = AUCODEC_EXIT;
             goto aac_decode_end;
         }
-    }    
+    }
 aac_decode_end:
     msi_output_cmd(s->msi,MSI_CMD_AUTPC,MSI_AUTPC_END_STREAM,(uint32_t)(&(s->audio_track)));
 	msi_cmd("R_AUDAC",MSI_CMD_AUDAC,MSI_AUDAC_END_STREAM,(uint32_t)(&(s->audio_track)));
@@ -273,7 +376,7 @@ aac_decode_end:
         send_frame_buf = NULL;
     }
     if(aac_dec)
-		audio_coder_close(aac_dec);   
+		audio_coder_close(aac_dec);
 }
 static void aac_decode_thread(void *d)
 {
@@ -308,7 +411,7 @@ static void aac_decode_thread(void *d)
     while((s->next_status != AUCODEC_EXIT) && (s->destroy_self == 0)) {
         s->current_status = AUCODEC_END;
         os_sleep_ms(5);
-    } 
+    }
 
     if(s->src_msi) {
         msi_del_output(s->src_msi, NULL, s->msi->name);
@@ -331,28 +434,28 @@ static int32_t aac_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
             ret = RET_ERR;
 			if(aac_decode_s) {
 				uint32_t cmd_self = (uint32_t)param1;
-				switch(cmd_self) {	
+				switch(cmd_self) {
                     case MSI_AUCODER_PAUSE:
                     {
                         if(aac_decode_s->current_status == AUCODEC_RUN) {
                             aac_decode_s->next_status = AUCODEC_PAUSE;
                         }
-                        ret = RET_OK;  
-                        break;                      
+                        ret = RET_OK;
+                        break;
                     }
                     case MSI_AUCODER_CONTINUE:
                     {
                         if(aac_decode_s->current_status == AUCODEC_PAUSE) {
                             aac_decode_s->next_status = AUCODEC_RUN;
                         }
-                        ret = RET_OK;  
-                        break;                      
+                        ret = RET_OK;
+                        break;
                     }
                     case MSI_AUCODER_GET_STATUS:
                     {
                         *((uint32_t*)param2) = (uint32_t)(aac_decode_s->current_status);
-                        ret = RET_OK;  
-                        break;                      
+                        ret = RET_OK;
+                        break;
                     }
 					case MSI_AUCODER_SET_SPEED:
 					{
@@ -384,8 +487,8 @@ static int32_t aac_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
                         os_event_wait(&aac_decode_s->event, coder_clear_finish_event, NULL, OS_EVENT_WMODE_OR | OS_EVENT_WMODE_CLEAR, osWaitForever);
                         msi_output_cmd(aac_decode_s->msi,MSI_CMD_AUTPC,MSI_AUTPC_END_STREAM,(uint32_t)(&(aac_decode_s->audio_track)));
                         msi_cmd("R_AUDAC",MSI_CMD_AUDAC,MSI_AUDAC_CLEAR_STREAM,(uint32_t)(&(aac_decode_s->audio_track)));
-                        ret = RET_OK;  
-                        break;                                
+                        ret = RET_OK;
+                        break;
                     }
                     case MSI_AUCODER_SET_SRCMSI:
                     {
@@ -428,8 +531,8 @@ static int32_t aac_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
 					case MSI_AUCODER_DEINIT:
 					{
 						msi_destroy(msi);
-						ret = RET_OK;	
-						break;					
+						ret = RET_OK;
+						break;
 					}
 					default:
 						break;
@@ -443,9 +546,9 @@ static int32_t aac_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
             struct framebuff *frame_buf = (struct framebuff *)param1;
             if(frame_buf->mtype == F_AUDIO) {
                 ret = RET_OK;
-            } 
+            }
             break;
-        }            
+        }
         case MSI_CMD_FREE_FB:
         {
             ret = RET_ERR;
@@ -453,15 +556,15 @@ static int32_t aac_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
                 struct framebuff *frame_buf = (struct framebuff *)param1;
                 fbpool_put(&aac_decode_s->tx_pool, frame_buf);
             }
-            break; 
-        }  
+            break;
+        }
         case MSI_CMD_PRE_DESTROY:
         {
             if(aac_decode_s && aac_decode_s->task_hdl) {
                 aac_decode_s->next_status = AUCODEC_EXIT;
             }
             break;
-        }   
+        }
 		case MSI_CMD_POST_DESTROY:
         {
             if(aac_decode_s) {
@@ -495,9 +598,9 @@ static int32_t aac_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
                 aac_decode_s = NULL;
             }
             break;
-        }     
+        }
         default:
-            break;    
+            break;
     }
     return ret;
 }
@@ -524,7 +627,7 @@ struct msi *aac_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec
 		goto aac_decode_init_err;
 	}
     msi->priv = aac_decode_s;
-	msi->action = (msi_action)aac_decode_msi_action;   
+	msi->action = (msi_action)aac_decode_msi_action;
 	fbpool_init(&aac_decode_s->tx_pool, MAX_AAC_DECODE_TXBUF);
 	for(uint32_t i=0; i<MAX_AAC_DECODE_TXBUF; i++) {
 		struct framebuff *frame_buf = (aac_decode_s->tx_pool.pool)+i;
@@ -532,8 +635,8 @@ struct msi *aac_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec
 		if(frame_buf->data == NULL)
 		{
 			AAC_INFO("aac decode malloc framebuff data fail!\r\n");
-			goto aac_decode_init_err;       
-		}   
+			goto aac_decode_init_err;
+		}
 		frame_buf->priv = &(aac_decode_s->audio_track);
 	}
     if(os_event_init(&aac_decode_s->event) != RET_OK) {
@@ -545,7 +648,7 @@ struct msi *aac_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec
 		if(aac_decode_s->aac_fp == NULL) {
             AAC_INFO("open aac file %s fail!\r\n", filename);
 			goto aac_decode_init_err;
-        }	
+        }
 	}
     if(audec_init->src_msi && (msi_add_output(audec_init->src_msi, NULL, msi->name) != RET_OK)) {
         goto aac_decode_init_err;
@@ -565,7 +668,7 @@ struct msi *aac_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec
 	aac_decode_s->current_status = AUCODEC_RUN;
     if(audec_init->direct_to_dac && !aac_decode_s->use_tpc) {
 	    msi_add_output(msi, NULL, "R_AUDAC");
-    }    
+    }
 #if AAC_DEC_CTRL == AUCODER_RUN_IN_CPU1
     aac_decode_s->task_hdl = os_task_create("aac_decode_thread", aac_decode_thread, (void*)aac_decode_s, OS_TASK_PRIORITY_ABOVE_NORMAL, 0, NULL, 1024);
 #else
@@ -576,7 +679,7 @@ struct msi *aac_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec
 		goto aac_decode_init_err;
 	}
 	return msi;
-	
+
 aac_decode_init_err:
 	msi_destroy(msi);
 #endif

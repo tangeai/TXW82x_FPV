@@ -1,12 +1,12 @@
 /**
  * @file adts.c
- * @brief 
+ * @brief
  * @author licaibiao
  * @version 1.0
  * @date 2023-12-06
- * 
+ *
  * @copyright Copyright (c) 2023-2030 liwen01 Technology Co., Ltd
- * 
+ *
  */
 #include "adts.h"
 #include <math.h>
@@ -42,8 +42,8 @@ void get_fixed_header(const unsigned char buff[7], adts_fixed_header *header) {
     adts |= *p ++; adts <<= 8;
     adts |= *p ++; adts <<= 8;
     adts |= *p ++;
-    
-    
+
+
     header->syncword                 = (adts >> 44);
     header->id                       = (adts >> 43) & 0x01;
     header->layer                    = (adts >> 41) & 0x03;
@@ -65,7 +65,7 @@ void get_variable_header(const unsigned char buff[7], adts_variable_header *head
     adts |= buff[4]; adts <<= 8;
     adts |= buff[5]; adts <<= 8;
     adts |= buff[6];
-    
+
     header->copyright_identification_bit = (adts >> 27) & 0x01;
     header->copyright_identification_start = (adts >> 26) & 0x01;
     header->aac_frame_length = (adts >> 13) & ((int)pow(2, 14) - 1);
@@ -94,7 +94,7 @@ void convert_adts_header2int64(const adts_fixed_header *fixed_header, const adts
     ret_value |= (fixed_header->original_copy) & 0x01;
     ret_value <<= 1;
     ret_value |= (fixed_header->home) & 0x01;
-    
+
     ret_value <<= 1;
     ret_value |= (variable_header->copyright_identification_bit) & 0x01;
     ret_value <<= 1;
@@ -105,7 +105,7 @@ void convert_adts_header2int64(const adts_fixed_header *fixed_header, const adts
     ret_value |= ((variable_header->adts_buffer_fullness<<4) | 0x0F ) & ((int)pow(2, 11) - 1);
     ret_value <<= 2;
     ret_value |= (variable_header->number_of_raw_data_blocks_in_frame) & ((int)pow(2, 2) - 1);
-    
+
     *header = ret_value;
 }
 
@@ -126,12 +126,16 @@ void aac_dsi_to_adts(uint8_t *dsi, uint8_t *adts, uint32_t aac_data_length)
     uint8_t audio_object_type = (dsi[0] >> 3) & 0x1F;
     uint8_t profile = audio_object_type - 1;
     uint8_t samplerate_index = ((dsi[0] & 0x07) << 1) | (dsi[1] >> 7);
-    uint8_t channels = (dsi[1] >> 3) & 0x0F; 
+    uint8_t channels = (dsi[1] >> 3) & 0x0F;
 	;uint32_t frame_length = aac_data_length + 7;
 
     adts[0] = 0xFF;                         //syncword hight 8 bits
     adts[1] = 0xF0;                         //syncword low 4 bits
-    adts[1] |= (0x01 << 3);                 //ID 0:MPEG-4,1:MPEG-2
+    /* MP4 的 mp4a/esds 使用 MPEG-4 Audio (objectTypeIndication 0x40)，
+     * 因此从 AudioSpecificConfig 还原 ADTS 时 ID 必须为 0。
+     * 原来的 1 会生成 FF F9 (MPEG-2)，与文件内 AAC 类型不一致，
+     * 部分 APP/硬件解码器会直接拒绝该音频帧。 */
+    adts[1] |= (0x00 << 3);                 //ID 0:MPEG-4,1:MPEG-2
     adts[1] |= (0x00 << 1);                 //layer:00
     adts[1] |= (0x01 & 0x1);                //1:no CRC,0:is CRC
     adts[2] = (profile << 6);               //profile 0x01:AAC-LC

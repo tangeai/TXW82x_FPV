@@ -20,7 +20,7 @@ enum{
     MMCSD_SMP_SINGLE  = 0,
     MMCSD_SMP_DELAY_CHAIN,
     MMCSD_SMP_DELAY_HALF_CLOCK,
-    MMCSD_SMP_DELAY_ONE_CLOCK, 
+    MMCSD_SMP_DELAY_ONE_CLOCK,
 }TYPE_ENUM_MMCSD_SAMPLE;
 
 enum {
@@ -113,7 +113,7 @@ struct rt_mmcsd_csd {
 	uint8		wr_blk_len;	/* max wtire data block length */
 	uint8		wr_blk_partial;
 	uint8		csd_crc;
-	
+
 };
 
 struct rt_mmcsd_io_cfg {
@@ -221,7 +221,7 @@ struct rt_mmcsd_cmd {
 #define mmc_spi_resp_type(cmd)	((cmd)->flags & \
 		(MMC_RSP_SPI_S1|MMC_RSP_SPI_BUSY|MMC_RSP_SPI_S2|MMC_RSP_SPI_B4))
 
-/*rsponse types 
+/*rsponse types
  *bits:0~4
  */
 #define RESP_MASK	(0x1F)
@@ -234,7 +234,7 @@ struct rt_mmcsd_cmd {
 #define RESP_R6		(MMC_RSP_R6)
 #define RESP_R7		(MMC_RSP_R7)
 #define RESP_R5		(MMC_RSP_R5)	/*SDIO command response type*/
-/*command types 
+/*command types
  *bits:5~6
  */
 #define CMD_MASK	(3 << 5)		/* command type */
@@ -245,7 +245,7 @@ struct rt_mmcsd_cmd {
 
 #define resp_type(cmd)	((cmd)->flags & RESP_MASK)
 
-/*spi rsponse types 
+/*spi rsponse types
  *bits:7~10
  */
 #define RESP_SPI_MASK	(0xF << 7)
@@ -262,7 +262,7 @@ struct rt_mmcsd_cmd {
  * These are the command types.
  */
 #define cmd_type(cmd)	((cmd)->flags & CMD_MASK)
-	
+
 	int32_t  err;
 };
 
@@ -368,7 +368,7 @@ struct sdh_device {
 	uint32	rca;		/* card addr */
 	uint32	resp_cid[4];	/* card CID register */
 	uint32	resp_csd[4];	/* card CSD register */
-	uint32	resp_scr[2];	/* card SCR register */	
+	uint32	resp_scr[2];	/* card SCR register */
 	uint16	tacc_clks;	/* data access time by ns */
 	uint32	tacc_ns;	/* data access time by clk cycles */
 	uint32	max_data_rate;	/* max data transfer rate */
@@ -399,7 +399,7 @@ struct sdh_device {
     uint8   sd_write_sample_num;
     uint8   sd_read_sample_num ;
     uint8   sd_cmd_sample_num  ;
-	uint16	card_type;	
+	uint16	card_type;
     uint16  spi_mode_baud;
     uint32  init_clk;
     uint32  write_last_time_retry;
@@ -408,7 +408,7 @@ struct sdh_device {
     uint16  reserved1;
     uint8   opt_timeout;    // seconds
     uint8   cmd12_timeout;  // *100 millisconds
-    uint8   busy_filter_cnt;    
+    uint8   busy_filter_cnt;
 };
 
 struct sdhc_hal_ops{
@@ -466,7 +466,7 @@ struct hgsdh {
 #define     LL_SDHC_CMD_RESP_R7             (0x1UL << 5)    /* 6byte resp */
 #define     LL_SDHC_CMD_RESP_MSK            (0x7UL << 5)
 
-#define     LL_SDHC_DAT_OVERFLOW_STOP_EN    (0X1UL << 10)   
+#define     LL_SDHC_DAT_OVERFLOW_STOP_EN    (0X1UL << 10)
 #define     LL_SDHC_DAT_SMP_EN              (0X1UL << 9)
 #define     LL_SDHC_CMD_SMP_EN              (0X1UL << 8)
 #define     LL_SDHC_DELAY_WHOLE_SYSCLK      (0X1UL << 7)
@@ -621,9 +621,14 @@ void stop_card();
 void sd_open();
 uint32 sdhost_deinit_for_sleep();
 
+/* 应用接管卷恢复时，驱动只报告故障，不自行卸载仍在使用的卷。 */
+int sd_storage_app_managed(void);
+int sd_storage_app_busy(void);
+void sd_storage_request_recovery(void);
+
 int usb_sd_scsi_read(uint32 lba, uint32 count, uint8* buf);
 int usb_sd_scsi_write(uint32 lba, uint32 count, uint8* buf);
- 
+
 
 
 #endif

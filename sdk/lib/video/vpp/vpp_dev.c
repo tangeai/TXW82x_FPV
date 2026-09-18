@@ -925,8 +925,6 @@ void vpp_set_time(struct vpp_device *p_vpp, uint32_t time_val)
 void vpp_frame_done(uint32 irq, uint32 dev, uint32 param)
 {
     static uint32_t md_isr_cnt = 0;
-    //	static uint32_t  done_num=0;
-    //	static uint32_t  detnum=0;
     uint8_t         itk        = 0;
     int32_t         ret        = 0;
     uint16_t        w, h;
@@ -934,7 +932,7 @@ void vpp_frame_done(uint32 irq, uint32 dev, uint32 param)
     uint32_t        loc;
     uint16_t        buf1w = 0, buf1h = 0;
     uint8_t        *ptr_cache;
-    _os_printf(KERN_DEBUG "F");
+//    _os_printf(KERN_DEBUG "F");
     static time_t      last_time_val = 0;
     struct vpp_device *p_vpp         = (struct vpp_device *) dev;
     struct timeval     ptimeval;
@@ -1067,13 +1065,13 @@ void vpp_frame_done(uint32 irq, uint32 dev, uint32 param)
 
 		vpp_set_buf1_shrink(p_vpp, shrink);
 	    vpp_set_psram_ycnt(p_vpp, buf1w, buf1h);
-    	vpp_set_psram_uvcnt(p_vpp, buf1w, buf1h);	
-		
+        vpp_set_psram_uvcnt(p_vpp, buf1w, buf1h);
+
         vpp_set_buf1_y_addr(p_vpp, (uint32) psram_ptr);
         vpp_set_buf1_u_addr(p_vpp, (uint32) psram_ptr + buf1w * buf1h);
         vpp_set_buf1_v_addr(p_vpp, (uint32) psram_ptr + buf1w * buf1h + buf1w * buf1h / 4);
     }
-	
+
 	md_isr_cnt = vpp_md_cnt;
 }
 volatile uint8 itp_done = 0;
@@ -1129,7 +1127,7 @@ bool vpp_cfg(uint32_t w, uint32_t h, uint8_t input_from)
     }
 #if IPF_EN
     uint32_t             len;
-#endif	
+#endif
     struct vpp_device   *vpp_dev;
     vpp_dev = (struct vpp_device *) dev_get(HG_VPP_DEVID);
 
@@ -1327,7 +1325,7 @@ bool vpp_cfg(uint32_t w, uint32_t h, uint8_t input_from)
     vpp_set_ifp_addr(vpp_dev, (uint32_t) vpp_encode_ipf);
 #endif
 
-#if 0	
+#if 0
 	vpp_set_water1_color(vpp_dev,0xff,0x80,0x80);
 	vpp_set_water1_bitmap(vpp_dev,(uint32)photo_lib2);
 	vpp_set_water1_locate(vpp_dev,45,30);

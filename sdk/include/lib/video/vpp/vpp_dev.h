@@ -16,7 +16,7 @@
 #define IN_PARA_IN                      6
 
 #ifndef VPP_INPUT_FROM
-#define VPP_INPUT_FROM       			IN_ISP   
+#define VPP_INPUT_FROM       			IN_ISP
 #endif
 
 enum
@@ -46,7 +46,7 @@ struct  video_cfg_t {
 	uint8_t video_type_cur;     //cur frame is ISP_VIDEO_0/1/2
 	uint8_t video_type_last;    //last frame is ISP_VIDEO_0/1/2
 	uint8_t video_type_vpp;    //vpp runing which frame  ,app maybe use
-	uint8_t resv;	          
+	uint8_t resv;
 	uint16_t dvp_iw;
 	uint16_t dvp_ih;
 	uint16_t dvp_ow;
@@ -58,13 +58,13 @@ struct  video_cfg_t {
 	uint16_t csi0_oh;
 	uint16_t csi0_type;         //0:master 1:slave0  2:slave1
 	uint16_t csi1_iw;
-	uint16_t csi1_ih;	
+	uint16_t csi1_ih;
 	uint16_t csi1_ow;
 	uint16_t csi1_oh;
 	uint16_t csi1_type;         //0:master 1:slave0  2:slave1
 };
 
-struct mdt_coord_msg {	
+struct mdt_coord_msg {
 	uint16_t x0,x1;
 	uint16_t y0,y1;
 	uint16_t x,y;
@@ -87,12 +87,17 @@ enum
 #endif
 
 #ifndef VPP_BUF0_MODE
-#define VPP_BUF0_MODE                  VPP_MODE_2N_ADD_16   
+#define VPP_BUF0_MODE                  VPP_MODE_2N_ADD_16
 #endif
 
 #ifndef VPP_BUF1_MODE
-#define VPP_BUF1_MODE                  VPP_MODE_2N_ADD_16  
+#ifdef __TXW826__
+#define VPP_BUF1_MODE                  VPP_MODE_2N
+#else
+#define VPP_BUF1_MODE                  VPP_MODE_2N_ADD_16
 #endif
+#endif
+
 
 //注意这里配置的N,所以实际根据MODE决定申请空间
 #ifndef VPP_BUF0_LINEBUF_NUM
@@ -117,4 +122,3 @@ void *get_vpp_buf(uint8_t which);
 int8_t vpp_dev_open();
 int32 vpp_is_closed(struct vpp_device *p_vpp);
 #endif
-

@@ -6,13 +6,15 @@
 	#include <stdio.h>
 	#include <stdlib.h>
 	typedef FILE	F_FILE;
-	
+
 //不是win32,是mcu平台则要声明文件类型,以及一些宏实现
 #else
 	#include "fatfs/ff.h"
 	typedef FIL	F_FILE;
 #endif
 
+/* 按 FatFS 标志打开，用于独占创建录像，禁止重名时追加或覆盖。 */
+F_FILE *osal_open(const char *filename, int oflags, int mode);
 int osal_fopen_no_malloc(F_FILE *fp,const char *filename,const char *mode);
 F_FILE *osal_fopen(const char *filename,const char *mode);
 uint32_t osal_fread(void *ptr,uint32_t size,uint32_t nmemb,F_FILE *fp);
