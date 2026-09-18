@@ -104,7 +104,7 @@ uint32_t osal_fwrite(void *ptr, uint32_t size, uint32_t nmemb, F_FILE *fp)
 #ifdef WIN32
     return fwrite(ptr, size, nmemb, fp);
 #else
-    uint32_t writeLen;
+    uint32_t writeLen = 0;
     uint32_t res = f_write(fp, ptr, size * nmemb, &writeLen);
     if (res == FR_OK)
     {
@@ -126,7 +126,7 @@ int osal_fclose(F_FILE *fp)
 #else
     int res = f_close(fp);
     FILE_FREE(fp);
-    if (!res)
+    if (res != FR_OK)
     {
         set_errno(res);
     }

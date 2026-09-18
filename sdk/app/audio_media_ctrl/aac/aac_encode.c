@@ -7,7 +7,10 @@
 #include "aac_code.h"
 
 #define MAX_AAC_ENCODE_RXBUF    4
-#define MAX_AAC_ENCODE_TXBUF    20
+/* tx_pool 存发送端 fb 元数据 (不含 payload). AAC 每 20ms 出一帧,
+ * 下游 (MP4 encode / rec_playback) 通常能立即消费, 无需太深的缓冲.
+ * 20 太浪费, 缩到 4 省 ~1.2KB 结构体空间 */
+#define MAX_AAC_ENCODE_TXBUF    4
 
 struct aac_encode_struct {
     struct fbpool tx_pool;

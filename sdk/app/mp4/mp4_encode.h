@@ -135,6 +135,11 @@ typedef struct
     uint32_t     mdat_nowoffset;
     uint32_t     mvhd_duration_offset;
     F_FILE      *fp;
+    /* NAL 写入聚合缓冲: 一次 fwrite 替代原先"512B 头 + 尾段对齐"两次 IO
+     * 由 MP4_open_init 分配 MP4_NAL_WR_BUF_SIZE, mp4_deinit 释放
+     * 为 NULL 时回退到旧的 cache[512] 分段路径（兼容老代码） */
+    uint8_t     *nal_wr_buf;
+    uint32_t     nal_wr_buf_size;
     // 设置缓冲区
     trak_key_msg trak[2];
 } mp4_key_msg;

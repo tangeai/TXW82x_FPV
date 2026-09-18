@@ -78,7 +78,12 @@ uint8_t *h264_room_psram = NULL;
 uint8_t *h264_ref_memory_base[10];
 
 
+/* h264_room[] 是死代码: 全文未引用, 实际用的是 h264_room_psram (line 2069
+ * H264_MALLOC). __psram_data 在 typesdef.h 是空宏, 这里全局数组进 BSS,
+ * 即使被链接器 GC 也属冗余声明, 直接删除省 240KB 潜在占用. */
+#if 0
 __psram_data uint8_t h264_room[H264_NODE_NUM*H264_NODE_LEN] __aligned(1024);
+#endif
 
 volatile h264_frame h264_frame_point[H264_FRAME_NUM];
 volatile struct list_head *h264_module_p;		//264模块的节点指针
@@ -1639,7 +1644,7 @@ void h264_frame_done_isr(uint32 irq_flags, uint32 irq_data, uint32 param){
 		}
 
 	}	
-	_os_printf(KERN_DEBUG"Z%d",penc_cfg->src_from);
+//	_os_printf(KERN_DEBUG"Z%d",penc_cfg->src_from);
 
 }
 
@@ -1904,18 +1909,23 @@ void h264_main_sensor_cfg(struct h264_device *p_h264,uint32_t w,uint32_t h,uint8
 	enc_cfg.wrap_width      = w;
 	enc_cfg.wrap_height     = h;
 	enc_cfg.src_from        = src_from;
-	enc_cfg.enc_bps 		= 4000; //Kbit pre second
-	
-	enc_cfg.still_enc_bps   = 600;    //Kbit pre second
-	enc_cfg.move_enc_bps    = 4000;   //Kbit pre second	
-	enc_cfg.stilltomove     = 0;    //permil for judgmemnt is move or still
+    if(enc_cfg.frm_height > 720){       //1080p
+	    enc_cfg.enc_bps 	    = 800;
+	    enc_cfg.still_enc_bps   = 300;    /* 静止时码率 (stilltomove=0 时不生效) */
+	    enc_cfg.move_enc_bps    = 800;
+    }else{
+        enc_cfg.enc_bps         = 500;    //720p
+	    enc_cfg.still_enc_bps   = 150;
+	    enc_cfg.move_enc_bps    = 500;
+    }
+	enc_cfg.stilltomove     = 1;    //permil, 0 = 关闭动静切换, 保持固定 enc_bps
 	enc_cfg.move_keep_gop   = 5;
-	enc_cfg.frm_rate		= 25;	//fps
+	enc_cfg.frm_rate		= 15;	//fps
 #if H264_I_ONLY 
 	enc_cfg.frm_gop 		= 1;	//IPPPP frame number of a gop
 	enc_cfg.rc_en			= 0;	//enc rate control enable
 #else
-	enc_cfg.frm_gop 		= 25;	//IPPPP frame number of a gop
+	enc_cfg.frm_gop 		= 45;	//IPPPP frame number of a gop
 	enc_cfg.rc_en			= 1;	//enc rate control enable
 #endif	
 	enc_cfg.rc_grp			= 2;	//mb line number when RC change qp
@@ -1954,19 +1964,19 @@ void h264_second_sensor_cfg(struct h264_device *p_h264,uint32_t w,uint32_t h,uin
 	enc_2_cfg.frm_height	= (h+0xf)&(~0xf);//h;//
 	enc_2_cfg.wrap_width    = w;
 	enc_2_cfg.wrap_height   = h;
-	enc_2_cfg.src_from      = src_from;	
-	enc_2_cfg.enc_bps 		= 1000; //Kbit pre second
+	enc_2_cfg.src_from      = src_from;
+	enc_2_cfg.enc_bps 		= 250; //Kbit pre second
 
-	enc_2_cfg.still_enc_bps = 300;    //Kbit pre second
-	enc_2_cfg.move_enc_bps  = 1000;   //Kbit pre second	
-	enc_2_cfg.stilltomove   = 0;    //permil for judgmemnt is move or still
+	enc_2_cfg.still_enc_bps = 100;    /* 静止时码率 (stilltomove=0 时不生效) */
+	enc_2_cfg.move_enc_bps  = 250;
+	enc_2_cfg.stilltomove   = 1;    //permil, 0 = 关闭动静切换
 	enc_2_cfg.move_keep_gop = 5;
-	enc_2_cfg.frm_rate		= 25;	//fps
+	enc_2_cfg.frm_rate		= 15;	//fps
 #if H264_I_ONLY
 	enc_2_cfg.frm_gop		= 1;	//IPPPP frame number of a gop
 	enc_2_cfg.rc_en 		= 0;	//enc rate control enable
 #else
-	enc_2_cfg.frm_gop 		= 25;	//IPPPP frame number of a gop
+	enc_2_cfg.frm_gop 		= 45;	//IPPPP frame number of a gop
 	enc_2_cfg.rc_en			= 1;	//enc rate control enable
 #endif	
 	enc_2_cfg.rc_grp		= 2;	//mb line number when RC change qp
@@ -2160,10 +2170,10 @@ int h264_enc(uint32_t drv1_from,uint32_t drv1_w,uint32_t drv1_h,uint32_t drv2_fr
 	}
 	h264_room_init();
 	h264_drv_init(h264_dev);
-	h264_main_sensor_cfg(h264_dev,drv1_w,drv1_h,drv1_from);	
+	h264_main_sensor_cfg(h264_dev,drv1_w,drv1_h,drv1_from);
 	if(h264_dev_num == 2)
 		h264_second_sensor_cfg(h264_dev,drv2_w,drv2_h,drv2_from);
-	
+
 	h264_isr_init(h264_dev);
 	//h264_wrap_init
 	penc_ctl = &enc_ctl;
@@ -2184,7 +2194,7 @@ int h264_enc(uint32_t drv1_from,uint32_t drv1_w,uint32_t drv1_h,uint32_t drv2_fr
 
 
 	h264_cfg_srcdat(h264_dev,penc_cfg->src_from);
-	
+
 	//p_h264->WRAP_CON |= 0x01|0x10|0x100;
 	h264_set_vpp_vsync_delay(h264_dev,1);
 	h264_set_hw_open(h264_dev,1);

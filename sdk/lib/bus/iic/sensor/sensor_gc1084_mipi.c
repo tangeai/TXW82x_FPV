@@ -38,8 +38,11 @@ SENSOR_INIT_SECTION const unsigned char GC1084InitTable[CMOS_INIT_LEN]=
     0x0d, 0x73, 0x92,
     0x00, 0x76, 0x00,
     0x0d, 0x76, 0x00,
-    0x0d, 0x41, 0x03,   // frame height[13:8] frame height = window_height+16+VB_val{0x0d79[13:8] 0x0d7a[7:0]}(default:0x10)
-    0x0d, 0x42, 0x78,   // frame height[07:0]
+    // 0x0d, 0x41, 0x03,   // frame height[13:8] frame height = window_height+16+VB_val{0x0d79[13:8] 0x0d7a[7:0]}(default:0x10)
+    // 0x0d, 0x42, 0x78,   // frame height[07:0]
+    0x0d, 0x41, 0x07,   // frame height[13:8] frame height = window_height+16+VB_val{0x0d79[13:8] 0x0d7a[7:0]}(default:0x10)
+    0x0d, 0x42, 0x53,   // frame height[07:0]
+
     0x0d, 0x7a, 0x0a,
     0x00, 0x6b, 0x18,
     0x0d, 0xb0, 0x9d,
@@ -236,16 +239,17 @@ const _Sensor_AWB gc1084_awb_init =
 
 const _Sensor_AE gc1084_ae_init = 
 {
-    .max_frame_length      = 888,
-    .min_frame_vb          = 1,
-    .curr_fps              = (uint32)(25.5*256),
+    .max_frame_length      = 1875,//888,
+    .min_frame_vb          = 4,//1,
+    .curr_fps              = (uint32)(12.5*256),//(25.5*256),
     // .max_analog_gain       = (32<<8),
-    .max_analog_gain       = (16<<8),
+    .max_analog_gain       = (25<<8),//(16<<8),
     .min_analog_gain       =  1<<8,
-    .default_exposure_line = 0x2de,//0x2de,
-    .max_exposure_line     = 887, //749,
+    .default_exposure_line = 596,////0x2de,//0x2de,
+
+    .max_exposure_line     = 1196,//887, //749,
     .min_exposure_line     = 1,
-    .row_time_us           = 67,
+    .row_time_us           = 35,//67,
     .expo_frame_interval   = 3,    
     .to_day_bv             = 1528,
     .to_night_bv           = 369,

@@ -845,7 +845,7 @@ lwip_close(int s)
     err = netconn_prepare_delete(sock->conn);
     if (err != ERR_OK) {
         set_errno(err_to_errno(err));
-        done_socket(sock);
+        free_socket(sock, is_tcp);
         return -1;
     }
 
