@@ -336,14 +336,14 @@ static void hardware_init(uint8_t vcam)
 #endif
 
 #if TOUCH_PAD_EN
-    touch_pad_hareware_init();
+    touch_pad_hardware_init();
 #endif
 
 #if AUDIO_EN
-	reg_auproc_alloc(av_malloc, av_zalloc, av_calloc, av_realloc, av_free);
-	reg_wsola_alloc(av_malloc, av_zalloc, av_calloc, av_realloc, av_free);
-    reg_aucoder_alloc(av_malloc, av_zalloc, av_calloc, av_realloc, av_free);
-	reg_aures_alloc(av_malloc, av_zalloc, av_calloc, av_realloc, av_free);
+	reg_auproc_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+	reg_wsola_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+	reg_aures_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+    reg_aucoder_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
     aucode_mutex_init();
     audio_adc_init(AUSYS_AUAD, 8000, 1, 4, 1);
     audio_dac_init();
@@ -362,10 +362,10 @@ static void hardware_init(uint8_t vcam)
     };
     #else
 	struct hg_lv_mem_hooks hook = {
-        .malloc  = av_psram_malloc,
-        .realloc = av_psram_realloc,
-        .zalloc  = av_psram_zalloc,
-        .free    = av_psram_free,
+        .malloc  = _os_malloc_psram,
+        .realloc = _os_realloc_psram,
+        .zalloc  = _os_zalloc_psram,
+        .free    = _os_free_psram,
     };
     #endif
     hg_lv_mem_register(&hook);

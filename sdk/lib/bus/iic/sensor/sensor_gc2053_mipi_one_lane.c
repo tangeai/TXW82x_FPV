@@ -448,7 +448,7 @@ const _Sensor_LSC       gc2053_lsc_init = {
     .p_lsc_tbl = (uint32 *)gc2053_lsc_tbl,
 };
 
-const _Sensor_LHS gc2053_lhs_map[] = {
+const _Sensor_LHS gc2053_lhs_map[9] = {
     // region defination: lower -> center -> upper(direction: anticlockwise)
     // region_lower, region_center, region_upper, hue adjust value, saturation adjust value
     //   (9 bits)      (9 bits)       (9 bits)          (9 bits)           (8 bits)
@@ -688,23 +688,12 @@ const _Sensor_ISP_Init gc2053_isp_init =
 
 SENSOR_OP_SECTION const _Sensor_Adpt_ gc2053_cmd = 
 {
-	.typ = 1, //YUV
 	.pixelw = 1920,
 	.pixelh= 1080,
-	.hsyn = 1,
-	.vsyn = 1,
-	.rduline = 0,//
-	.rawwide = 1,//10bit
-	.colrarray = 1,//0:_RGRG_ 1:_GRGR_,2:_BGBG_,3:_GBGB_
 	.init = (uint8 *)GC2053InitTable,
-    .init_len = sizeof(GC2053InitTable),
     .vts_reg = {0x41,0x42},
     .vts_reg_num = 2,
     .mipi_lane_num = 1,
-	.rotate_adapt = {0},
-	//.hvb_adapt = {0x6a,0x12,0x6a,0x12},
-	. mclk = 12000000,
-	.p_fun_adapt = {NULL,NULL,NULL},
     .sensor_isp = (_Sensor_ISP_Init *)&gc2053_isp_init,
 };
 

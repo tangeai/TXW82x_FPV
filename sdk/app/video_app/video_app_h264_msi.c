@@ -9,8 +9,6 @@
 #include "hal/h264.h"
 #include "lib/heap/av_heap.h"
 #include "lib/heap/av_psram_heap.h"
-#include "lib/heap/av_heap.h"
-#include "lib/heap/av_psram_heap.h"
 #include "gen420_hardware_msi.h"
 #include "user_work/user_work.h"
 #include "hal/scale.h"
@@ -229,17 +227,37 @@ void    ue_se_enc(uint16 in_data)
     len_suf += 1;
     exp_out = (in_data & 0x1ff);
 }
+
+static void h264_sps_append_ue(BitBuffer *buffer, uint16_t value)
+{
+    uint32_t code_num = (uint32_t)value + 1;
+    uint32_t tmp      = code_num;
+    uint8_t  suffix_bits = 0;
+
+    while (tmp > 1)
+    {
+        tmp >>= 1;
+        suffix_bits++;
+    }
+    if (suffix_bits)
+    {
+        bit_buffer_append(buffer, 0, suffix_bits, 0);
+    }
+    bit_buffer_append(buffer, (uint16_t)code_num, suffix_bits + 1, 0);
+}
+
 // main  1920 1080
 void h264_sps_gen_test(BitBuffer *buffer, uint16_t wrap_w, uint16_t wrap_h, uint8_t fr)
 {
     uint8_t level_idc  = 52; // h264 0x50
-    uint16  img_x      = wrap_w / 16;
+    uint16  img_x      = (wrap_w + 0xf) / 16;
     uint16  img_y      = (wrap_h + 0xf) / 16;
     uint8_t crop_en    = 0;
-    uint8_t crop_y     = (img_y * 16 - wrap_h) / 2;
+    uint16  crop_x     = (img_x * 16 - wrap_w) / 2;
+    uint16  crop_y     = (img_y * 16 - wrap_h) / 2;
     uint8_t full_range = fr;
 
-    if (crop_y)
+    if (crop_x || crop_y)
     {
         crop_en = 1;
     }
@@ -269,9 +287,11 @@ void h264_sps_gen_test(BitBuffer *buffer, uint16_t wrap_w, uint16_t wrap_h, uint
     // img crop
     if (crop_en)
     {
-        bit_buffer_append(buffer, 0x000f, 4, 0);
-        ue_se_enc((crop_y + 1));
-        bit_buffer_append(buffer, exp_out, len_exp, 0);
+        bit_buffer_append(buffer, 0x0001, 1, 0);
+        h264_sps_append_ue(buffer, 0);
+        h264_sps_append_ue(buffer, crop_x);
+        h264_sps_append_ue(buffer, 0);
+        h264_sps_append_ue(buffer, crop_y);
     }
     else
     {
@@ -300,6 +320,194 @@ enum video_app_h264_enum
 #define STREAM_MALLOC av_psram_malloc
 #define STREAM_FREE   av_psram_free
 #define STREAM_ZALLOC av_psram_zalloc
+
+/*******************************************************************************
+ * H264 输出 buffer 静态池
+ * 目的：消除每帧 malloc/free 导致的 av_psram 碎片化
+ * 设计：预分配 N 块固定大小 PSRAM buffer，每帧从池取一块，下游消费完归还
+ *       如果池满或单帧超过单块大小，回退到 STREAM_MALLOC（极少触发）
+ *
+ ******************************************************************************/
+/* ----- 三层静态池设计 -----
+ * 目的: 消除 av_psram_heap 上的 h264 帧 alloc/free, 根治碎片化.
+ *
+ * P 帧 size 实测分布:
+ *   826 720P (~7200 帧):  <8K=91.9%  8-16K=7.9%  16-24K=0.14%  >=24K=0.08%
+ *                         I 帧 max ~38KB
+ *   828 1080P (~2800 帧): <8K=79.6%  8-16K=18.9%  16-24K=2.1%  >=24K=0.08%
+ *                         I 帧 max ~42KB
+ *
+ * 分 3 层避免用大块装小帧浪费, 同时小池块数足以容纳 mp4 fbq 堆积:
+ *   SMALL: 覆盖绝大多数小 P 帧 (实际命中率 ~90%)
+ *   MID:   覆盖中等 P 帧 + 小池满时的应急
+ *   BIG:   覆盖 I 帧 + 大 P 帧 + 中池满时的应急
+ */
+#if defined(__TXW828__)
+/* 828: 1080P 主码流 */
+#define H264_SMALL_BUF_SIZE     (8  * 1024)
+#define H264_SMALL_BUF_COUNT    23
+#define H264_MID_BUF_SIZE       (16 * 1024)
+#define H264_MID_BUF_COUNT      12
+#define H264_BIG_BUF_SIZE       (80 * 1024)
+#define H264_BIG_BUF_COUNT      2
+#else
+/* 826: 720P 主码流, 实测 91.9% P 帧 < 8K */
+#define H264_SMALL_BUF_SIZE     (8  * 1024)
+#define H264_SMALL_BUF_COUNT    23
+#define H264_MID_BUF_SIZE       (16 * 1024)
+#define H264_MID_BUF_COUNT      6
+#define H264_BIG_BUF_SIZE       (60 * 1024)
+#define H264_BIG_BUF_COUNT      2
+#endif
+
+static uint8_t          *h264_small_buf[H264_SMALL_BUF_COUNT] = {NULL};
+static volatile uint8_t  h264_small_buf_busy[H264_SMALL_BUF_COUNT] = {0};
+static uint8_t          *h264_mid_buf[H264_MID_BUF_COUNT] = {NULL};
+static volatile uint8_t  h264_mid_buf_busy[H264_MID_BUF_COUNT] = {0};
+static uint8_t          *h264_big_buf[H264_BIG_BUF_COUNT] = {NULL};
+static volatile uint8_t  h264_big_buf_busy[H264_BIG_BUF_COUNT] = {0};
+static volatile uint8_t  h264_static_buf_inited = 0;
+
+static int h264_static_buf_init(void)
+{
+    if (h264_static_buf_inited)
+        return 0;
+    for (int i = 0; i < H264_SMALL_BUF_COUNT; i++)
+    {
+        h264_small_buf[i] = (uint8_t *) STREAM_MALLOC(H264_SMALL_BUF_SIZE);
+        if (!h264_small_buf[i])
+        {
+            os_printf(KERN_ERR "h264_small_buf: alloc failed at %d\r\n", i);
+            for (int j = 0; j < i; j++) { STREAM_FREE(h264_small_buf[j]); h264_small_buf[j] = NULL; }
+            return -1;
+        }
+        sys_dcache_invalid_range((uint32_t *) h264_small_buf[i], H264_SMALL_BUF_SIZE);
+    }
+    for (int i = 0; i < H264_MID_BUF_COUNT; i++)
+    {
+        h264_mid_buf[i] = (uint8_t *) STREAM_MALLOC(H264_MID_BUF_SIZE);
+        if (!h264_mid_buf[i])
+        {
+            os_printf(KERN_ERR "h264_mid_buf: alloc failed at %d\r\n", i);
+            for (int j = 0; j < i; j++) { STREAM_FREE(h264_mid_buf[j]); h264_mid_buf[j] = NULL; }
+            for (int j = 0; j < H264_SMALL_BUF_COUNT; j++) { STREAM_FREE(h264_small_buf[j]); h264_small_buf[j] = NULL; }
+            return -1;
+        }
+        sys_dcache_invalid_range((uint32_t *) h264_mid_buf[i], H264_MID_BUF_SIZE);
+    }
+    for (int i = 0; i < H264_BIG_BUF_COUNT; i++)
+    {
+        h264_big_buf[i] = (uint8_t *) STREAM_MALLOC(H264_BIG_BUF_SIZE);
+        if (!h264_big_buf[i])
+        {
+            os_printf(KERN_ERR "h264_big_buf: alloc failed at %d\r\n", i);
+            for (int j = 0; j < i; j++) { STREAM_FREE(h264_big_buf[j]); h264_big_buf[j] = NULL; }
+            for (int j = 0; j < H264_MID_BUF_COUNT; j++) { STREAM_FREE(h264_mid_buf[j]); h264_mid_buf[j] = NULL; }
+            for (int j = 0; j < H264_SMALL_BUF_COUNT; j++) { STREAM_FREE(h264_small_buf[j]); h264_small_buf[j] = NULL; }
+            return -1;
+        }
+        sys_dcache_invalid_range((uint32_t *) h264_big_buf[i], H264_BIG_BUF_SIZE);
+    }
+    h264_static_buf_inited = 1;
+    os_printf(KERN_INFO "h264_static_buf: init ok, small=%dx%d mid=%dx%d big=%dx%d (total %dKB)\r\n",
+              H264_SMALL_BUF_COUNT, H264_SMALL_BUF_SIZE,
+              H264_MID_BUF_COUNT,   H264_MID_BUF_SIZE,
+              H264_BIG_BUF_COUNT,   H264_BIG_BUF_SIZE,
+              (H264_SMALL_BUF_COUNT * H264_SMALL_BUF_SIZE +
+               H264_MID_BUF_COUNT   * H264_MID_BUF_SIZE +
+               H264_BIG_BUF_COUNT   * H264_BIG_BUF_SIZE) / 1024);
+    return 0;
+}
+
+/* 三层池 alloc, 按 size 选合适层, 失败逐层向上应急:
+ *   size <= SMALL : 先小池 → 失败再中池 → 再大池
+ *   SMALL < size <= MID : 中池 → 失败再大池
+ *   MID < size <= BIG : 大池
+ *   size > BIG : NULL (caller fallback STREAM_MALLOC)
+ * 返回池内 buffer 指针, 或 NULL */
+static uint8_t *h264_static_buf_alloc(uint32_t size)
+{
+    if (!h264_static_buf_inited)
+    {
+        if (h264_static_buf_init() != 0)
+            return NULL;
+    }
+    if (size > H264_BIG_BUF_SIZE) {
+        os_printf(KERN_INFO "h264 frame size %u > big buf %d, fallback\r\n",
+                  size, H264_BIG_BUF_SIZE);
+        return NULL;
+    }
+
+    uint32_t ie = disable_irq();
+    /* 1) 小池 (size 合适时优先, 不浪费大块) */
+    if (size <= H264_SMALL_BUF_SIZE) {
+        for (int i = 0; i < H264_SMALL_BUF_COUNT; i++) {
+            if (!h264_small_buf_busy[i]) {
+                h264_small_buf_busy[i] = 1;
+                enable_irq(ie);
+                return h264_small_buf[i];
+            }
+        }
+    }
+    /* 2) 中池 (8-16K 帧 + 小池满应急) */
+    if (size <= H264_MID_BUF_SIZE) {
+        for (int i = 0; i < H264_MID_BUF_COUNT; i++) {
+            if (!h264_mid_buf_busy[i]) {
+                h264_mid_buf_busy[i] = 1;
+                enable_irq(ie);
+                return h264_mid_buf[i];
+            }
+        }
+    }
+    /* 3) 大池 (I 帧 + 大 P 帧 + 中池满应急) */
+    for (int i = 0; i < H264_BIG_BUF_COUNT; i++) {
+        if (!h264_big_buf_busy[i]) {
+            h264_big_buf_busy[i] = 1;
+            enable_irq(ie);
+            return h264_big_buf[i];
+        }
+    }
+    enable_irq(ie);
+
+    /* 三层都满, 节流报告 miss. 持续 miss 说明池上限设置不够, 需调大. */
+    static uint32_t s_miss_cnt  = 0;
+    static uint32_t s_miss_last = 0;
+    uint32_t now = os_jiffies_to_msecs(os_jiffies());
+    s_miss_cnt++;
+    if ((uint32_t)(now - s_miss_last) >= 1000) {
+        s_miss_last = now;
+        os_printf(KERN_INFO "[h264-pool] miss=%u/s size=%u (all 3 pools exhausted)\r\n",
+                  (unsigned)s_miss_cnt, (unsigned)size);
+        s_miss_cnt = 0;
+    }
+    return NULL;
+}
+
+/* 尝试归还到静态池 (小/中/大池), 返回 1 表示已归还, 0 表示不在池内 (caller 走 STREAM_FREE) */
+static int h264_static_buf_free(void *ptr)
+{
+    if (!h264_static_buf_inited || !ptr)
+        return 0;
+    for (int i = 0; i < H264_SMALL_BUF_COUNT; i++) {
+        if (h264_small_buf[i] == ptr) {
+            h264_small_buf_busy[i] = 0;
+            return 1;
+        }
+    }
+    for (int i = 0; i < H264_MID_BUF_COUNT; i++) {
+        if (h264_mid_buf[i] == ptr) {
+            h264_mid_buf_busy[i] = 0;
+            return 1;
+        }
+    }
+    for (int i = 0; i < H264_BIG_BUF_COUNT; i++) {
+        if (h264_big_buf[i] == ptr) {
+            h264_big_buf_busy[i] = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
 
 // 结构体申请空间函数
 #ifdef MORE_SRAM
@@ -481,9 +689,56 @@ static int8_t h264_output_msi(struct list_head *get_f, struct video_h264_msi_s *
     fb = fbpool_get(&video_h264->tx_pool, 0, video_h264->msi);
     if (fb)
     {
-        // 先去msi寻找是否有空闲节点,如果有,才需要拷贝,否则就丢弃
         // MAX_BYTES是重新生成的sps和pps的最大空间
-        uint8_t *h264_buf = (uint8_t *) STREAM_MALLOC(h264_len + SAVE_COUNT + MAX_BYTES);
+        // 先从静态池分配, 避免 av_psram 碎片化; 失败再回退到 STREAM_MALLOC
+        uint8_t *h264_buf = NULL;
+        uint32_t alloc_size = h264_len + SAVE_COUNT + MAX_BYTES;
+
+//        if(alloc_size > H264_BIG_BUF_SIZE){
+//            os_printf(KERN_INFO "video frame size too big %u, drop it\r\n", alloc_size);
+//            goto h264_output_msi_end;
+//        }
+        /* P 帧 size 分布统计 (用于决定 h264_static_buf 块 size 改造).
+         * h264_type_frame: 1=I 帧, 其他=P 帧.
+         * 每 5 秒打一次, 6 个桶覆盖 8K 步进, I 帧单独计数. */
+//        {
+//            static uint32_t s_p_hist[6] = {0}; /* <8K, 8-16K, 16-24K, 24-32K, 32-48K, >=48K */
+//            static uint32_t s_i_max = 0;
+//            static uint32_t s_i_cnt = 0;
+//            static uint32_t s_last_ms = 0;
+//            if (h264_type_frame == 1) {
+//                s_i_cnt++;
+//                if (alloc_size > s_i_max) s_i_max = alloc_size;
+//            } else {
+//                uint32_t b;
+//                if      (alloc_size < 8u*1024)  b = 0;
+//                else if (alloc_size < 16u*1024) b = 1;
+//                else if (alloc_size < 24u*1024) b = 2;
+//                else if (alloc_size < 32u*1024) b = 3;
+//                else if (alloc_size < 48u*1024) b = 4;
+//                else                            b = 5;
+//                s_p_hist[b]++;
+//            }
+//            uint32_t now = os_jiffies_to_msecs(os_jiffies());
+//            if ((uint32_t)(now - s_last_ms) >= 5000) {
+//                s_last_ms = now;
+//                printf("[h264-size] P: <8K=%u 8-16K=%u 16-24K=%u 24-32K=%u 32-48K=%u >=48K=%u | I cnt=%u max=%u\r\n",
+//                       (unsigned)s_p_hist[0], (unsigned)s_p_hist[1],
+//                       (unsigned)s_p_hist[2], (unsigned)s_p_hist[3],
+//                       (unsigned)s_p_hist[4], (unsigned)s_p_hist[5],
+//                       (unsigned)s_i_cnt, (unsigned)s_i_max);
+//            }
+//        }
+
+        // 三层静态池, 内部按 size 自动分发; 三池都满才 fallback STREAM_MALLOC
+        h264_buf = h264_static_buf_alloc(alloc_size);
+        if (!h264_buf){
+            if(os_jiffies() > 5000){
+                os_printf(KERN_INFO "fallback STREAM_MALLOC %u\r\n", alloc_size);
+                h264_buf = (uint8_t *) STREAM_MALLOC(alloc_size);
+            }
+        }
+
         if (!h264_buf)
         {
             msi_delete_fb(NULL, fb);
@@ -526,7 +781,7 @@ static int8_t h264_output_msi(struct list_head *get_f, struct video_h264_msi_s *
             }
             h264_len_tmp -= cp_len;
             tmp_buf = get_h264_first_buf(get_f);
-            hw_memcpy0(h264_buf + cp_offset, get_h264_first_buf(get_f), cp_len);
+            hw_memcpy(h264_buf + cp_offset, get_h264_first_buf(get_f), cp_len);
             del_h264_first_node(get_f);
             cp_offset += cp_len;
         }
@@ -700,7 +955,9 @@ static int32_t h264_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t param1
             struct framebuff *fb = (struct framebuff *) param1;
             if (fb->data)
             {
-                STREAM_FREE(fb->data);
+                // 先尝试归还到静态池, 不在池内则正常 free
+                if (!h264_static_buf_free(fb->data))
+                    STREAM_FREE(fb->data);
                 fb->data = NULL;
             }
             if (fb->priv)
@@ -724,8 +981,9 @@ static int32_t vpp_start_h264(uint32_t irq_data)
 {
     struct video_h264_msi_s *video_h264 = (struct video_h264_msi_s *) irq_data;
     struct h264_device      *h264_dev   = video_h264->h264_dev;
-    // 如果需要拼接,就要等待镜头2完成才能启动
-    if (video_msg.video_type_cur == ISP_VIDEO_1 || video_msg.camera_mode != CAM_DUAL_SPLICE_SLAVE_MODE)
+    
+    // 拼接或者已经第二个镜头已经done或者是单镜头,则启动
+    if (video_msg.video_type_cur == ISP_VIDEO_1 || video_msg.camera_mode == CAM_SINGLE_MASTER_MODE)
     {
         h264_open(h264_dev);
         h264_set_sw_ready(h264_dev);
@@ -743,6 +1001,8 @@ struct msi *h264_msi_init_with_mode(uint32_t drv1_from, uint16_t drv1_w, uint16_
     struct msi              *msi = msi_new(S_H264, 0, &isnew);
     struct video_h264_msi_s *video_h264;
     uint8_t                  vpp_kick = 0;
+    //如果需要自适应识别w和h(仅仅适合vpp data0和vpp data1),则传入参数应该为0
+    uint32_t auto_w_h = drv1_w|drv1_h|drv2_w|drv2_h;
 
     if (msi && isnew)
     {
@@ -754,7 +1014,6 @@ struct msi *h264_msi_init_with_mode(uint32_t drv1_from, uint16_t drv1_w, uint16_
         video_h264->h264_dev = (struct h264_device *) dev_get(HG_H264_DEVID);
         if (video_h264->h264_dev)
         {
-
             if (drv1_from == GEN420_DATA || drv2_from == GEN420_DATA)
             {
                 extern int32_t h264_gen420_kick();
@@ -784,53 +1043,39 @@ struct msi *h264_msi_init_with_mode(uint32_t drv1_from, uint16_t drv1_w, uint16_
                     }
                 }
             }
-            // 自己适应w和h
-            if (drv1_from == VPP_DATA0)
+            // 如果强行配置两个都是VPP_DATA0或者VPP_DATA1,代表是特殊的模式(双镜头),就使用参数即可
+            if ((drv1_from == drv2_from) && (drv1_from == VPP_DATA0 || drv1_from == VPP_DATA1) && auto_w_h)
             {
-                vpp_kick++;
-                get_vpp_w_h(&drv1_w, &drv1_h);
             }
-            else if (drv1_from == VPP_DATA1)
+            else
             {
-                vpp_kick++;
-                get_vpp1_w_h(&drv1_w, &drv1_h);
-            }
-            else if (drv1_from == SCALER_DATA)
-            {
-                ret = get_vpp_scale_w_h(&drv1_w, &drv1_h);
-                if (!ret)
+                // 自己适应w和h
+                if (drv1_from == VPP_DATA0)
                 {
-                    set_vpp_scale_w_h(1, drv1_w, drv1_h);
+                    vpp_kick++;
+                    get_vpp_w_h(&drv1_w, &drv1_h);
                 }
-                else
+                else if (drv1_from == VPP_DATA1)
                 {
-                    drv1_from = ~0;
+                    vpp_kick++;
+                    get_vpp1_w_h(&drv1_w, &drv1_h);
                 }
-            }
-
-            if (drv2_from == VPP_DATA0)
-            {
-                vpp_kick++;
-                get_vpp_w_h(&drv2_w, &drv2_h);
-            }
-            else if (drv2_from == VPP_DATA1)
-            {
-                vpp_kick++;
-                get_vpp1_w_h(&drv2_w, &drv2_h);
-            }
-            else if (drv2_from == SCALER_DATA)
-            {
-                ret = get_vpp_scale_w_h(&drv2_w, &drv2_h);
-                if (!ret)
+                else if (drv1_from == SCALER_DATA)
                 {
-                    set_vpp_scale_w_h(1, drv2_w, drv2_h);
-                }
-                else
-                {
-                    drv2_from = ~0;
+                    if(!drv1_w|| !drv1_h)
+                    {
+                        ret = get_vpp_scale_w_h(&drv1_w, &drv1_h);
+                        if (!ret)
+                        {
+                            set_vpp_scale_w_h(1, drv1_w, drv1_h);
+                        }
+                        else
+                        {
+                            drv1_from = ~0;
+                        }
+                    }
                 }
             }
-
             video_h264->drv1_from = drv1_from;
             video_h264->drv2_from = drv2_from;
             h264_set_oe_select(video_h264->h264_dev, 0, 0);
@@ -1035,5 +1280,56 @@ struct msi *h264_msi_init_with_mode_for_264wq(uint32_t drv1_from, uint16_t drv1_
         os_run_work_delay(&video_h264->work, 1);
     }
 h264_msi_init_with_mode_end:
+    return msi;
+}
+
+
+struct msi *h264_msi_init_with_gen420(uint16_t drv1_w, uint16_t drv1_h)
+{
+    int                      ret   = 0;
+    uint8_t                  isnew = 0;
+    struct msi              *msi   = msi_new(S_H264, 0, &isnew);
+    struct video_h264_msi_s *video_h264;
+
+    if (msi && isnew)
+    {
+        video_h264 = (struct video_h264_msi_s *) STREAM_LIBC_ZALLOC(sizeof(struct video_h264_msi_s));
+        ASSERT(video_h264);
+        msi->priv   = (void *) video_h264;
+        msi->enable = 1;
+
+        video_h264->h264_dev = (struct h264_device *) dev_get(HG_H264_DEVID);
+        if (video_h264->h264_dev)
+        {
+            video_h264->drv1_from = GEN420_DATA;
+            video_h264->drv2_from = ~0;
+            h264_set_oe_select(video_h264->h264_dev, 0, 0);
+            ret = h264_enc(video_h264->drv1_from, drv1_w, drv1_h, -1, 0, 0);
+
+            if (ret)
+            {
+                if (video_h264)
+                {
+                    STREAM_LIBC_FREE(video_h264);
+                }
+                msi_destroy(msi);
+                msi = NULL;
+                goto h264_msi_init_gen420_end;
+            }
+            else
+            {
+                h264_open(video_h264->h264_dev);
+                msi->action     = h264_msi_action;
+                video_h264->msi = msi;
+                fbpool_init(&video_h264->tx_pool, MAX_VIDEO_APP_264);
+            }
+        }
+        // 启动workqueue
+        // 创建一个任务去做h264的工作
+        // OS_TASK_INIT("video_h264", &video_h264->task, h264_msi_thread, (void*)video_h264, OS_TASK_PRIORITY_ABOVE_NORMAL, NULL, 1024);
+        OS_WORK_INIT(&video_h264->work, h264_msi_work, 0);
+        os_run_work_delay(&video_h264->work, 1);
+    }
+h264_msi_init_gen420_end:
     return msi;
 }

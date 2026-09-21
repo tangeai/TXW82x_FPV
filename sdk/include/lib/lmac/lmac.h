@@ -48,9 +48,16 @@ extern "C" {
 #define LMAC_FEM_KCT8227D_ADD_SWITCH_5V         (LMAC_FEM_KCT8227D_ADD_SWITCH | LMAC_FEM_POWER_5V)
 
 //FREQ offset tracking mode
-#define LMAC_FREQ_OFFSET_TRACK_ALWAYS_ON        0
-#define LMAC_FREQ_OFFSET_TRACK_ALWAYS_OFF       1
-#define LMAC_FREQ_OFFSET_TRACK_ONLY_STA_ON      2
+#define LMAC_FREQ_OFFSET_TRACK_ALWAYS_ON        0   //常开
+#define LMAC_FREQ_OFFSET_TRACK_ALWAYS_OFF       1   //常关
+#define LMAC_FREQ_OFFSET_TRACK_ONLY_STA_ON      2   //仅在sta模式下跟踪频偏
+#define LMAC_FREQ_OFFSET_TRACK_RST_DEF_ON       3   //复位频偏值，并常开
+#define LMAC_FREQ_OFFSET_TRACK_RST_DEF_OFF      4   //复位频偏值，并常关
+
+//lmac Init Module Bit Definitions
+#define LMAC_MODULE_INIT_BIT_MULTI_MAC          (1U << 0)       //双MAC功能
+#define LMAC_MODULE_INIT_BIT_RX_REORDER         (1U << 1)       //rx重排序
+
 
 struct lmac_txq_param {
     uint16 txop;

@@ -19,13 +19,21 @@ static const int16_t sin1khz_table[8] = {
 };
 #endif 
 
+static const char *const auadc_msi_name[] = {
+	[AUSYS_AUAD] = "S_AUADC",
+	[AUSYS_PDM] = "S_AUPDM",
+	[AUSYS_IIS_SLAVER0] = "S_AUIIS0",
+	[AUSYS_IIS_SLAVER1] = "S_AUIIS1"
+};
+
 AUPROC_HDL *global_auproc_hdl = NULL;
 
 struct auadc_struct
 {
 	uint8_t auadc_stop;
+	uint8_t mic_id;
 	uint8_t channels;
-	uint16_t soft_gain;
+	uint8_t soft_gain;
     uint32_t data_len;
     uint32_t sampleRate;
 	uint32_t energy;
@@ -64,10 +72,20 @@ get_frame_buf:
 				os_memcpy((void*)data, (const void*)(ausys_msg.ad_content.fifo_cur_addr), ausys_msg.ad_content.fifo_cur_len);
 				frame_buf->len = ausys_msg.ad_content.fifo_cur_len;
 				frame_buf->time = os_jiffies();
-				samples_len = frame_buf->len/2;
+				samples_len = frame_buf->len / 2;
 #if AUADC_OUTPUT_SIN
-				for(uint32_t i=0; i<samples_len; i++) {
-					*(data+i) = sin1khz_table[i%8];
+				if(auadc_s->channels == 1) {
+					for(uint32_t i=0; i<samples_len; i++) {
+						*(data + i) = sin1khz_table[i%8];
+					}
+				}
+				else if(auadc_s->channels == 2) {
+					samples_len = samples_len / 2;
+					for(uint32_t i=0; i<samples_len; i++) {
+						*(data + 2 * i) = sin1khz_table[i%8];
+						*(data + 2 * i + 1) = sin1khz_table[i%8];
+					}
+					samples_len = samples_len * 2;
 				}
 #else
 #if AUDIO_PROCESS
@@ -119,7 +137,7 @@ int32_t auadc_start(struct auadc_struct *s, uint32_t auproc_enable)
 	}
 #if AUDIO_PROCESS
 	if(auproc_enable && global_auproc_hdl == NULL) {
-		auadc_s->auproc_hdl = audio_process_init(auadc_s->sampleRate, 1);
+		auadc_s->auproc_hdl = audio_process_init(auadc_s->sampleRate, auadc_s->channels);
 		if(auadc_s->auproc_hdl == NULL) {
 			AUADC_INFO("audio_process_init fail!\r\n");
 			return RET_ERR;
@@ -175,84 +193,65 @@ int32_t auadc_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t param1, uint
     return ret;
 }
 
-struct msi *get_auadc_msi(enum ausys_ad_platform platform)
+struct msi *get_auadc_msi(uint32_t mic_id)
 {
 	struct msi *msi = NULL;
+	struct auadc_struct *auadc_s = NULL;
 
-	switch(platform) {
-		case AUSYS_AUAD:msi = msi_find("S_AUADC", 1);break;
-		case AUSYS_PDM:msi = msi_find("S_AUPDM", 1);break;
-		case AUSYS_IIS_SLAVER0:msi = msi_find("S_AUIIS0", 1);break;
-		case AUSYS_IIS_SLAVER1:msi = msi_find("S_AUIIS1", 1);break;
-		default:break;
-	}
-	if(msi) {
-		msi_put(msi);
+	for(uint32_t i=0; i<ARRAY_SIZE(auadc_msi_name); i++) {
+		msi = msi_find(auadc_msi_name[i], 1);
+		if(msi) {
+			msi_put(msi);
+			auadc_s = (struct auadc_struct*)msi->priv;
+			if(auadc_s && auadc_s->mic_id == mic_id) {
+				break;
+			}
+		}
+		msi = NULL;
 	}	
 	return msi;
 }
 
-int32_t auadc_msi_add_output(enum ausys_ad_platform platform, const char *msi_name)
+int32_t auadc_msi_add_output(uint32_t mic_id, const char *msi_name)
 {
 	int32_t ret = RET_ERR;
 	struct msi *msi = NULL;
 
-	switch(platform) {
-		case AUSYS_AUAD:msi = msi_find("S_AUADC", 1);break;
-		case AUSYS_PDM:msi = msi_find("S_AUPDM", 1);break;
-		case AUSYS_IIS_SLAVER0:msi = msi_find("S_AUIIS0", 1);break;
-		case AUSYS_IIS_SLAVER1:msi = msi_find("S_AUIIS1", 1);break;
-		default:break;
-	}
+	msi = get_auadc_msi(mic_id);
 	if(msi) {
-		msi_put(msi);
+		ret = msi_add_output(msi, NULL, msi_name);
 	}
 	else {
 		AUADC_INFO("auadc msi add output fail,auadc msi is null\n");
 		return RET_ERR;
 	}
-	ret = msi_add_output(msi, NULL, msi_name);
 	return ret;    
 }
 
-int32_t auadc_msi_del_output(enum ausys_ad_platform platform, const char *msi_name)
+int32_t auadc_msi_del_output(uint32_t mic_id, const char *msi_name)
 {
 	int32_t ret = RET_ERR;
 	struct msi *msi = NULL;
 
-	switch(platform) {
-		case AUSYS_AUAD:msi = msi_find("S_AUADC", 1);break;
-		case AUSYS_PDM:msi = msi_find("S_AUPDM", 1);break;
-		case AUSYS_IIS_SLAVER0:msi = msi_find("S_AUIIS0", 1);break;
-		case AUSYS_IIS_SLAVER1:msi = msi_find("S_AUIIS1", 1);break;
-		default:break;
-	}
+	msi = get_auadc_msi(mic_id);
 	if(msi) {
-		msi_put(msi);
+		ret = msi_del_output(msi, NULL, msi_name);
 	}
 	else {
 		AUADC_INFO("auadc msi add output fail,auadc msi is null\n");
 		return RET_ERR;
 	}
-	ret = msi_del_output(msi, NULL, msi_name);
 	return ret;    
 }
 
-int32_t audio_adc_get_samplerate(enum ausys_ad_platform platform)
+int32_t audio_adc_get_samplerate(uint32_t mic_id)
 {
 	uint32_t samplerate = 8000;
 	struct msi *msi = NULL;
 	struct auadc_struct *auadc_s = NULL;
 
-	switch(platform) {
-		case AUSYS_AUAD:msi = msi_find("S_AUADC", 1);break;
-		case AUSYS_PDM:msi = msi_find("S_AUPDM", 1);break;
-		case AUSYS_IIS_SLAVER0:msi = msi_find("S_AUIIS0", 1);break;
-		case AUSYS_IIS_SLAVER1:msi = msi_find("S_AUIIS1", 1);break;
-		default:break;
-	}
+	msi = get_auadc_msi(mic_id);
 	if(msi) {
-		msi_put(msi);
 		auadc_s = (struct auadc_struct*)msi->priv;
 	}	
 	if(auadc_s) {
@@ -261,21 +260,30 @@ int32_t audio_adc_get_samplerate(enum ausys_ad_platform platform)
 	return samplerate;
 }
 
-int32_t audio_adc_set_soft_gain(enum ausys_ad_platform platform, uint32_t soft_gain)
+int32_t audio_adc_get_channels(uint32_t mic_id)
+{
+	uint32_t channels = 1;
+	struct msi *msi = NULL;
+	struct auadc_struct *auadc_s = NULL;
+
+	msi = get_auadc_msi(mic_id);
+	if(msi) {
+		auadc_s = (struct auadc_struct*)msi->priv;
+	}	
+	if(auadc_s) {
+		channels = auadc_s->channels;
+	}
+	return channels;
+}
+
+int32_t audio_adc_set_soft_gain(uint32_t mic_id, uint32_t soft_gain)
 {
 	int32_t ret = RET_ERR;
 	struct msi *msi = NULL;
 	struct auadc_struct *auadc_s = NULL;
 
-	switch(platform) {
-		case AUSYS_AUAD:msi = msi_find("S_AUADC", 1);break;
-		case AUSYS_PDM:msi = msi_find("S_AUPDM", 1);break;
-		case AUSYS_IIS_SLAVER0:msi = msi_find("S_AUIIS0", 1);break;
-		case AUSYS_IIS_SLAVER1:msi = msi_find("S_AUIIS1", 1);break;
-		default:break;
-	}
+	msi = get_auadc_msi(mic_id);
 	if(msi) {
-		msi_put(msi);
 		auadc_s = (struct auadc_struct*)msi->priv;
 	}	
 	if(auadc_s) {
@@ -285,20 +293,13 @@ int32_t audio_adc_set_soft_gain(enum ausys_ad_platform platform, uint32_t soft_g
 	return ret;
 }
 
-uint32_t audio_adc_get_energy(enum ausys_ad_platform platform)
+uint32_t audio_adc_get_energy(uint32_t mic_id)
 {
 	struct msi *msi = NULL;
 	struct auadc_struct *auadc_s = NULL;
 
-	switch(platform) {
-		case AUSYS_AUAD:msi = msi_find("S_AUADC", 1);break;
-		case AUSYS_PDM:msi = msi_find("S_AUPDM", 1);break;
-		case AUSYS_IIS_SLAVER0:msi = msi_find("S_AUIIS0", 1);break;
-		case AUSYS_IIS_SLAVER1:msi = msi_find("S_AUIIS1", 1);break;
-		default:break;
-	}
+	msi = get_auadc_msi(mic_id);
 	if(msi) {
-		msi_put(msi);
 		auadc_s = (struct auadc_struct*)msi->priv;
 	}	
 	if(auadc_s) {
@@ -310,13 +311,14 @@ uint32_t audio_adc_get_energy(enum ausys_ad_platform platform)
 int32_t audio_adc_init(enum ausys_ad_platform platform, uint32_t sampleRate, uint32_t channels, uint32_t soft_gain, uint32_t auproc_enable)
 {
 	int32_t ret = 0;
+	uint32_t mic_id = 0;
 	struct msi *msi = NULL;
 
 	switch(platform) {
-		case AUSYS_AUAD:msi = msi_new("S_AUADC", 0, NULL);break;
-		case AUSYS_PDM:msi = msi_new("S_AUPDM", 0, NULL);break;
-		case AUSYS_IIS_SLAVER0:msi = msi_new("S_AUIIS0", 0, NULL);break;
-		case AUSYS_IIS_SLAVER1:msi = msi_new("S_AUIIS1", 0, NULL);break;
+		case AUSYS_AUAD:msi = msi_new("S_AUADC", 0, NULL);mic_id = mic_auadc;break;
+		case AUSYS_PDM:msi = msi_new("S_AUPDM", 0, NULL);mic_id = mic_aupdm;break;
+		case AUSYS_IIS_SLAVER0:msi = msi_new("S_AUIIS0", 0, NULL);mic_id = mic_auiis0;break;
+		case AUSYS_IIS_SLAVER1:msi = msi_new("S_AUIIS1", 0, NULL);mic_id = mic_auiis1;break;
 		default:break;
 	}  
 	if(msi) {
@@ -330,6 +332,7 @@ int32_t audio_adc_init(enum ausys_ad_platform platform, uint32_t sampleRate, uin
         msi->action = (msi_action)auadc_msi_action;
 		msi->priv = auadc_s;
         auadc_s->msi = msi;
+		auadc_s->mic_id = mic_id;
 		auadc_s->channels = channels;
 		auadc_s->soft_gain = soft_gain;
         auadc_s->sampleRate = sampleRate;
@@ -360,20 +363,13 @@ int32_t audio_adc_init(enum ausys_ad_platform platform, uint32_t sampleRate, uin
 	}
 }
 
-int32_t audio_adc_deinit(enum ausys_ad_platform platform)
+int32_t audio_adc_deinit(uint32_t mic_id)
 {
 	struct msi *msi = NULL;
 	struct auadc_struct *auadc_s = NULL;
 
-	switch(platform) {
-		case AUSYS_AUAD:msi = msi_find("S_AUADC", 1);break;
-		case AUSYS_PDM:msi = msi_find("S_AUPDM", 1);break;
-		case AUSYS_IIS_SLAVER0:msi = msi_find("S_AUIIS0", 1);break;
-		case AUSYS_IIS_SLAVER1:msi = msi_find("S_AUIIS1", 1);break;
-		default:break;
-	}
+	msi = get_auadc_msi(mic_id);
 	if(msi) {
-		msi_put(msi);
 		auadc_s = (struct auadc_struct*)msi->priv;
 	}
 	if(!auadc_s) {

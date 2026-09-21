@@ -5,10 +5,12 @@
 #include "csi_kernel.h"
 #include "sys_config.h"
 #include "dev/dma/hg_m2m_dma.h"
-#include "lib/ota/al_typedef.h"
+#include "lib/ApplicationLoader/al_typedef.h"
 #ifdef CONFIG_SLEEP
 #include "lib/common/dsleepdata.h"
 #endif
+#include "lib/lmac/lmac.h"
+
 #include "dev/xspi/hg_xspi_psram.h"
 #include "dev/xspi/hg_xspi_flash.h"
 #include "dev/adc/hgadc_v1.h"
@@ -184,6 +186,8 @@ __SYS_INIT void sys_start_cpu1(uint32_t run_addr)
     #else
     CoreSetting->psram_rsv_addr_core0 = 0;
     #endif
+    CoreSetting->lmac_module_init_mask = (WIFI_MODULE_MULTI_MAC_EN ? LMAC_MODULE_INIT_BIT_MULTI_MAC : 0)        |\
+                                         (WIFI_MODULE_RX_REORDER_EN ? LMAC_MODULE_INIT_BIT_RX_REORDER : 0);
     sysctrl_cpu1_softrst_en();
     __NOP();
     __NOP();
@@ -245,7 +249,7 @@ __SYS_INIT void SystemInit(void)
     }
 
     firmware_info_t info_in_fls = (firmware_info_t)&__al_user_sram_start;
-    fls_user_data_t user_data   = (fls_user_data_t)info_in_fls->user.user_data;
+    user_info_t user_data   = (user_info_t)info_in_fls->user.user_data;
     if (info_in_fls->user.user_data) {
         if (user_data->fw_magic == (0xC791B319)) {
             
@@ -322,16 +326,27 @@ __init static void malloc_psram_init(void)
 #endif
 }
 
+int psram_heap_size = 0;
 
 __init static int system_psram_init(void)
 {
 	extern void add_psram_cfg();
 	add_psram_cfg();
-    
+
     //  240M， 320M, 274M, 160M...
     //  你可以选择你喜欢的频率， 但内部只有几个挡位可以选择， 匹配最接近的配置
-    int psram_heap_size = psram_auto_init(0, 320 * 1000000);
+    psram_heap_size = psram_auto_init(0, 320 * 1000000);
     cache_open_psram();
+
+    /* 模拟实际产品的 PSRAM 容量上限.
+     * 开发板硬件 16MB, 但实际产品只有 8MB. 加上此宏后, 后续 sysheap 只看到
+     * SIMULATE_PSRAM_SIZE_MB 这么大的空间, 真实硬件多出的部分被丢弃,
+     * 用来在 16MB 板子上提前发现 8MB 模式下的内存问题. */
+#ifdef SIMULATE_PSRAM_SIZE_MB
+    if (psram_heap_size > SIMULATE_PSRAM_SIZE_MB) {
+        psram_heap_size = SIMULATE_PSRAM_SIZE_MB;
+    }
+#endif
 
 #ifdef PSRAM_HEAP
     if(psram_heap_size){
@@ -389,7 +404,7 @@ __init void pre_main(void)
     VERSION_SHOW();
     module_version_show();
     sys_reset_show();
-    os_workqueue_init(&main_wkq, "MAIN", OS_TASK_PRIORITY_NORMAL, NULL, 2048);
+    os_workqueue_init(&main_wkq, "MAIN", OS_TASK_PRIORITY_ABOVE_NORMAL, NULL, 2048);
     mainwkq_monitor_init();
     os_run_func((os_run_func_t)main, 0, 0, 0);
 

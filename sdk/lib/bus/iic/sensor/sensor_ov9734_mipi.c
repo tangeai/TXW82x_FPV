@@ -480,7 +480,7 @@ const _Sensor_LSC          ov9734_lsc_init = {
     .p_lsc_tbl = (uint32 *)ov9734_lsc_tbl,
 };
 
-const _Sensor_LHS ov9734_lhs_map[] = {
+const _Sensor_LHS ov9734_lhs_map[9] = {
     // region defination: lower -> center -> upper(direction: anticlockwise)
     // region_lower, region_center, region_upper, hue adjust value, saturation adjust value
     //   (9 bits)      (9 bits)       (9 bits)          (9 bits)           (8 bits)
@@ -649,23 +649,12 @@ const _Sensor_ISP_Init ov9734_isp_init =
 
 SENSOR_OP_SECTION const _Sensor_Adpt_ ov9734_cmd = 
 {
-	.typ = 1, //YUV
 	.pixelw = 1280,
 	.pixelh= 720,
-	.hsyn = 1,
-	.vsyn = 1,
-	.rduline = 0,//
-	.rawwide = 1,//10bit
-	.colrarray = 2,//0:_RGRG_ 1:_GRGR_,2:_BGBG_,3:_GBGB_
 	.init = (uint8 *)OV9734InitTable,
-    .init_len = sizeof(OV9734InitTable),
     .vts_reg = {0x380e,0x380f},
     .vts_reg_num = 2,
     .mipi_lane_num = 1,
-	.rotate_adapt = {0},
-	//.hvb_adapt = {0x6a,0x12,0x6a,0x12},
-	. mclk = 24000000,
-	.p_fun_adapt = {NULL,NULL,NULL},
 	.sensor_isp = (_Sensor_ISP_Init *)&ov9734_isp_init,
 };
 

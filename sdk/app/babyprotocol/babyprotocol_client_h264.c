@@ -185,6 +185,8 @@ void  recfg_babymonitor_msg(uint8_t success){
 	uint16_t max_still;
 	uint16_t max_move;
 	static uint8_t  success_frame_num = 0;
+	static uint16_t last_still_update = 0;
+	static uint16_t last_move_update = 0;
 #if 0
 	static uint8_t  framecnt = 0;
 	static uint32_t timeout = 0;
@@ -308,7 +310,11 @@ void  recfg_babymonitor_msg(uint8_t success){
 		}
 		
 	}
-
+	if(last_move != last_move_update || last_still != last_still_update) {
+		os_printf("video change bps:%d %d\n",last_move,last_still);
+		last_move_update = last_move;
+		last_still_update = last_still;
+	}
 #endif
 }
 
@@ -585,7 +591,7 @@ void udp_handle_client_data_thread(){
 			pktcnt = 0;
 			datoffset = 0;
 			lostidx   = 0;
-			lostloop  = 3;    //所有丢包都重传3次,增加接收成功率
+			lostloop  = 1;    //所有丢包都重传3次,增加接收成功率
 			
 			if(client_frame.lost_num != 0){
 				nal_reserve = 0;

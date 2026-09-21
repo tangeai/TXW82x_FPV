@@ -222,12 +222,16 @@ uint32_t get_audac_volume(struct audac_struct *audac_s)
 
 void audac_soft_volume_adjust(struct audac_struct *audac_s, int16_t *buf, uint32_t nsamples)
 {
+	uint32_t target_volume = audac_s->target_volume;
+	if(target_volume >= 100) {
+		target_volume = 99;
+	}
 	for(uint32_t i=0; i<nsamples; i++) {
 		buf[i] = (int16_t)(((float)buf[i]) * audac_s->cur_soft_volume);
-		if(((uint32_t)(audac_s->cur_soft_volume * 100.0f)) > audac_s->target_volume) {
+		if(((uint32_t)(audac_s->cur_soft_volume * 100.0f)) > target_volume) {
 			audac_s->cur_soft_volume -= 0.01;
 		}
-		else if(((uint32_t)(audac_s->cur_soft_volume * 100.0f)) < audac_s->target_volume) {
+		else if(((uint32_t)(audac_s->cur_soft_volume * 100.0f)) < target_volume) {
 			audac_s->cur_soft_volume += 0.01;
 		}
 	}

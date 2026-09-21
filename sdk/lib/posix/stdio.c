@@ -21,7 +21,7 @@
 /* sram slice buffer size, usr for psram slice write to sd */
 #define STDIO_RWBUF_SIZE 10000
 
-extern int osal_open(const char *filename, int oflags, int mode);
+/* osal_open is declared by osal_file.h with its actual pointer return type. */
 int read(int fd, void *buf, size_t nbytes);
 int write(int fd, const void *buf, size_t nbytes);
 

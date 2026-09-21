@@ -247,7 +247,7 @@ void jpg_csr_encode_config(struct hgjpg_hw *p_jpg,uint32 image_h,uint32 image_w)
 		image_h = ((image_h/16)+1)*16;
 	p_jpg->CSR2 = ((image_h * image_w) /256)-1;
 	p_jpg->CSR3 = (image_w<<16)|(image_w/16 - 1);
-
+	p_jpg->CSR0 = 1;
 }
 
 int32 hgjpg_open(struct jpg_device *p_jpg){
@@ -420,6 +420,8 @@ int32 hgjpg_init(struct jpg_device *p_jpg,uint32 table_index,uint32 qt){
 	jpg_table_init(hw,thw,hufhw,table_index);
 	hw->DMA_CON = (qt<<1);
 	jpg_hw->addr_count = 0;
+	/* Match the hardware reset when restarting after an aborted JPEG frame. */
+	jpg_hw->deal_time = 0;
 
 	return 0;
 }

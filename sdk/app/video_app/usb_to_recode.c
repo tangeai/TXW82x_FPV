@@ -4,10 +4,10 @@
 #include "gen420_hardware_msi.h"
 #include "lib/video/dvp/jpeg/jpg.h"
 #include "video_msi.h"
+
 /*******************************************
  * usb图片增加水印重新编码
  *******************************************/
- 
 extern struct msi *route_msi(const char *name);
 extern struct msi *jpg_decode_msg_msi(const char *name, uint16_t out_w, uint16_t out_h, uint16_t step_w, uint16_t step_h, uint32_t filter);
 extern struct msi *jpg_decode_msi(const char *name);
@@ -28,13 +28,12 @@ static uint8_t recode_filter(void *f, uint8_t recv_type)
 
 void usb_to_recode_init(uint8_t jpg_num)
 {
-
     uint32_t    magic;
-    // ROUTE_USB是usb图片获取来源
-    struct msi *route_m = route_msi(ROUTE_USB);
-    if (route_m)
+	// ROUTE_USB是usb图片获取来
+    struct msi *usb_route_msi = route_msi(ROUTE_USB);
+    if (usb_route_msi)
     {
-        msi_add_output(route_m, NULL, SR_USB_RECODE_DEOCDE);
+        msi_add_output(usb_route_msi, NULL, SR_USB_RECODE_DEOCDE);
     }
 
     // 接收USB的图片数据,然后配置需要解码的参数,最后给到硬件去解码
@@ -62,7 +61,6 @@ void usb_to_recode_init(uint8_t jpg_num)
 
     if (decode_msg_msi && decode_msi)
     {
-        // 设置magic
         msi_do_cmd(decode_msg_msi, MSI_CMD_DECODE_JPEG_MSG, MSI_JPEG_DECODE_MAGIC, magic);
         msi_add_output(decode_msg_msi, NULL, decode_msi->name);
     }
@@ -76,10 +74,9 @@ void usb_to_recode_init(uint8_t jpg_num)
 
     // 过滤类型,由于从usb过来,由于decode_msg_msi设置了类型,所以这里需要修改
     static const uint16_t watermark_filter[] = {FSTYPE_JPG_GEN420_REJPG, FSTYPE_NONE};
-    struct msi           *gen420_jpg_msi = gen420_jpg_msi_init(R_GEN420_JPG_RECODE, jpg_num, FSTYPE_JPG_GEN420_REJPG, JPG_LOCK_GEN420_RECODE, GEN420_QUEUE_JPEG_RECODE, (uint16_t*)watermark_filter, recode_filter);
+    struct msi *gen420_jpg_msi = gen420_jpg_msi_init(R_GEN420_JPG_RECODE, jpg_num, FSTYPE_JPG_GEN420_REJPG, JPG_LOCK_GEN420_RECODE, GEN420_QUEUE_JPEG_RECODE, (uint16_t *)watermark_filter, recode_filter);
     if (gen420_jpg_msi)
     {
-        // 如果需要默认添加到某个msi,在这里添加,也可以后续在其他地方通过msi_add_output(NULL, R_GEN420_JPG_RECODE, "XXX");的方式添加
         msi_do_cmd(gen420_jpg_msi, MSI_CMD_JPG_RECODE, MSI_JPG_RECODE_MAGIC, magic);
     }
 }

@@ -20,21 +20,13 @@
 #include "lib/video/h264/h264_drv.h"
 #include "dev/h264/hg264.h"
 #include "lib/scale/scale_common.h"
-#include "scale/scale_dev.h"
+#include "lib/scale/scale_dev.h"
+#include "mem_cache.h"
 
-#ifndef DECODE_MAX_W
-#define DECODE_MAX_W (320)
-#endif
-
-#ifndef DECODE_MAX_H
-#define DECODE_MAX_H (180)
-#endif
-#define DECODE_MAX_SIZE (DECODE_MAX_W * DECODE_MAX_H * 3 / 2)
+#define H264_DECODE_TTL 1000
 
 #define H264_ROM_MIN_SIZE (100 * 1024 + 4096)
 
-extern void scale2_from_jpeg_config_for_msi(struct scale_device *scale_dev, uint32_t yinsram, uint32_t uinsram, uint32_t vinsram, uint32_t yuvoutbuf, uint32 in_w, uint32 in_h, uint32 out_w,
-                                            uint32 out_h, uint8_t larger);
 // data申请空间函数
 #define STREAM_MALLOC av_psram_malloc
 #define STREAM_FREE   av_psram_free
@@ -55,7 +47,8 @@ struct h264_msi_s
 {
     struct os_work       work;
     struct msi          *msi;
-    struct fbpool        tx_pool;
+    struct mem_info    **mem_info;
+    uint32_t             mem_info_size;
     uint8_t             *scaler2buf_y;
     uint8_t             *scaler2buf_u;
     uint8_t             *scaler2buf_v;
@@ -70,7 +63,6 @@ struct h264_msi_s
     uint16_t             p1_h;
     struct framebuff    *parent_fb;
     struct framebuff    *current_fb;
-    uint32_t             max_data_size;
 
     struct str_info    h264_str;
     struct h264_header h264_head;
@@ -88,13 +80,52 @@ struct h264_msi_s
     uint8_t  hardware_ready : 1, auto_free_space : 1, hardware_err : 1, is_register_isr : 1, sps_flag : 1, only_I_H264 : 1, unlock : 1, rev : 1;
 };
 
+static struct framebuff *h264_decode_alloc_output_fb(struct h264_msi_s *decode, uint32_t size)
+{
+    uint8_t          *data;
+    struct framebuff *fb;
+
+    data = mem_cache_alloc(decode->mem_info, decode->mem_info_size, size, STREAM_MALLOC);
+    if (!data)
+    {
+        return NULL;
+    }
+    fb   = fb_alloc(data, size, 0, decode->msi);
+    if (!fb)
+    {
+        mem_cache_free(data);
+        return NULL;
+    }
+
+    fb->priv = (void *) STREAM_LIBC_ZALLOC(sizeof(struct jpg_decode_arg_s));
+    if (!fb->priv)
+    {
+        msi_delete_fb(NULL, fb);
+        return NULL;
+    }
+    
+    return fb;
+}
+
+static void h264_decode_scale_unlock(struct h264_msi_s *decode)
+{
+    if (decode->unlock)
+    {
+        scale_mutex_unlock(2, SCALE_LOCK_H264_DECODE1);
+        decode->unlock = 0;
+    }
+}
+
 static void stream_jpg_decode_scale2_done(uint32 irq_flag, uint32 irq_data, uint32 param1)
 {
+    struct h264_msi_s *decode = (struct h264_msi_s *)irq_data;
+    h264_decode_scale_unlock(decode);
 }
 
 static void stream_jpg_decode_scale2_ov_isr(uint32 irq_flag, uint32 irq_data, uint32 param1)
 {
-    // struct scale_device *scale_dev = (struct scale_device *)irq_data;
+    struct h264_msi_s *decode = (struct h264_msi_s *)irq_data;
+    h264_decode_scale_unlock(decode);
 }
 
 static int32_t h264_dec_done(uint32 irq_flags, uint32 irq_data, uint32 param)
@@ -130,6 +161,7 @@ static int32 h264_decode_work(struct os_work *work)
             // 不再解码了
             msi_delete_fb(NULL, decode->current_fb);
             decode->current_fb = NULL;
+            h264_decode_scale_unlock(decode);
 
             // 这里最好将硬件模块停止
             // 解锁
@@ -154,6 +186,7 @@ static int32 h264_decode_work(struct os_work *work)
                 // 不再解码了
                 msi_delete_fb(NULL, decode->current_fb);
                 decode->current_fb = NULL;
+                h264_decode_scale_unlock(decode);
             }
 
             // 解锁
@@ -194,9 +227,8 @@ static int32 h264_decode_work(struct os_work *work)
 
         if (unlock)
         {
-            scale_mutex_unlock(2, SCALE_LOCK_H264_DECODE1);
+            h264_decode_scale_unlock(decode);
             unlock         = 0;
-            decode->unlock = 0;
         }
 
         // 这里没有解码的图片,尝试去看看有没有需要解码图片
@@ -390,7 +422,23 @@ static int32 h264_decode_work(struct os_work *work)
         }
         decode->unlock = 1;
         // 申请到fb,申请解码空间
-        fb             = fbpool_get(&decode->tx_pool, 0, decode->msi);
+        {
+            struct jpg_decode_arg_s *msg = (struct jpg_decode_arg_s *) decode->parent_fb->data;
+            if (msg)
+            {
+                uint32_t out_size = msg->yuv_arg.out_w * msg->yuv_arg.out_h * 3 / 2;
+                fb                = h264_decode_alloc_output_fb(decode, out_size);
+            }
+            else
+            {
+                os_printf("%s:%d\tdecode msg isn't normal\tmsg:%X\tname:%s\n", __FUNCTION__, __LINE__, msg, decode->parent_fb->msi->name);
+                msi_delete_fb(NULL, decode->parent_fb);
+                decode->parent_fb = NULL;
+                fb                = NULL;
+                unlock            = 1;
+                goto not_decode;
+            }
+        }
         if (fb)
         {
             // 因为这个是解码的数据,所以默认parent_fb的data是一个参数内容,而不是真实的data,真实jpg的data应该是附在parent_fb后面其他节点
@@ -400,7 +448,6 @@ static int32 h264_decode_work(struct os_work *work)
             {
                 // 为fb申请解码空间,申请不到下次申请
                 fb->len = msg->yuv_arg.out_w * msg->yuv_arg.out_h * 3 / 2;
-                if (fb->len <= decode->max_data_size)
                 {
                     struct jpg_decode_arg_s *cfg;
                     cfg = (struct jpg_decode_arg_s *) fb->priv;
@@ -420,19 +467,6 @@ static int32 h264_decode_work(struct os_work *work)
 
                     decode->current_fb       = fb;
                     decode->last_decode_time = os_jiffies();
-                }
-                else
-                {
-                    os_printf(KERN_ERR "config err,max size w:%d\th:%d\tmax_mem:%d\n", DECODE_MAX_W, DECODE_MAX_H, decode->max_data_size);
-                    // 不符合,需要删除,不去解码
-                    msi_delete_fb(NULL, decode->parent_fb);
-                    decode->parent_fb = NULL;
-
-                    msi_delete_fb(NULL, fb);
-                    fb = NULL;
-
-                    // 解锁
-                    unlock = 1;
                 }
             }
             else
@@ -458,9 +492,9 @@ static int32 h264_decode_work(struct os_work *work)
 not_decode:
     if (unlock)
     {
-        scale_mutex_unlock(2, SCALE_LOCK_H264_DECODE1);
-        decode->unlock = 0;
+        h264_decode_scale_unlock(decode);
     }
+    mem_cache_gc(decode->mem_info, decode->mem_info_size, H264_DECODE_TTL, STREAM_FREE);
     os_run_work_delay(work, 1);
     return 0;
 }
@@ -473,11 +507,9 @@ static int decode_msi_action(struct msi *msi, uint32 cmd_id, uint32 param1, uint
     {
         case MSI_CMD_POST_DESTROY:
         {
-            struct framebuff *fb;
             if (decode->unlock)
             {
-                scale_mutex_unlock(2, SCALE_LOCK_H264_DECODE1);
-                decode->unlock = 0;
+                h264_decode_scale_unlock(decode);
             }
 
             if (decode->rom)
@@ -493,27 +525,7 @@ static int decode_msi_action(struct msi *msi, uint32 cmd_id, uint32 param1, uint
                 decode->ref_max_size = 0;
             }
             // 释放资源fb资源文件,priv是独立申请的
-            while (1)
-            {
-                fb = fbpool_get(&decode->tx_pool, 0, NULL);
-                if (!fb)
-                {
-                    break;
-                }
-                // 预分配空间释放
-                if (fb->priv)
-                {
-                    STREAM_LIBC_FREE(fb->priv);
-                }
-
-                // 预分配空间释放
-                if (fb->data)
-                {
-                    STREAM_FREE(fb->data);
-                    fb->data = NULL;
-                }
-            }
-            fbpool_destroy(&decode->tx_pool);
+            mem_cache_destroy(decode->mem_info, decode->mem_info_size, STREAM_FREE);
             if (decode->scaler2buf_y)
             {
                 STREAM_LIBC_FREE(decode->scaler2buf_y);
@@ -541,6 +553,7 @@ static int decode_msi_action(struct msi *msi, uint32 cmd_id, uint32 param1, uint
             os_work_cancle2(&decode->work, 1);
             // 关闭硬件
             scale_close(decode->scale_dev);
+            h264_decode_scale_unlock(decode);
 
             if (decode->current_fb)
             {
@@ -558,9 +571,16 @@ static int decode_msi_action(struct msi *msi, uint32 cmd_id, uint32 param1, uint
         case MSI_CMD_FREE_FB:
         {
             struct framebuff *fb = (struct framebuff *) param1;
-            fbpool_put(&decode->tx_pool, fb);
-            // 不需要内核去释放fb
-            ret = RET_OK + 1;
+            if (fb)
+            {
+                if (fb->priv)
+                {
+                    STREAM_LIBC_FREE(fb->priv);
+                    fb->priv = NULL;
+                }
+                mem_cache_free(fb->data);
+                fb->data = NULL;
+            }
         }
         break;
 
@@ -687,8 +707,20 @@ static int decode_msi_action(struct msi *msi, uint32 cmd_id, uint32 param1, uint
                     if (!err)
                     {
 
-                        scale2_from_h264_config_for_msi(decode->scale_dev, (uint32_t) decode->scaler2buf_y, (uint32_t) decode->scaler2buf_u, (uint32_t) decode->scaler2buf_v, dst, cfg->decode_w,
-                                                        cfg->decode_h, cfg->yuv_arg.out_w, cfg->yuv_arg.out_h, 10);
+                        struct scale_cfg scale_cfg;
+                        memset(&scale_cfg, 0, sizeof(scale_cfg));
+                        scale_cfg.scale_dev   = decode->scale_dev;
+                        scale_cfg.yinbuf      = (uint32_t)decode->scaler2buf_y;
+                        scale_cfg.uinbuf      = (uint32_t)decode->scaler2buf_u;
+                        scale_cfg.vinbuf      = (uint32_t)decode->scaler2buf_v;
+                        scale_cfg.yuvoutbuf   = dst;
+                        scale_cfg.in_w        = cfg->decode_w;
+                        scale_cfg.in_h        = cfg->decode_h;
+                        scale_cfg.out_w       = cfg->yuv_arg.out_w;
+                        scale_cfg.out_h       = cfg->yuv_arg.out_h;
+                        scale_cfg.stream_type = H264_DEC;
+                        scale_cfg.loc_mode    = SCALE_ALIGN_CENTER;
+                        scale2_config_for_msi(&scale_cfg);
 
                         if (!decode->is_register_isr)
                         {
@@ -712,8 +744,8 @@ static int decode_msi_action(struct msi *msi, uint32 cmd_id, uint32 param1, uint
                     struct framebuff  *rfb       = fb->next;
                     struct h264_msi_s *decode    = (struct h264_msi_s *) msi->priv;
                     struct fb_h264_s  *h264_priv = (struct fb_h264_s *) rfb->priv;
-                    uint32_t           dst       = (uint32_t) rfb->data;
-                    uint32_t           dst_len   = rfb->len;
+                    uint32_t           dst       = (uint32_t) rfb->data + h264_priv->start_len;
+                    uint32_t           dst_len   = rfb->len - h264_priv->start_len;
                     uint8_t           *rom_ptr   = (uint8_t *) (((uint32_t) decode->rom + 0xfff) & (~0xfff));
 
                     decode->hardware_ready   = 0;
@@ -776,23 +808,12 @@ struct msi *h264_decode_msi(const char *name, uint8_t only_I_H264)
     struct h264_msi_s *decode = (struct h264_msi_s *) msi->priv;
     if (is_new)
     {
-        decode      = (struct h264_msi_s *) STREAM_LIBC_ZALLOC(sizeof(struct h264_msi_s));
-        decode->msi = msi;
-        msi->priv   = (void *) decode;
-        msi->action = decode_msi_action;
-
-        uint32_t init_count = 0;
-        void    *priv;
-        fbpool_init(&decode->tx_pool, 2);
-        while (init_count < 2)
-        {
-            uint8_t *data = (uint8_t *) STREAM_MALLOC(DECODE_MAX_SIZE);
-            ASSERT(data);
-            sys_dcache_invalid_range((uint32_t *) data, DECODE_MAX_SIZE);
-            priv = (void *) STREAM_LIBC_ZALLOC(sizeof(struct jpg_decode_arg_s));
-            FBPOOL_SET_INFO(&decode->tx_pool, init_count, data, 0, priv);
-            init_count++;
-        }
+        decode                = (struct h264_msi_s *) STREAM_LIBC_ZALLOC(sizeof(struct h264_msi_s) + sizeof(struct mem_info *) * MAX_DECODE_YUV_TX);
+        decode->msi           = msi;
+        msi->priv             = (void *) decode;
+        msi->action           = decode_msi_action;
+        decode->mem_info      = (struct mem_info **) (decode + 1);
+        decode->mem_info_size = MAX_DECODE_YUV_TX;
 
         decode->h264_dev        = (struct h264_device *) dev_get(HG_H264_DEVID);
         decode->scale_dev       = (struct scale_device *) dev_get(HG_SCALE2_DEVID);
@@ -805,7 +826,6 @@ struct msi *h264_decode_msi(const char *name, uint8_t only_I_H264)
         decode->only_I_H264     = only_I_H264;
         // decode->w               = w;
         // decode->h               = h;
-        decode->max_data_size   = DECODE_MAX_SIZE;
         // decode->rom             = os_malloc_psram(100 * 1024 + 4096);
         // decode->ref_mem         = os_malloc_psram((w * (h + 48)) + (w * (h + 48)) / 2 + 3 * 4096);
         // sys_dcache_clean_range((uint32_t *) decode->ref_mem, (w * (h + 48)) + (w * (h + 48)) / 2 + 3 * 4096);

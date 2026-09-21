@@ -641,7 +641,12 @@ void walkie_talkie_calling_callback(uint32_t local_status)
 	static uint32_t last_local_status = status_none;
 	if(walkie_talkie_send_event(WT_EVT_WIFI_CONNECT_GET, (uint32_t)NULL, (uint32_t)NULL, (uint32_t)NULL) == 0) {
 		walkie_talkie_calling_set(calling_stop);
-		return;
+		if(last_local_status != disconnecting && last_local_status != status_none) {
+			local_status = disconnecting;
+		}
+		else {
+			return;
+		}
 	}
 	if(last_local_status == local_status) {
 		return;
@@ -684,7 +689,7 @@ void walkie_talkie_calling_callback(uint32_t local_status)
             audec_init.use_tpc = 0;
             audec_init.destroy_self = 0;
             audec_init.src_msi = NULL;
-            calling_tone_play_msi = audio_file_play_init("FLASH:/calling1.mp3",2,&audec_init);
+            calling_tone_play_msi = audio_file_play_init("FLASH:/calling1.mp3",2,&audec_init,0);
 			break;
 		}
 		case wait_accept_connect:
@@ -700,7 +705,7 @@ void walkie_talkie_calling_callback(uint32_t local_status)
             audec_init.use_tpc = 0;
             audec_init.destroy_self = 0;
             audec_init.src_msi = NULL;
-            calling_tone_play_msi = audio_file_play_init("FLASH:/calling2.mp3",2,&audec_init);
+            calling_tone_play_msi = audio_file_play_init("FLASH:/calling2.mp3",2,&audec_init,0);
 			break;
 		}
 		case accept_connect:

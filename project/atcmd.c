@@ -35,6 +35,27 @@ int32 sys_empty_atcmd(const char *cmd, char *argv[], uint32 argc)
     return ATCMD_RESULT_DONE;
 }
 
+volatile uint32_t call_test_flag = 0;
+volatile uint32_t dev_status_test = 0;
+volatile uint32_t dev_status = 0;
+
+static int32 call_test(const char *cmd, char *argv[], uint32 argc)
+{
+    call_test_flag = 1;
+    _os_printf("recv call test...\n");
+    return 0;
+}
+static int32 set_dev_status(const char *cmd, char *argv[], uint32 argc)
+{
+    if (argc < 1 || !argv[0]) return ATCMD_RESULT_ERR;
+    int status = os_atoi(argv[0]);
+    _os_printf("recv dev status test %d\n", status);
+    dev_status = status;
+    dev_status_test = 1;
+    return ATCMD_RESULT_OK;
+}
+
+
 static const struct hgic_atcmd static_atcmds[] = {
     ///////////////////////////////////////////////////
     /* 常用调试 AT指令          */
@@ -48,6 +69,7 @@ static const struct hgic_atcmd static_atcmds[] = {
     { "AT+HEAP", sys_heap_dump_hdl },
 	{ "AT+INMAP", sys_get_gpio_imap},
 	{ "AT+OUTMAP", sys_get_gpio_omap},
+    { "AT+VCAM2", sys_vcam2_conflict_detect},
 	{ NULL, sys_empty_atcmd},  //用于调用cpu1的atcmd
 
     /* WiFi参数设置 AT指令          */
@@ -96,6 +118,8 @@ static const struct hgic_atcmd static_atcmds[] = {
     { "AT+FPV_HEAP", fpv_atcmd_check_heap },
     { "AT+FPV_DBG", fpv_atcmd_dbg },
 #endif
+    { "AT+CALL_TEST", call_test },
+    { "AT+DEV_TEST",  set_dev_status },
 
 #ifdef SYS_APP_BBM_LCD
     { "AT+SWITCH_VIDEO", atcmd_babyprotocol_switch_device },
@@ -103,7 +127,7 @@ static const struct hgic_atcmd static_atcmds[] = {
     { "AT+CHANGE_LARGE", atcmd_babyprotocol_change_larger },
 #endif
 
-#ifdef SYS_APP_BBM_CAM    
+#ifdef SYS_APP_BBM_CAM
     { "AT+RECORD", atcmd_bbm_client_record },
     { "AT+PLAYBACK", atcmd_bbm_client_playback },
 #endif

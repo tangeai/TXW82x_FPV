@@ -220,32 +220,42 @@ static void udp_handle_server_status_read_workqueue(void *ei, uint32_t *status_f
 	
 	CHILDREN_DBG("RE");
 }
+static EVT_HDL event_fd = NULL;
+static void server_status_read_exit(void *ei, void *d)
+{
+	if(walkmsg.run_state == 0) {
+		os_printf("%s\n",__FUNCTION__);
+		closesocket(handle_protocol_fd);
+		handle_protocol_fd = -1;
+		eloop_remove_event(event_fd);
+	}
+}
 
-
+static struct sockaddr_in addrServer_status;
 void udp_handle_server_status_thread(void *d){	
 	uint16_t *port;
-	struct sockaddr_in addrServer;
 	in_addr_t cli_addr;
 	int32_t err;
-	memset(&addrServer,0,sizeof(struct sockaddr_in));
+	memset(&addrServer_status,0,sizeof(struct sockaddr_in));
 
 	port = d;
 	CHILDREN_DBG("data   server:%d\r\n",*port);
-	addrServer.sin_family=AF_INET;
-	addrServer.sin_addr.s_addr= inet_addr("255.255.255.255");//client_addr;//inet_addr("192.168.169.1");
-	addrServer.sin_port=htons(*port);
-	EVT_HDL event_fd = eloop_add_fd( handle_protocol_fd, EVENT_READ, EVENT_F_ENABLED, (void*)udp_handle_server_status_read_workqueue, &handle_protocol_fd );
+	addrServer_status.sin_family=AF_INET;
+	addrServer_status.sin_addr.s_addr= inet_addr("255.255.255.255");//client_addr;//inet_addr("192.168.169.1");
+	addrServer_status.sin_port=htons(*port);
+	event_fd = eloop_add_fd( handle_protocol_fd, EVENT_READ, EVENT_F_ENABLED, (void*)udp_handle_server_status_read_workqueue, &handle_protocol_fd );
 	user_protocol_task_increase();
 	while(1){
-		if(walkmsg.run_state == 0)
+		if(walkmsg.run_state == 0) {
+			eloop_add_alarm(os_jiffies(),EVENT_F_ENABLED,server_status_read_exit,(void *)handle_protocol_fd);
 			break;
+		}
 		cli_addr = net_s_h264_sema_down(10, &err);
 		if(err == RET_OK) {
-			addrServer.sin_addr.s_addr = cli_addr;
-			eloop_add_alarm(os_jiffies(),EVENT_F_ENABLED,udp_handle_server_status_write_workqueue,(void *)&addrServer);   //eventloop send
+			addrServer_status.sin_addr.s_addr = cli_addr;
+			eloop_add_alarm(os_jiffies(),EVENT_F_ENABLED,udp_handle_server_status_write_workqueue,(void *)&addrServer_status);   //eventloop send
 		}
 	}
-	eloop_remove_event(event_fd);
 	user_protocol_task_decrease();
 }
 
@@ -586,7 +596,7 @@ void udp_handle_server_decode_to_lcd_thread(){
 									h = 120;
 								}
 								
-								scale2_recfg_input_size(w,h,0);
+								// scale2_recfg_input_size(w,h,0);
 								oldw = w;
 								oldh = h;
 							}
@@ -630,7 +640,7 @@ void udp_handle_server_init(uint16_t status_port,uint16_t data_port)
 	port_status = status_port;
 	handle_protocol_fd = usr_protocol_create_server(port_status); 
 	port_data = data_port;
-	handle_data_protocol_fd = usr_protocol_create_server(port_data);	
+	handle_data_protocol_fd = usr_protocol_create_server(port_data);
 	csi_kernel_task_new((k_task_entry_t)udp_handle_server_status_thread, "handle_udp_pkt", &port_status, 25, 0, NULL, 1024, &handle_task_recv);
 	csi_kernel_task_new((k_task_entry_t)udp_handle_server_data_thread, "handle_data_udp_pkt", &port_data, 25, 0, NULL, 1024, &handle_data_task_recv);
 	os_printf("status:%d  data:%d\r\n",handle_protocol_fd,handle_data_protocol_fd);
@@ -641,10 +651,6 @@ void udp_handle_server_deinit(void)
 {
 	while(walkmsg.run_task > 0)
 		os_sleep_ms(1);
-	if(handle_protocol_fd != -1) {
-		close(handle_protocol_fd);
-		handle_protocol_fd = -1;
-	}
 	if(handle_data_protocol_fd != -1) {
 		close(handle_data_protocol_fd);
 		handle_data_protocol_fd = -1;

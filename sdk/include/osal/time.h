@@ -25,6 +25,7 @@ int32 timespec_add_nanosec(const struct timespec *x, int64 llNanoseconds, struct
 int32 timespec_sub(const struct timespec *x, const struct timespec *y, struct timespec *result);
 int32 timespec_cmp(const struct timespec *x, const struct timespec *y);
 int32 timespec_validate(const struct timespec *time);
+int gettimeofday2(struct timeval *ptimeval, uint64 msec);
 
 uint64 os_jiffies_to_msecs(uint64 jiff); //tick数 转换为 毫秒数
 uint64 os_msecs_to_jiffies(uint64 msec); //毫秒数 转换为 tick数

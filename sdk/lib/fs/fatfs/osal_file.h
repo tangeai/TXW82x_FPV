@@ -13,6 +13,7 @@
 	typedef FIL	F_FILE;
 #endif
 
+F_FILE *osal_open(const char *filename, int oflags, int mode);
 int osal_fopen_no_malloc(F_FILE *fp,const char *filename,const char *mode);
 F_FILE *osal_fopen(const char *filename,const char *mode);
 uint32_t osal_fread(void *ptr,uint32_t size,uint32_t nmemb,F_FILE *fp);

@@ -7,6 +7,7 @@
 #include "lib/video/mipi_csi/mipi_csi.h"
 #include "lib/video/h264/h264_drv.h"
 #include "lib/video/vpp/vpp_dev.h"
+#include "lib/video/dual/dual_org_dev.h"
 #include "lib/video/para_in/para_in_dev.h"
 #include "lib/multimedia/msi.h"
 #include "stream_define.h"
@@ -51,6 +52,7 @@
 #include "takephoto_module/takephoto.h"
 #include "scale_msi/scale3_normal_msi.h"
 #include "mp4_encode_msi2.h"
+#include "battery_det.h"
 
 
 int32 atcmd_recv(uint8 *data, int32 len);
@@ -85,7 +87,7 @@ __init static void fpv_app_init(void)
 
 
     eloop_init();
-    os_task_create("eloop_run", user_eloop_run, NULL, OS_TASK_PRIORITY_NORMAL + 2, 0, NULL, 2048);
+    os_task_create("eloop_run", user_eloop_run, NULL, OS_TASK_PRIORITY_ABOVE_NORMAL + 2, 0, NULL, 2048);
     os_sleep_ms(1);
     ota_Tcp_Server();
 
@@ -318,19 +320,18 @@ static void hardware_init(uint8_t vcam)
 #endif
 
 #if TOUCH_PAD_EN
-    touch_pad_hareware_init();
+    touch_pad_hardware_init();
 #endif
 
 #if DUAL_EN
-	void dorg_double_sensor(uint32 src0_w,uint32 src0_h,uint32 src1_w,uint32 src1_h,uint32 src0_raw_num,uint32 src1_raw_num,uint8_t dvp_type,uint8_t csi0_type,uint8_t csi1_type);
     dorg_double_sensor(1280, 720, 1280, 720, RAW8, RAW10,1,2,3);
 #endif
 
 #if AUDIO_EN
-	reg_auproc_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-	reg_wsola_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-	reg_aures_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-    reg_aucoder_alloc(av_malloc, av_zalloc, av_calloc, av_realloc, av_free);
+	reg_auproc_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+	reg_wsola_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+	reg_aures_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+    reg_aucoder_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
     aucode_mutex_init();
     audio_adc_init(AUSYS_AUAD, 8000, 1, 4, 1);
     audio_dac_init();
@@ -384,10 +385,10 @@ static void hardware_init(uint8_t vcam)
     };
     #else
 	struct hg_lv_mem_hooks hook = {
-        .malloc  = av_psram_malloc,
-        .realloc = av_psram_realloc,
-        .zalloc  = av_psram_zalloc,
-        .free    = av_psram_free,
+        .malloc  = _os_malloc_psram,
+        .realloc = _os_realloc_psram,
+        .zalloc  = _os_zalloc_psram,
+        .free    = _os_free_psram,
     };
     #endif
     hg_lv_mem_register(&hook);
@@ -428,6 +429,8 @@ static int32 sys_fpv_loop(struct os_work *work)
 *******************************************************************/
 int sys_app_walkie_talkie_init(void)
 {
+	poweron_check();
+	
     print_level(7); 
     disable_print_color(1);
     uint8_t vcam;

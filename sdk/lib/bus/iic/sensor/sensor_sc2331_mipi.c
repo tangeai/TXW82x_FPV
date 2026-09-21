@@ -628,23 +628,12 @@ const _Sensor_ISP_Init sc2331_isp_init =
 
 SENSOR_OP_SECTION const _Sensor_Adpt_ sc2331_cmd= 
 {	
-	.typ = 1, //YUV
 	.pixelw = 1920,
 	.pixelh = 1080,
-	.hsyn = 1,
-	.vsyn = 0,
-	.rduline = 0,//
-	.rawwide = 1,//10bit
-	.colrarray = 2,//0:_RGRG_ 1:_GRGR_,2:_BGBG_,3:_GBGB_
 	.init = (uint8 *)sc2331InitTable,
-    .init_len = sizeof(sc2331InitTable),
     .mipi_lane_num = 2,
     .vts_reg = {0x320e,0x320f},
     .vts_reg_num = 2,
-	.rotate_adapt = {0},
-	.hvb_adapt = {0x80,0x0a,0x80,0x0a},
-	.mclk = 9000000,
-	.p_fun_adapt = {NULL,NULL,NULL},
     .sensor_isp = (_Sensor_ISP_Init *)&sc2331_isp_init,
 };
 

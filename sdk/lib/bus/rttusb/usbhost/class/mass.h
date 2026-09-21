@@ -18,7 +18,7 @@
 #include "ff.h"
 
 
-#define MAX_PARTITION_COUNT        4
+#define MAX_PARTITION_COUNT        1
 #define SECTOR_SIZE                512
 
 struct ustor_data
@@ -39,8 +39,19 @@ struct ustor_device
     void *user_data; 
 };
 
+struct udisk_device
+{
+    rt_uint32_t count;
+    rt_uint32_t sector_size;
+    rt_uint8_t *rx_buff;
+    rt_uint8_t *tx_buff;
+    struct ustor_data* user_data;
+    struct uhintf* intf;
+};
+
 struct ustor
 {
+    struct udisk_device *udisk;
     upipe_t pipe_in;
     upipe_t pipe_out;
     rt_uint32_t capicity[2];
@@ -48,6 +59,7 @@ struct ustor
     struct ustor_device dev[MAX_PARTITION_COUNT];
     rt_uint8_t dev_cnt;
     rt_uint32_t ref;
+    void *csw_buff;
 };
 typedef struct ustor* ustor_t;
 

@@ -492,7 +492,7 @@ typedef struct {
     uint32_t heap_flag;
     uint32_t afh_chan_mask;
     uint32_t psram_rsv_addr_core0;
-    
+    uint32_t lmac_module_init_mask;
 } txw82x_CoreSetting;
 #define CoreSetting   ((txw82x_CoreSetting *) CORESETTING_BASE)
 

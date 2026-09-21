@@ -38,6 +38,10 @@ enum SYSEVT_SYSTEM_SUBEVT { /* uint16 */
     SYSEVT_SYSTEM_SD_MOUNT,
     SYSEVT_SYSTEM_SD_UNMOUNT,
     SYSEVT_TASK_DELETE,
+    SYSEVT_SYSTEM_PLUGIN,        ///< 设备插入
+    SYSEVT_SYSTEM_PLUGOUT,       ///< 设备拔出
+    SYSEVT_SYSTEM_USB_MOUNT,     ///< USB 设备文件系统挂载成功
+    SYSEVT_SYSTEM_USB_UNMOUNT,   ///< USB 设备文件系统卸载
 };
 #define SYSEVT_NEW_SYSTEM_EVT(subevt, data)    sys_event_new(SYS_EVENT(SYS_EVENT_SYSTEM, subevt), data)
 

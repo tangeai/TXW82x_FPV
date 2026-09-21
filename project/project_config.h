@@ -2,7 +2,7 @@
 #define __SDK_PROJECT_CONFIG_H__
 
 
-#define CUSTOMER_ID 3
+#define CUSTOMER_ID 12
 
 /*
  * CUSTOMER_ID :
@@ -13,12 +13,13 @@
  * 4 82xApp_1080P_Demo
  * 5 82xApp_720P_to_1080P_Demo
  * 6 82xApp_UVC_Demo
- * 7 82xApp_walkie_talkie_fem_Demo (只能方案板使用，同时需修改io配置文件)
+ * 7 82xApp_walkie_talkie_fem_Demo
  * 8 82xApp_LCD_Demo
  * 9 82xApp_baby_monitor_lcd_fem_Demo
  * 10 82xApp_baby_monitor_cam_fem_Demo
  * 11 82xApp_LCD_MP4_Player_Demo
  * 12 82xApp_Double_Sensor_Splice_Demo
+ * 13 82xApp_AHD720_1080P_Demo
 */
 #if (CUSTOMER_ID == 1)
 #define SYS_APP_FPV
@@ -76,8 +77,14 @@
 
 /*================== end =================*/
 
+/***********************************************************
+ * BLE
+ * ********************************************************/
+#define BLE_SUPPORT         1
+#define BLE_UUID_128        1
+
 /* BLE蓝牙配网模式选择 */
-#define BLE_PROV_MODE                   2   // 1：广播配网（微信小程序），2： BLE 配网（需支持共存）
+#define SYS_APP_BLENC                   2   // 1：广播配网（微信小程序），2： BLE 配网（需支持共存）
 #define WIRELESS_PAIR_CODE              0
 
 #define GMAC_EN                         0 // 有线网卡需要使能GMAC
@@ -202,12 +209,6 @@
 //是能5m/20m共存和自动带宽切换，
 //#define WIFI_FEM_CHIP     LMAC_FEM_GSR2401C
 //#define LMAC_BGN_PCF
-            
-/***********************************************************
- * BLE
- * ********************************************************/
-#define BLE_SUPPORT         1
-#define BLE_UUID_128        1
 
 #define DEV_SENSOR_GC1084               1
 #define DEV_SENSOR_GC2053               1
@@ -539,12 +540,6 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 #define MAX_SINGLE_MP4_SIZE (100 * 1024 * 1024)
 
 /************************************************************************
- * 720P摄像头的H264辅码流
- * 录风者设置图传是H264,则RECORDER_MODE等于0即可
- ************************************************************************/
-#define RECORDER_MODE 0
-
-/************************************************************************
 * 开启文件系统优化
  ************************************************************************/
 #define USE_FAT_CACHE 1
@@ -759,13 +754,6 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 * 配置MP4录制最大文件的size
  ************************************************************************/
 #define MAX_SINGLE_MP4_SIZE (100 * 1024 * 1024)
-
-/************************************************************************
- * 1080P摄像头的mjpeg辅码流
- * 录风者设置图传是mjpeg,则RECORDER_MODE等于1即可
- ************************************************************************/
-#define RECORDER_MODE 1
-
 
 /************************************************************************
 * 开启文件系统优化
@@ -986,14 +974,6 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
  ************************************************************************/
 #define MAX_SINGLE_MP4_SIZE (100 * 1024 * 1024)
 
-/************************************************************************
- * 720P摄像头的H264辅码流
- * 录风者设置图传是H264,则RECORDER_MODE等于0即可
- ************************************************************************/
-#define RECORDER_MODE 0
-
-
-
 /***********************************************************
  * 插值打开相关的宏
  * FORCE_SCALE_TO_H264:强行将h264插值到对应分辨率
@@ -1176,12 +1156,12 @@ UVC的配置
 #elif (CUSTOMER_ID == 7)
 
 #define SYS_APP_WALKIE_TALKIE
-#define DEFAULT_SYS_CLK                 (240*1000000) 
+#define DEFAULT_SYS_CLK                 (192*1000000) 
 #define PSRAM_HEAP          //如果需要psram当作heap,需要打开这个宏
 #define AV_PSRAM_HEAP    
 #define AV_HEAP
-#define CONFIG_PSRAM_AVHEAP_SIZE        (3*1024*1024+600*1024)
-#define CONFIG_AVHEAP_SIZE              (145*1024)
+#define CONFIG_PSRAM_AVHEAP_SIZE        (3*1024*1024+500*1024)
+#define CONFIG_AVHEAP_SIZE              (120*1024)
 //#define MEM_TRACE
 #define PIN_FROM_PARAM
 
@@ -1305,6 +1285,7 @@ UVC的配置
 #define WIFI_MODE_DEFAULT               WIFI_MODE_STA
 #define WIFI_BSSBW_DEFAULT              10
 #define BSS_MAX_IDLE_DEFAULT            10
+#define OS_TIMER_MSG_NUM                (60)
 
 #define WIFI_FEM_CHIP     LMAC_FEM_GSR2701_5V
 #define LMAC_BGN_PCF
@@ -1619,6 +1600,7 @@ UVC的配置
 #define WIFI_MODE_DEFAULT               WIFI_MODE_AP
 
 #define DEFINE_UI    					BBM_UI
+#define OS_TIMER_MSG_NUM                (60)
 
 #elif (CUSTOMER_ID == 10)
 
@@ -1639,7 +1621,7 @@ UVC的配置
 #define VPP_EN                          1
 #define ISP_EN                          1
 #define FTUSB3_EN                       (0 && ISP_EN)
-#define JPG_EN                          0
+#define JPG_EN                          1
 #define SCALE_EN                        1
 #define H264_EN                         1
 #define SDH_EN                          1
@@ -1745,6 +1727,7 @@ UVC的配置
 #define LMAC_BGN_PCF
 
 #define WIFI_MODE_DEFAULT               WIFI_MODE_STA
+#define OS_TIMER_MSG_NUM                (60)
 
 #elif (CUSTOMER_ID == 11)
 /*****************************************************************************
@@ -1804,7 +1787,7 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 				
  
  *********************************************************************************************************************************************/
-#define CONFIG_AVHEAP_SIZE              (100*1024 + 50*1024)
+#define CONFIG_AVHEAP_SIZE              (100*1024 + 75*1024)
 
 
 /******************************************************************************
@@ -1938,13 +1921,6 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 #define MAX_SINGLE_MP4_SIZE (100 * 1024 * 1024)
 
 /************************************************************************
- * 1080P摄像头的mjpeg辅码流
- * 录风者设置图传是mjpeg,则RECORDER_MODE等于1即可
- ************************************************************************/
-#define RECORDER_MODE 1
-
-
-/************************************************************************
 * 开启文件系统优化
  ************************************************************************/
 #define USE_FAT_CACHE 1
@@ -1969,15 +1945,17 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 #define LCD_ST7735_EN                   0
 
 #elif (CUSTOMER_ID == 12)
+#define __TXW828__                      1
+
 /*****************************************************************************
- * 720P摄像头(帧率主要看摄像头配置表,SDK默认1084 25帧)
- * 主码流(H264):1280x720 @ 25fps
- * 辅码流(H264):640x360  @ 25fps
- * 录卡(MP4):主码流+aac音频(8KHz/16bit)
- * 拍照(MJPG):1280x720
- * 图传:RTSP  辅码流  默认地址:rtsp://ip:554/h264?1
- * 回放:录风者采用下载模式去解码mp4回放
- * 文件系统:FAT32、EXFAT(配合ffconf.h设置)
+ * 双 GC1084 720P 摄像头，外部 FSYNC 同步为 15fps
+ * 主码流(H264):两路纵向拼接为 1280x1440 @ 15fps
+ * 辅码流(H264):两路纵向拼接为 640x720   @ 15fps
+ * 录卡(MP4):双目拼接 H264 + AAC 单文件，音频 8kHz、单声道
+ * 拍照(MJPG):双目上下拼接 1280x1440，使用 snapshot_bare.c 裸调 JPG 硬件
+ * 图传:探鸽 P2P 主/辅码流，实时音频为 G.711A
+ * 回放:探鸽 P2P，设备端将 AAC 解码为 PCM，再转 G.711A 发给 APP
+ * 文件系统:FAT32、EXFAT(配合 ffconf.h 设置)
  ****************************************************************************/
 
 /***************************************************************
@@ -1995,40 +1973,28 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
  * CONFIG_PSRAM_AVHEAP_SIZE:为应用分配的psram宏,需要根据应用场景分配
  * PSRAM_HEAP:如果需要用到psram,需要打开PSRAM_HEAP
  ********************************************************************/
-#define DEFAULT_SYS_CLK                 (192*1000000) 
-#define PSRAM_HEAP          //如果需要psram当作heap,需要打开这个宏
-#define AV_PSRAM_HEAP    
+#define DEFAULT_SYS_CLK                 (192*1000000)
+#define PSRAM_HEAP                      //如果需要psram当作heap,需要打开这个宏
+#define AV_PSRAM_HEAP
 #define AV_HEAP
 
-
-/*******************************************************************************************************************************************
-1080P摄像头空间分配(如果没有其他要求,会将大部分空间给到视频)
-H264：  I/P帧:3.1M+0.5M(默认,根据I帧P帧最大值进行调整)
-		纯I帧:0.5M
-		h264数据缓冲size: 64帧(最大缓冲)*100K(平局每一帧size) = 6M左右  (如果终端应用不会卡太久,这里可以分配2M-3M左右,这个是动态的)
-		(64帧是最大缓冲数量,100K需要根据自己h264配置调整,缓冲帧数大是解决录卡不会轻易丢帧,参数都是可以调整,根据产品来调整)
-
-MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质量需要调整,如果是大分辨率拍照4K、8K,需要1M
-
-所以这里需要空间粗略计算就是 3.1M+0.5M+0.5M + 3M(h264+mjpg数据共用动态) ≈ 7M
-
-由于MJPG与H264共用,会造成一定碎片化,可以适当将空间h264和MJPG独立分开,默认SDK没有分开
-*********************************************************************************************************************************************/
+/*****************************************************************************
+ * 双目视频的 PSRAM 空间分配
+ * AV PSRAM 堆为 5.5MB，供 H264/JPG 帧缓存及音视频模块动态分配。
+ * 主/辅码流、卡录像、回放和抓拍并发时，需要结合实际内存水位调整。
+ ****************************************************************************/
 #define CONFIG_PSRAM_AVHEAP_SIZE        (5*1024*1024+512*1024)
 
-/**********************************************************************************************************************************************
- * 不同镜头以及功能不一样
- * 没有考虑大分辨拍照模式
- * 720P镜头:  60K(VPP_DATA0)(1080P h264) = 60k
-			  辅码流:  12K(gen420) = 12K
-			  其他:  10K(解码) + 其他(某些结构体用到) ≈ 15K
-				
-    total:  95K(没有额外功能,可以运行,如果空间足够,尽量到100K)
-	
-				
- 
- *********************************************************************************************************************************************/
-#define CONFIG_AVHEAP_SIZE              (100*1024 + 30*1024)
+/*****************************************************************************
+ * 音视频模块的 SRAM 空间分配
+ * AV SRAM 堆为 100KB，用于视频处理及模块控制结构等分配。
+ ****************************************************************************/
+#define CONFIG_AVHEAP_SIZE              (100*1024)
+
+/* 按实际产品的 8MB PSRAM 容量调试。
+ * system_psram_init() 将可用 PSRAM 限制到此容量；
+ * 开发板即使配有更大 PSRAM，也按当前产品的内存预算运行。 */
+#define SIMULATE_PSRAM_SIZE_MB          8
 
 /******************************************************************************
  * wifi的必要参数配置
@@ -2058,22 +2024,23 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 #define DHCPD_DNS2_DEFAULT              0x01A9A8C0  //192.168.169.1
 #define DHCPD_ROUTER_DEFAULT            0x01A9A8C0  //192.168.169.1
 
-
-#define VPP_BUF0_LINEBUF_NUM           7
+#define VPP_BUF0_LINEBUF_NUM            7
 /***************************************************************
  * 蓝牙
  **************************************************************/
-//#define BLE_SUPPORT                 1
+/* 探鸽 BLE GATT 配网：未注册时与 AP 热点配网并行启动，WiFi 连上后自动关闭。 */
+#define BLE_SUPPORT                     1
+#define BLE_PROV_MODE                   2   //1：广播配网；2：BLE GATT 配网
+#define SYS_APP_BLENC                   1   //启用 BLE 配网业务
 
 /****************************************************************
  * wifi速率配置,根据不同场景需要距离等去配置特定速率算法
-#define RATE_CONTROL_ERSHAO         1
-#define RATE_CONTROL_HANGPAI        2
-#define RATE_CONTROL_IPC            3
-#define RATE_CONTROL_BABYMPNITOR    4
+#define RATE_CONTROL_ERSHAO             1
+#define RATE_CONTROL_HANGPAI            2
+#define RATE_CONTROL_IPC                3
+#define RATE_CONTROL_BABYMPNITOR        4
  ***************************************************************/
 #define RATE_CONTROL_SELECT             3
-
 
 /*****************************************************************
  * VCAM开关,部分io电源域需要打开才有电
@@ -2092,24 +2059,32 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 #define SCALE_EN                        1
 
 /*******************************************************************
- * 打开拍照模式(紧紧支持录风者模式)
+ * 原厂拍照模式（仅用于录风者）
  ******************************************************************/
-#define TAKEPHOTO_EN                      1
-
-
-/*******************************************************************
- * 支持h264的副码流
- ******************************************************************/
-#define SUB_STREAM_EN 					1
+ //#define TAKEPHOTO_EN                      1
 
 
 /*****************************************************************
- * sd使能
+ * SD 卡及文件系统使能（卡录像和探鸽 P2P 回放依赖）
  ***************************************************************/
 #define SDH_EN                          1
 #define FS_EN                           1
 
+/* ============================================================================
+ * 卡录像码流选择 (rec_playback_mp4aac 模块用)
+ *   0 = 主码流：VPP_DATA0，1280x1440 @ 15fps，高画质（当前配置）
+ *   1 = 辅码流：GEN420，640x720 @ 15fps，降低 SD 占用
+ * 两种码流都包含双目拼接画面；此处为编译配置，APP 不动态切换录像码流。
+ * 循环回收水位由 rec_playback.h 中的 REC_LOOP_REMAIN_MB 配套选择。 */
+#define REC_STREAM_TYPE                 0
 
+/* 卡录像固定使用 H264 + AAC 单 MP4，音视频写入同一文件。 */
+/* AAC 编/解码控制。
+ * encoder 负责将采音编码为 AAC 写入 MP4；回放时 decoder 将 AAC 解码为 PCM，
+ * 再转 G.711A 发给 APP，与实时音频格式保持一致，因此两者都需要开启。
+ * 1 = AUCODER_RUN_IN_CPU0。 */
+#define AAC_ENC_CTRL                    1
+#define AAC_DEC_CTRL                    1
 
 /************************************************************************************************************************
  * sensor型号配置,配置多个,支持自动识别(当前SDK只能支持全部单line或者双line,包含单line和双line需要对sdk初始化修改)
@@ -2133,17 +2108,20 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
 #define DEV_SENSOR_F37P                 0
 #define DEV_SENSOR_TP9950               0
  ***************************************************************************************************************************/
-//#define DEV_SENSOR_SC1346               1
+#define DEV_SENSOR_SC1346               1
 #define DEV_SENSOR_GC1084               1
 #define DEV_SENSOR_GC2053               1
-#define DEV_SENSOR_GC1084_CSI1 			1
+#define DEV_SENSOR_GC1084_CSI1          1
+#define DEV_SENSOR_SC1346_CSI1 			1
 
 
 /***********************************************************
  *音频及功放使能io配置
  * ********************************************************/
 #define AUDIO_EN                        1
-#define AAC_ENC_CTRL 					1
+/* 采音周期为 40ms：8kHz、16bit、单声道时每帧 320 个采样点。
+ * 实时音频转 G.711A，卡录像由 AAC 编码器复用同一采音源。 */
+#define AUADC_TIME_INTERVAL             40
 
 /***********************************************************
  *默认mjpeg的节点数量,要根据mjpeg启动的分辨率去考虑
@@ -2152,51 +2130,219 @@ MJPG(1路):  MJPG:  10-30(mjpg节点)*16K = 160K-480K  (不同分辨率以及质
  1080P:算mjpeg大小100-150K,给20个节点足够
  其他分辨率,根据实际情况去配置
  * ********************************************************/
-#define JPG_NODE_COUNT 30
+#define JPG_NODE_COUNT                  10
 
 /*************************************************************
  * 节省sram内存,将部分模块强制使用psram
  * 优点:节省sram内存
  * 缺点:psram读写慢,可能会影响性能
- 
- 1080P的sram内存不足,将部分数据放到了psram
+
+ * 双目并发业务需要节省 SRAM，将部分数据放到 PSRAM。
  ************************************************************/
 #define MORE_SRAM
 
 /*************************************************************
- * 720P摄像头的mjpeg辅码流需要打开VPP_BUF1_EN
- * 720P的辅码流是h264(gen420),注意SUB_STREAM_WIDTH需要是与镜头
-   等比例关系,包括是H(sdk默认这个是等比例,所以不需要配置H)
+ * 双目辅码流及帧缓存配置
+ * 辅码流使用 H264 (GEN420)，SUB_STREAM_WIDTH 为 640 时，
+ * 当前双目纵向拼接后的辅码流尺寸为 640x720。
  ************************************************************/
-#define VPP_BUF1_EN 1
-#define PSRAM_FRAME_SAVE 1
-#define SUB_STREAM_WIDTH    640
+#define SUB_STREAM_EN                   1
+#define VPP_BUF1_EN                     1
+#define PSRAM_FRAME_SAVE                1
+#define SUB_STREAM_WIDTH                640
 
 /************************************************************************
-* 配置解码最大的size,如果不需要特殊size解码,这个配置320x180(缩略图用)
-* 配置解码缓冲区节点数量(预分配空间,没有解码要求,默认1个节点就够了)
+ * 原厂图像解码缓冲配置：最大 320x180，预分配 1 个节点。
+ * 探鸽 P2P 回放直接发送 H264 码流，此处不代表录像或回放分辨率。
  ************************************************************************/
-#define DECODE_MAX_W    320
-#define DECODE_MAX_H    180
-#define MAX_DECODE_YUV_TX 1
+#define DECODE_MAX_W                    320
+#define DECODE_MAX_H                    180
+#define MAX_DECODE_YUV_TX               1
 
 /************************************************************************
-* 配置MP4录制最大文件的size
+ * 原厂 MP4 最大文件空间及缩略图配置
+ * 探鸽单 MP4 录像使用动态文件大小，按时长切片，不按此值预分配。
+ * MP4_THUMB_SPLICE_EN 保留原厂拼接能力，探鸽录像运行时关闭缩略图。
  ************************************************************************/
-#define MAX_SINGLE_MP4_SIZE (100 * 1024 * 1024)
-#define MP4_THUMB_SPLICE_EN 1 //开启MP4 THUMB拼接功能
+#define MAX_SINGLE_MP4_SIZE             (100 * 1024 * 1024)
+#define MP4_THUMB_SPLICE_EN             1
 
 /************************************************************************
- * 720P摄像头的H264辅码流
- * 录风者设置图传是H264,则RECORDER_MODE等于0即可
+ * 开启文件系统优化
  ************************************************************************/
-#define RECORDER_MODE 0
+#define USE_FAT_CACHE                   1
 
-/************************************************************************
-* 开启文件系统优化
- ************************************************************************/
-#define USE_FAT_CACHE 1
+/*****************************************************************************
+ * 网络模块参数（探鸽双目主/辅码流及 P2P 业务）
+ ****************************************************************************/
+
+#define LWIP_WND_SCALE                  1
+#define TCP_RCV_SCALE                   2
+
+#define CONFIG_CORE_HEAP_SIZE           (48*1024)
+#define CONFIG_CORE_SKB_POOL_SIZE       (768*1024)
+
+#define TCPIP_MBOX_SIZE                 320
+#define DEFAULT_UDP_RECVMBOX_SIZE       256
+#define DEFAULT_TCP_RECVMBOX_SIZE       64
+#define DEFAULT_ACCEPTMBOX_SIZE         16
+
+#define MEM_SIZE                        320*1024
+#define MEMP_NUM_PBUF                   256
+#define MEMP_NUM_NETCONN                20
+#define MEMP_NUM_NETBUF                 256
+#define MEMP_NUM_UDP_PCB                8
+#define MEMP_NUM_TCP_PCB                12
+#define MEMP_NUM_TCP_SEG                256
+#define PBUF_POOL_SIZE                  160
+
+#define TCP_SND_BUF                     (80 * TCP_MSS)
+#define TCP_WND                         (40 * TCP_MSS)
+#define TCP_SNDLOWAT                    (40 * TCP_MSS)
+#define TCP_SND_QUEUELEN                (192)
+#define TCP_SNDQUEUELOWAT               (96)            /* QUEUELEN/2 */
+#define TCP_TMR_INTERVAL                50
+
+#define DNS_MAX_NAME_LENGTH             256
+#define TCPIP_THREAD_PRIO               OS_TASK_PRIORITY_HIGH
+#define DNS_TABLE_SIZE                  4
+
+#elif (CUSTOMER_ID == 13)
+/***************************************************************
+ * 打开PIN_FROM_PARAM,通过脚本和config.cfg去生成对应的io配置信息
+ * 请查看重要的文件:pin_param.h、config.cfg两个文件
+ *************************************************************/
+#define PIN_FROM_PARAM
+
+/*****************************************
+ * 打开对应demo的宏
+ ****************************************/
+#define SYS_APP_DOUBLE_SENSOR
+
+/**********************************************************************
+ * 系统必要信息宏
+ * CONFIG_PSRAM_AVHEAP_SIZE:为应用分配的psram宏,需要根据应用场景分配
+ * PSRAM_HEAP:如果需要用到psram,需要打开PSRAM_HEAP
+ ********************************************************************/
+#define DEFAULT_SYS_CLK                 (240*1000000) 
+
+
+#define ISP_PLL1_2X_CLK_SEL_VALUE       5
+
+
+#define PSRAM_HEAP              //如果需要psram当作heap,需要打开这个宏
+#define AV_PSRAM_HEAP    
+#define AV_HEAP
+#define CONFIG_PSRAM_AVHEAP_SIZE        (7*1024*1024+512*1024)
+#define CONFIG_AVHEAP_SIZE              (100*1024 + 70*1024)
+
+/*****************************************************************
+ * VCAM开关,部分io电源域需要打开才有电
+ *****************************************************************/
+#define VCAM_EN                         1
+#define VCCSD_33                        0
+
+/*******************************************************************
+ * 图像编码相关参数
+ * 根据sensor的类型打开 DVP_EN 或者是 MIPI_CSI_EN
+ * DUAL_EN     : 多个sensor打开，空间不足保持关闭
+ * H264_I_ONLY : 1080p 打开
+ ******************************************************************/
+#define DET_EN							0
+#define DVP_EN                          0
+#define MIPI_CSI_EN                     1
+#define DUAL_EN                         1
+#define VPP_EN                          1
+#define ISP_EN                          1
+#define JPG_EN                          1
+#define H264_EN                         1
+#define H264_I_ONLY                     1
+#define SCALE_EN                        1
+#define SDH_EN                          1
+#define FS_EN                           1
+/***************************************************
+ * sensor型号配置
+#define DEV_SENSOR_OV7725               0
+#define DEV_SENSOR_OV7670               0
+#define DEV_SENSOR_OV9734				0
+#define DEV_SENSOR_GC0308               0
+#define DEV_SENSOR_OV2640               0
+#define DEV_SENSOR_BF3A03               0
+#define DEV_SENSOR_BF2013               0
+#define DEV_SENSOR_OV2685               0
+#define DEV_SENSOR_BF30A2               0
+#define DEV_SENSOR_H62                  0
+#define DEV_SENSOR_H63P                 0
+#define DEV_SENSOR_SC1346               0
+#define DEV_SENSOR_GC1084               0
+#define DEV_SENSOR_GC2083               0
+#define DEV_SENSOR_GC2053               0
+#define DEV_SENSOR_GC20C3               0
+#define DEV_SENSOR_SC2336P              0
+#define DEV_SENSOR_SC2331               0
+#define DEV_SENSOR_F38P                 0
+#define DEV_SENSOR_F37P                 0
+#define DEV_SENSOR_TP9950               0
+ **************************************************/
+#define DEV_SENSOR_XS9950               1
+#define DEV_SENSOR_GC2053   			1
+#define DEV_SENSOR_GC2083   			1
+#define DEV_SENSOR_GC2053_CSI1			1
+#define DEV_SENSOR_GC2083_CSI1			1
+
+#if 0
+/***********************************************************
+ * USB相关宏配置（必须打开）
+ ************************************************************/
+ /* ------ USB1.1 ----- */
+#define USB11_EN                        0
+#define USB11_HOST_EN                   0
+/* ------ USB2.0 ----- */
+#define USB_EN                          1
+#define USB_HOST_EN                     0
+#define MACBUS_USB
+#define USBDISK                         1   //1代表将sd卡作为u盘   2代表将flash作为usb盘,需要配合USB_EN使用,并且其他宏不能有冲突
+
+/*=========== RTT USB架构宏定义 ==========*/
+#define RTT_USB_EN                      1   //RTT USB 架构使能 (USB_EN打开)
+#define USB_DETECT_EN                   0   //USB 主从检测使能 (USB_HOST_EN关闭、USB_EN打开)
+
+/*           USB DEVICE           */
+
+#define RT_USING_USB_DEVICE          //RTT USB DEVICE 使能
+
+#define RT_USB_DEVICE_COMPOSITE       //USB DEVICE 复合设备使能
+
+#define RT_USB_DEVICE_CDC
+#define RT_USB_DEVICE_VIDEO
+#endif
+/***********************************************************
+ *默认mjpeg的节点数量,要根据mjpeg启动的分辨率去考虑
+ 默认节点大小:16*1024
+ 720P:算mjpeg大小50-80K,给10个节点足够
+ 1080P:算mjpeg大小100-150K,给20个节点足够
+ TARGET_JPG_LEN ： 目标mjpeg的大小
+ 其他分辨率,根据实际情况去配置
+ * ********************************************************/
+#define JPG_NODE_COUNT      20
+#define TARGET_JPG_LEN      100000   
+
+
+/***********************************************************
+* LCD屏
+********************************************************** */
+#define LCD_EN                          1
+#define DMA2D_EN                        1
+
+#define KEY_MODULE_EN                   1
+#define TOUCH_PAD_EN                    0
+
+#define LCD_ST7701S_MIPI_EN 			1
+#define LCD_ST7735_EN                   0
+
+/*================== end =================*/
+
+
 #endif
 
 #endif
-

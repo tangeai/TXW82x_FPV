@@ -27,7 +27,7 @@ struct wave_decode_struct {
     uint8_t get_wave_head;
 	uint8_t next_status;
 	uint8_t current_status;
-    uint8_t buf[BUFF_SIZE];
+    uint8_t *buf;
     uint32_t buf_size;
     TYPE_WAVE_HEAD wave_head;
 };
@@ -197,8 +197,6 @@ static void wave_decode_thread(void *d)
             goto wave_decode_thread_end;
         }
 	}
-  
-	msi_get(s->msi);
 
 	if(s->direct_to_dac) {
 		msi_cmd("R_AUDAC",MSI_CMD_AUDAC,MSI_AUDAC_SET_FILTER_TRACK,(uint32_t)(&(s->audio_track)));
@@ -372,6 +370,10 @@ static int32_t wave_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t
                     WAVE_CODE_FREE(wave_decode_s->msi_name);
 					wave_decode_s->msi_name = NULL;
                 }
+				if(wave_decode_s->buf) {
+					WAVE_CODE_FREE(wave_decode_s->buf);
+					wave_decode_s->buf = NULL;
+				}
 				WAVE_CODE_FREE(wave_decode_s);
 				wave_decode_s = NULL;
 			}
@@ -386,18 +388,26 @@ static int32_t wave_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t
 struct msi *wave_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec_init)
 {
 #if AUDIO_EN	
+	uint8_t msi_isnew = 0;
     char *msi_name = NULL;
+	uint32_t random_bytes = 0;
 
     msi_name = (char*)WAVE_CODE_ZALLOC(sizeof(char)*32);
     if(msi_name == NULL) {
         os_printf("alloc autpc msi namefail\n");
         return NULL;
     }
-    os_snprintf(msi_name, 20, "S_WAVE_DECODE_""%04d", (int)(os_jiffies()));
-	struct msi *msi = msi_new(msi_name, 0, NULL);
-	if(!msi) {
+create_msi_again:
+	os_random_bytes((uint8_t*)(&random_bytes), 4);
+    os_snprintf(msi_name, 20, "S_WAVE_DECODE_""%04u", random_bytes%10000);
+	struct msi *msi = msi_new(msi_name, 0, &msi_isnew);
+	if(msi == NULL) {
 		WAVE_INFO("create wave decode msi fail!\r\n");
+		WAVE_CODE_FREE(msi_name);
 		return NULL; 
+	}
+	else if(msi_isnew == 0) {
+		goto create_msi_again;
 	}
 	struct wave_decode_struct *wave_decode_s = (struct wave_decode_struct *)WAVE_CODE_ZALLOC(sizeof(struct wave_decode_struct));
 	if(!wave_decode_s) {
@@ -430,6 +440,11 @@ struct msi *wave_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *aude
         WAVE_INFO("create wave decode event fail!\r\n");
         goto wave_decode_init_err;
     }
+	wave_decode_s->buf = (uint8_t*)WAVE_CODE_MALLOC(BUFF_SIZE * sizeof(uint8_t));
+	if(wave_decode_s->buf == NULL) {
+		WAVE_INFO("wave alloc buf fail!\r\n");
+		goto wave_decode_init_err;
+	}
 	wave_decode_s->msi = msi;
 	wave_decode_s->msi_name = msi_name;
 	wave_decode_s->loop_mode = loop_mode;
@@ -450,6 +465,7 @@ struct msi *wave_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *aude
 		WAVE_INFO("create wave decode task fail!\r\n");
 		goto wave_decode_init_err;
 	}
+	msi_get(msi);
 	return msi;
 	
 wave_decode_init_err:
