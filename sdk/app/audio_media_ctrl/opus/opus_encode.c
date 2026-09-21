@@ -22,6 +22,7 @@ struct opus_encode_struct {
     uint8_t enc_buf[1024];
     int16_t inbuf[FRAME_SIZE];
     uint32_t samplerate;
+    uint32_t channels;
     uint32_t new_bitrate;
     uint32_t cur_bitrate;
     AUDIO_INFO audio_info;
@@ -48,15 +49,15 @@ static void opus_encode_thread(void *d)
     AUCODE_HDL *opus_enc = NULL;
 
     s->msi->enable = 1; 
-    msi_get(s->msi);
 
     opus_enc = audio_coder_open(OPUS_ENC, s->samplerate, 1);
     if (opus_enc == NULL) 
         goto opus_encode_thread_end;
 
-    s->audio_info.nsamples = FRAME_SIZE;
-    s->audio_info.time_interval = s->audio_info.nsamples * FRAME_SIZE / s->samplerate;
+    s->audio_info.nsamples = FRAME_SIZE * s->channels;
+    s->audio_info.time_interval = FRAME_SIZE * 1000 / s->samplerate;
     s->audio_info.samplerate = s->samplerate;
+	s->audio_info.channels = s->channels;
 
     while(1) {
         os_event_wait(&s->event, coder_clear_event, &clear_flag, OS_EVENT_WMODE_OR | OS_EVENT_WMODE_CLEAR, 0);
@@ -171,11 +172,6 @@ opus_encode_thread_end:
     while((s->next_status != AUCODEC_EXIT) && (s->destroy_self == 0)) {
         s->current_status = AUCODEC_END;
         os_sleep_ms(5);
-    }
-
-    if(s->src_msi) {
-        msi_del_output(s->src_msi, NULL, s->msi->name);
-        s->src_msi = NULL;
     }
 
     if(s->next_status != AUCODEC_EXIT)
@@ -311,7 +307,7 @@ static int32_t opus_encode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t
     return ret;
 }
 
-struct msi *opus_encode_init(uint32_t samplerate, AUENC_INIT *auenc_init)
+struct msi *opus_encode_init(uint32_t samplerate, uint32_t channels, AUENC_INIT *auenc_init)
 { 
 #if AUDIO_EN
     uint8_t msi_isnew = 0;
@@ -346,6 +342,7 @@ struct msi *opus_encode_init(uint32_t samplerate, AUENC_INIT *auenc_init)
         opus_encode_s->msi = msi;
         opus_encode_s->src_msi = auenc_init->src_msi;
         opus_encode_s->samplerate = samplerate;
+		opus_encode_s->channels = channels;
         opus_encode_s->destroy_self = auenc_init->destroy_self;
 		opus_encode_s->next_status = AUCODEC_RUN;
 		opus_encode_s->current_status = AUCODEC_RUN;
@@ -364,6 +361,7 @@ struct msi *opus_encode_init(uint32_t samplerate, AUENC_INIT *auenc_init)
 			OPUS_INFO("create opus encode task fail!\r\n");
 			goto opus_encode_init_err;
 		}
+		msi_get(msi);
 	}
 	return msi;
     

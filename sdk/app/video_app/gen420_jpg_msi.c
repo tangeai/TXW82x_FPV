@@ -78,6 +78,16 @@ static int32_t gen420_kick(struct gen420_msg_s *msg)
     msi_do_cmd(gen420->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_JPEG_MSG, gen420->last_w << 16 | gen420->last_h);
     // 修改数据源头
     msi_do_cmd(gen420->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_JPEG_FROM, GEN420_DATA);
+    //只有fb->rev的标志置上才需要设置msi(主要为了兼容旧版本)
+    if (gen420->fb->rev)
+    {
+        // 特殊处理,利用fb多余字段来作为标记,设置msi
+        msi_do_cmd(gen420->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_SET_OUTPUT_MSI, (uint32_t) gen420->fb->msi);
+    }
+    else
+    {
+        msi_do_cmd(gen420->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_SET_OUTPUT_MSI, 0);
+    }
     // 重新启动mjpg
     ret = msi_do_cmd(gen420->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_JPEG_START, 1);
     return ret;
@@ -166,6 +176,17 @@ static int32 gen420_jpg_work(struct os_work *work)
         {
             gen420->wait_close_jpg = 0;
 
+            struct yuv_arg_s *yuv_msg = (struct yuv_arg_s *) gen420->fb->priv;
+            uint16_t          frame_w = yuv_msg ? (uint16_t) yuv_msg->out_w : 0;
+            uint16_t          frame_h = yuv_msg ? (uint16_t) yuv_msg->out_h : 0;
+            if (!frame_w || !frame_h)
+            {
+                msi_delete_fb(NULL, gen420->fb);
+                gen420->fb = NULL;
+                delay_time = 1;
+                goto gen420_jpg_work_end;
+            }
+
             // 去获取jpg1的锁
             ret = jpg_mutex_lock(gen420->which_jpg, gen420->lock_value, &last_lock_value);
             // 获取成功,则去编码
@@ -175,7 +196,7 @@ static int32 gen420_jpg_work(struct os_work *work)
                 //  获取成功后,初始化mjpg1相关硬件
                 if (!gen420->register_jpg_msi)
                 {
-                    gen420->register_jpg_msi = jpg_concat_msi_init_start(gen420->which_jpg, 320, 180, NULL, gen420->src_from, 0);
+                    gen420->register_jpg_msi = jpg_concat_msi_init_start(gen420->which_jpg, frame_w, frame_h, NULL, gen420->src_from, 0);
                     if (gen420->register_jpg_msi)
                     {
                         // 主动停止一下
@@ -201,21 +222,11 @@ static int32 gen420_jpg_work(struct os_work *work)
                     delay_time = 1;
                     goto gen420_jpg_work_end;
                 }
-                struct yuv_arg_s *yuv_msg;
-                yuv_msg = (struct yuv_arg_s *) gen420->fb->priv;
-                if (yuv_msg)
-                {
-                    uint32_t p_w, p_h;
-                    p_w                    = yuv_msg->out_w;
-                    p_h                    = yuv_msg->out_h;
-                    gen420->last_w         = p_w;
-                    gen420->last_h         = p_h;
-                    gen420->hardware_ready = 0;
-                    gen420->stop           = 0;
-                    gen420_run(gen420, gen420->fb, p_w, p_h);
-                }
-                // 不应该进入这里,可能fb给错了,下一次移除
-                else
+                gen420->last_w         = frame_w;
+                gen420->last_h         = frame_h;
+                gen420->hardware_ready = 0;
+                gen420->stop           = 0;
+                if (gen420_run(gen420, gen420->fb, frame_w, frame_h) != RET_OK)
                 {
                     // 移除
                     msi_delete_fb(NULL, gen420->fb);
@@ -366,7 +377,7 @@ static int32_t gen420_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t para
                         ret = RET_OK;
                     }
                     // magic不是0,则需要匹配
-                    else if (gen420->magic == yuv_msg->magic)
+                    else if (yuv_msg && gen420->magic == yuv_msg->magic)
                     {
                         ret = RET_OK;
                     }

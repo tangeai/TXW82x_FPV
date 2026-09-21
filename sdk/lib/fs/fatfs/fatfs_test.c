@@ -417,13 +417,31 @@ static DRESULT write_to_fat_cache(void *dev, struct fat_data_t *cache, BYTE *buf
 	return ret;
 }
 
+static uint8 fat_cache_range_in_fat(DWORD fat_start, DWORD fat_size, DWORD sector, UINT count)
+{
+	DWORD offset;
+
+	if (fat_size == 0 || count == 0 || sector < fat_start)
+	{
+		return 0;
+	}
+
+	offset = sector - fat_start;
+	if (offset >= fat_size)
+	{
+		return 0;
+	}
+
+	return count <= (fat_size - offset);
+}
+
 #endif
 
 DRESULT fatfs_read(void *dev, BYTE *buf, DWORD sector, UINT count)
 {
 #if USE_FAT_CACHE
 	update_io_timestamp();
-	if (sector >= fat_cache.fat1.fat_start && sector <= fat_cache.fat1.fat_end)
+	if (fat_cache_range_in_fat(fat_cache.fat1.fat_start, fat_cache.fs_size, sector, count))
 	{
 		return read_from_fat_cache((struct sdh_device *)dev, &fat_cache.fat1, buf, sector, count);
 	}
@@ -435,10 +453,19 @@ static DRESULT fatfs_write(void *dev, BYTE *buf, DWORD sector, UINT count)
 {
 #if USE_FAT_CACHE
 	update_io_timestamp();
-	if (sector >= fat_cache.fat1.fat_start && sector <= fat_cache.fat1.fat_end)
+	if (fat_cache_range_in_fat(fat_cache.fat1.fat_start, fat_cache.fs_size, sector, count))
 	{
 		return write_to_fat_cache((struct sdh_device *)dev, &fat_cache.fat1, buf, sector, count);
 	}
+
+	if (fat_cache.fat_init == RET_OK && fat_cache.fat_info_ready == RET_OK &&
+		fat_cache.fs_fats > 1 &&
+		fat_cache_range_in_fat(fat_cache.fat1.fat_start + fat_cache.fs_size,
+			fat_cache.fs_size, sector, count))
+	{
+		return RES_OK;
+	}
+
 #endif
 	return sd_multiple_write((struct sdh_device *)dev, sector, count * 512, buf);
 }

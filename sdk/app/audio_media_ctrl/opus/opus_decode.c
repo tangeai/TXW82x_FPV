@@ -3,7 +3,7 @@
 #include "lib/multimedia/msi.h"
 #include "lib/multimedia/framebuff.h"
 #include "lib/audio/audio_code/audio_code.h"
-#include "autpc_msi/autpc_msi.h"
+#include "lib/audio/wsola/wsola_process.h"
 #include "opus_code.h"
 
 #define MAX_OPUS_DECODE_RXBUF    4
@@ -15,7 +15,7 @@ struct opus_decode_struct {
     struct os_event event;
     struct msi *msi;
     struct msi *src_msi;
-    struct msi *autpc_msi;
+    WsolaStream *wsola_stream;
     char *msi_name;
     void *task_hdl;
     uint8_t direct_to_dac;
@@ -38,6 +38,7 @@ static void opus_decode(struct opus_decode_struct *s)
     int32_t dec_samples = 0;
     uint32_t dec_operation = 0;
     uint32_t clear_flag = 0;
+    float cur_speed = 1.0f;
     struct framebuff *recv_frame_buf = NULL;
     struct framebuff *send_frame_buf = NULL;
     AUCODE_HDL *opus_dec = NULL;
@@ -55,7 +56,6 @@ static void opus_decode(struct opus_decode_struct *s)
         if(s->next_status == AUCODEC_PAUSE) {
             if(s->current_status == AUCODEC_RUN) {
                 audio_coder_close(opus_dec);
-                msi_output_cmd(s->msi,MSI_CMD_AUTPC,MSI_AUTPC_END_STREAM,(uint32_t)(&(s->audio_track)));
                 msi_cmd("R_AUDAC",MSI_CMD_AUDAC,MSI_AUDAC_END_STREAM,(uint32_t)(&(s->audio_track)));
                 opus_dec = audio_coder_open(OPUS_DEC, s->coder_sampleRate, 1);
                 if(!opus_dec) 
@@ -105,29 +105,38 @@ static void opus_decode(struct opus_decode_struct *s)
                     send_frame_buf = NULL;
                     goto opus_decode_frame_end;
                 }
-                send_frame_buf->data = (uint8_t*)OPUS_CODE_MALLOC(dec_samples*2);
+                if(s->use_tpc && !s->wsola_stream) {
+                    s->wsola_stream = wsolaStream_init(opus_info.samplerate, 1, (float)s->speed/100.0f, (float)s->pitch/100.0f, dec_samples*2, dec_samples*4);
+                    if(s->wsola_stream == NULL) {
+                        goto opus_decode_end;
+                    }
+                }
+                if(s->use_tpc && s->wsola_stream) {
+                    cur_speed = wsolaStream_get_speed(s->wsola_stream);
+                    if((uint8_t)(cur_speed*100.0f) != s->speed) {
+                        wsolaStream_set_speed(s->wsola_stream, (float)s->speed/100.0f);
+                    }
+                    wsolaStream_input_data(s->wsola_stream, s->dec_buf, dec_samples);
+                    dec_samples = wsolaStream_output_available(s->wsola_stream);  
+                }
+                send_frame_buf->data = (uint8_t*)OPUS_CODE_MALLOC(dec_samples * sizeof(int16_t));
                 if(!send_frame_buf->data) {
                     OPUS_INFO("opus decode malloc send_frame_buf->data fail!\n");
                     msi_delete_fb(s->msi, send_frame_buf);
                     send_frame_buf = NULL;
                     goto opus_decode_frame_end;                    
                 }
-                os_memcpy(send_frame_buf->data, s->dec_buf, dec_samples*2);
+                if(s->use_tpc && s->wsola_stream) {
+                    dec_samples = wsolaStream_output_data(s->wsola_stream, (int16_t*)(send_frame_buf->data), dec_samples);
+                }
+                else {
+                    os_memcpy(send_frame_buf->data, s->dec_buf, dec_samples * sizeof(int16_t));
+                }
                 send_frame_buf->priv = &(s->audio_track);
                 send_frame_buf->len = dec_samples*2;
                 send_frame_buf->mtype = F_AUDIO;
                 send_frame_buf->stype = FSTYPE_AUDIO_PCM;
                 s->audio_track.samplerate = opus_info.samplerate;
-				if(s->use_tpc && !s->autpc_msi) {
-					s->autpc_msi = autpc_msi_init(s->audio_track.samplerate, s->speed, s->pitch, dec_samples, &(s->audio_track));
-					if(s->autpc_msi == NULL) {
-						goto opus_decode_end;
-					}
-					if(s->direct_to_dac) {
-						msi_add_output(s->autpc_msi, NULL, "R_AUDAC");
-					}
-					msi_add_output(s->msi, NULL, s->autpc_msi->name);
-				}
                 ret = msi_output_fb(s->msi, send_frame_buf);  
                 OPUS_DEBUG("opus decode send framebuff:%p,ret:%d\r\n",send_frame_buf,ret);
                 send_frame_buf = NULL;              
@@ -151,7 +160,6 @@ opus_decode_frame_end:
         }
     }    
 opus_decode_end:
-    msi_output_cmd(s->msi,MSI_CMD_AUTPC,MSI_AUTPC_END_STREAM,(uint32_t)(&(s->audio_track)));
 	msi_cmd("R_AUDAC",MSI_CMD_AUDAC,MSI_AUDAC_END_STREAM,(uint32_t)(&(s->audio_track)));
     if(recv_frame_buf) {
         msi_delete_fb(NULL, recv_frame_buf);
@@ -168,8 +176,6 @@ opus_decode_end:
 static void opus_decode_thread(void *d)
 {
     struct opus_decode_struct *s = (struct opus_decode_struct *)d;
-
-    msi_get(s->msi);
 
     if(s->direct_to_dac) {
         msi_cmd("R_AUDAC",MSI_CMD_AUDAC,MSI_AUDAC_SET_FILTER_TRACK,(uint32_t)(&(s->audio_track)));
@@ -284,22 +290,12 @@ static int32_t opus_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t
                         uint32_t direct_to_dac = param2;
                         if(direct_to_dac && opus_decode_s->direct_to_dac == 0) {
                             opus_decode_s->direct_to_dac = 1;
-                            if(opus_decode_s->use_tpc == 0) {
-                                msi_add_output(msi, NULL, "R_AUDAC");
-                            }
-                            else if(opus_decode_s->autpc_msi) {
-                                msi_add_output(opus_decode_s->autpc_msi, NULL, "R_AUDAC");
-                            }
+                            msi_add_output(msi, NULL, "R_AUDAC");
                             msi_cmd("R_AUDAC",MSI_CMD_AUDAC,MSI_AUDAC_SET_FILTER_TRACK,(uint32_t)(&(opus_decode_s->audio_track)));
                         }
                         else if(opus_decode_s->direct_to_dac == 1) {
                             opus_decode_s->direct_to_dac = 0;
-                            if(opus_decode_s->use_tpc == 0) {
-                                msi_del_output(msi, NULL, "R_AUDAC");
-                            }
-                            else if(opus_decode_s->autpc_msi) {
-                                msi_del_output(opus_decode_s->autpc_msi, NULL, "R_AUDAC");
-                            }
+                            msi_del_output(msi, NULL, "R_AUDAC");
                             opus_decode_s->audio_track.priority &= 0x3F;
                             msi_cmd("R_AUDAC",MSI_CMD_AUDAC,MSI_AUDAC_SET_FILTER_TRACK,(uint32_t)(&(opus_decode_s->audio_track)));
                         }
@@ -363,9 +359,9 @@ static int32_t opus_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t
                 if(opus_decode_s->event.hdl) {
                     os_event_del(&opus_decode_s->event);
                 }
-				if(opus_decode_s->autpc_msi) {
-					autpc_msi_deinit(opus_decode_s->autpc_msi);
-                    opus_decode_s->autpc_msi = NULL;
+				if(opus_decode_s->wsola_stream) {
+					wsolaStream_deinit(opus_decode_s->wsola_stream);
+                    opus_decode_s->wsola_stream = NULL;
 				}
                 if(opus_decode_s->msi_name) {
                     OPUS_CODE_FREE(opus_decode_s->msi_name);
@@ -385,21 +381,27 @@ static int32_t opus_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t
 struct msi *opus_decode_init(uint32_t samplerate, AUDEC_INIT *audec_init)
 {
 #if AUDIO_EN
+    uint8_t msi_isnew = 0;
     char *msi_name = NULL;
-    int32_t random_value = 0;
+    uint32_t random_bytes = 0;
 
     msi_name = (char*)OPUS_CODE_ZALLOC(sizeof(char)*32);
     if(msi_name == NULL) {
-        os_printf("alloc autpc msi namefail\n");
+        os_printf("alloc opus decode msi namefail\n");
         return NULL;
     }
-    os_random_bytes((uint8_t*)(&random_value), 4);
-    os_snprintf(msi_name, 20, "SR_OPUS_DECODE_""%04d", random_value);
-	struct msi *msi = msi_new(msi_name, MAX_OPUS_DECODE_RXBUF, NULL);
+create_msi_again:
+    os_random_bytes((uint8_t*)(&random_bytes), 4);
+    os_snprintf(msi_name, 20, "SR_OPUS_DECODE_""%04u", random_bytes%10000);
+	struct msi *msi = msi_new(msi_name, MAX_OPUS_DECODE_RXBUF, &msi_isnew);
 	if(msi == NULL) {
 		OPUS_INFO("create opus decode msi fail!\r\n");
+        OPUS_CODE_FREE(msi_name);
 		return NULL;
-	}     
+	}   
+	else if(msi_isnew == 0) {
+		goto create_msi_again;
+	}  
 	struct opus_decode_struct *opus_decode_s = (struct opus_decode_struct *)OPUS_CODE_ZALLOC(sizeof(struct opus_decode_struct));
 	if(!opus_decode_s) {
 		OPUS_INFO("opus_decode_s malloc fail!\r\n");
@@ -428,10 +430,7 @@ struct msi *opus_decode_init(uint32_t samplerate, AUDEC_INIT *audec_init)
     opus_decode_s->audio_track.track_type = audec_init->track_type;
     opus_decode_s->next_status = AUCODEC_RUN;
 	opus_decode_s->current_status = AUCODEC_RUN;
-    if(audec_init->direct_to_dac && !opus_decode_s->use_tpc) {
-	    msi_add_output(msi, NULL, "R_AUDAC");
-    }
-    os_printf("opus_track:%x\n",&(opus_decode_s->audio_track));
+	msi_add_output(msi, NULL, "R_AUDAC");
 #if OPUS_DEC_CTRL == AUCODER_RUN_IN_CPU1
     opus_decode_s->task_hdl = os_task_create("opus_decode_thread", opus_decode_thread, (void*)opus_decode_s, OS_TASK_PRIORITY_ABOVE_NORMAL, 0, NULL, 1024);
 #else
@@ -441,6 +440,7 @@ struct msi *opus_decode_init(uint32_t samplerate, AUDEC_INIT *audec_init)
 		OPUS_INFO("create opus decode task fail!\r\n");
 		goto opus_decode_init_err;
 	}
+    msi_get(msi);
 	return msi;
 	
 opus_decode_init_err:

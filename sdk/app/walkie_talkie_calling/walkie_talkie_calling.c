@@ -5,7 +5,7 @@
 #include "syscfg.h"
 #include "walkie_talkie_calling.h"
 
-#define CALLING_TIMEOUT          100
+#define CALLING_TIMEOUT          50
 #define WAITACCEPT_TIMEOUT       20
 #define WAITCONNECT_TIMEOUT      300
 

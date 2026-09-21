@@ -44,6 +44,12 @@
 #define SEEK_END 2 /* set file offset to EOF plus offset */
 #endif
 
+
+#define MP4_MOVIE_TIMESCALE       1000U
+#define MP4_MEDIA_TIMESCALE       90000U
+#define MP4_VIDEO_OUTPUT_FPS      30U
+#define MP4_VIDEO_SAMPLE_DELTA    (MP4_MEDIA_TIMESCALE / MP4_VIDEO_OUTPUT_FPS)
+
 enum
 {
     MP4_OK         = 0,
@@ -70,7 +76,9 @@ typedef struct
     uint32_t type; // 1:视频  2:音频,0是无效
     uint32_t tkhd_duration_offset;
     uint32_t mdhd_duration_offset; // time scale为时间单位
+    uint32_t timescale;
     uint32_t duration;
+    uint32_t duration_tick;
     uint32_t count; // 记录保存了多少帧数据
     uint32_t stts_offset;
     uint32_t stsc_offset;
@@ -113,6 +121,7 @@ typedef struct
     uint8_t  init;
     uint8_t  audio_enable;
     uint16_t asps_len;
+    uint16_t fps;   // 视频帧率,0是无效,使用外部传入的时间计算
     uint8_t *asps_data;
     uint16_t video_w;
     uint16_t video_h;
@@ -126,6 +135,7 @@ typedef struct
 
     uint32_t     trak_count;
     uint32_t     file_max_size;
+    uint32_t     audio_samplerate; // 音频采样率,用于设置音频track的timescale
     uint32_t     mdat_size;        // 记录mdat的实际size,如果后续需要用到,则调用
     uint32_t     mdat_size_offset; // 记录mdat的size变量偏移
     uint32_t     mdat_offset;
@@ -421,6 +431,7 @@ uint32_t write_aac_data(mp4_key_msg *msg, uint8_t *aac_buf, uint32_t size, uint3
 uint32_t write_aac_data_batch(mp4_key_msg *msg, uint8_t *aac_buf, uint32_t total_size,
                               uint32_t *sizes, uint32_t *durations, uint32_t frame_count);
 uint32_t mp4_sync(mp4_key_msg *msg);
+uint8_t mp4_sync_judge(mp4_key_msg *msg, uint32_t time_ms);
 uint32_t mp4_sync_time(mp4_key_msg *msg, uint32_t time_ms);
 void *MP4_open_init(F_FILE *fp, uint8_t audio_en);
 void *MP4_open_init_with_file(F_FILE *fp, const file_ops_t *ops, uint8_t audio_en);
@@ -431,4 +442,6 @@ uint32_t mp4_video_cfg_init(mp4_key_msg *msg, uint16_t w, uint16_t h);
 uint32_t write_h264_pps_sps(mp4_key_msg *msg, uint8_t *nal_buf, uint32_t size);
 uint32_t write_h264_data(mp4_key_msg *msg, uint8_t *nal_buf, uint32_t size, uint32_t duration);
 uint32_t mp4_deinit(mp4_key_msg *msg);
+uint32_t mp4_set_video_fps(mp4_key_msg *msg, uint16_t fps);
+uint32_t mp4_set_audio_samplerate(mp4_key_msg *msg, uint32_t samplerate);
 #endif

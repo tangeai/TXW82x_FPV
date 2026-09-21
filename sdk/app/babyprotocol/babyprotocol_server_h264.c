@@ -24,10 +24,16 @@
 #define STREAM_LIBC_FREE av_free
 #define STREAM_LIBC_ZALLOC av_zalloc
 
+struct msi *server_output_msi = NULL;
+
 #define MAX_VIDEO_PKT_LEN 1430
 
-static int8_t next_switch_device = 2;
-static int8_t cur_switch_device = 2;
+static switch_device sw_dev = {
+	.next_switch_device = 2,
+	.cur_switch_device = 2,
+	.dev0_wait_I_frame = 0,
+	.dev1_wait_I_frame = 0,
+};
 
 //static struct os_semaphore net_h264_sem = {0,NULL};
 struct os_msgqueue net_h264_msg;
@@ -324,7 +330,7 @@ void udp_handle_server_data_thread(uint32_t *d){
 	while(1){
 		//ret = recvfrom (dev_tbl->udp_data_fd, photo_buf, MAX_VIDEO_PKT_LEN+sizeof(data_head), 0, &remote_addr, (socklen_t*)&retval);
 		ret = recvfrom (handle_data_protocol_fd, photo_buf, MAX_VIDEO_PKT_LEN+sizeof(data_head), 0, (struct sockaddr*)(&remote_addr), (socklen_t*)&retval);
-		if(next_switch_device == -1) {
+		if(sw_dev.next_switch_device == -1) {
 			continue;
 		}
 		id = 0;
@@ -426,6 +432,8 @@ markdata:
 						fbuf = av_psram_malloc(framelen[id]+4);
 						sys_dcache_invalid_range((uint32_t*)fbuf,framelen[id]+4);
 						hw_memcpy(fbuf,psarm_room,framelen[id]+4);
+						extern int32_t h264_buf_put(struct msi *m, uint16_t w, uint16_t h, uint8_t type, uint8_t *buf, uint32_t h264_len, uint32_t time);
+						h264_buf_put(server_output_msi,w,h,type[id],fbuf,framelen[id]+4,os_jiffies());
 						ie = disable_irq();
 						decmsg[itk].addr = fbuf;
 						decmsg[itk].len  = framelen[id];
@@ -560,48 +568,64 @@ void udp_handle_server_decode_to_lcd_thread(){
 							if((oldw[decmsg[decframe[itk]].devid] != server_resolution[decmsg[decframe[itk]].devid].target_width) || (oldh[decmsg[decframe[itk]].devid] != server_resolution[decmsg[decframe[itk]].devid].target_high)){
 								BABY_DBG("drop:%d %d\r\n",decmsg[decframe[itk]].devid,decmsg[decframe[itk]].num);
 							}else{
-								if(next_switch_device == 2) {
-										if(cur_switch_device != next_switch_device) {
-											msi_cmd(R_VIDEO_P0, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 1);
-											msi_cmd(R_VIDEO_P1, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 1);
-											cur_switch_device = next_switch_device;
-										}
-									if(decmsg[decframe[itk]].devid == 0) {
-										scale2_output_larger_local_change(decmsg[decframe[itk]].devid, devtab[decmsg[decframe[itk]].devid].larger);
-										scale2_output_size_local_change(decmsg[decframe[itk]].devid,0,0,0,320,360);		
-									}	
-									else {
-										scale2_output_larger_local_change(decmsg[decframe[itk]].devid, devtab[decmsg[decframe[itk]].devid].larger);
-										scale2_output_size_local_change(decmsg[decframe[itk]].devid,0,320,0,320,360);	     
+								if(sw_dev.next_switch_device == 2) {
+									if(sw_dev.cur_switch_device != sw_dev.next_switch_device) {
+										msi_cmd(R_VIDEO_P0, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 1);
+										msi_cmd(R_VIDEO_P1, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 1);
+										sw_dev.cur_switch_device = sw_dev.next_switch_device;
 									}
-									scale2_cfg_run(H264_DEC,decmsg[decframe[itk]].devid);
-									h264_dec_src_264(decmsg[decframe[itk]].addr,decmsg[decframe[itk]].len,oldw[decmsg[decframe[itk]].devid],16*((oldh[decmsg[decframe[itk]].devid]+15)/16) ,decmsg[decframe[itk]].devid);
+									if(decmsg[decframe[itk]].devid == 0 && decmsg[decframe[itk]].type == 1 && sw_dev.dev0_wait_I_frame == 1) {
+										sw_dev.dev0_wait_I_frame = 0;
+									}
+									else if(decmsg[decframe[itk]].devid == 1 && decmsg[decframe[itk]].type == 1 && sw_dev.dev1_wait_I_frame == 1) {
+										sw_dev.dev1_wait_I_frame = 0;
+									}
+									if(decmsg[decframe[itk]].devid == 0 && sw_dev.dev0_wait_I_frame == 0) {
+										scale2_output_larger_local_change(decmsg[decframe[itk]].devid, devtab[decmsg[decframe[itk]].devid].larger);
+										scale2_output_size_local_change(decmsg[decframe[itk]].devid,0,0,0,320,360);	
+										scale2_cfg_run(H264_DEC,decmsg[decframe[itk]].devid);
+										h264_dec_src_264(decmsg[decframe[itk]].addr,decmsg[decframe[itk]].len,oldw[decmsg[decframe[itk]].devid],16*((oldh[decmsg[decframe[itk]].devid]+15)/16) ,decmsg[decframe[itk]].devid);	
+									}	
+									else if(decmsg[decframe[itk]].devid == 1 && sw_dev.dev1_wait_I_frame == 0) {
+										scale2_output_larger_local_change(decmsg[decframe[itk]].devid, devtab[decmsg[decframe[itk]].devid].larger);
+										scale2_output_size_local_change(decmsg[decframe[itk]].devid,0,320,0,320,360);	
+										scale2_cfg_run(H264_DEC,decmsg[decframe[itk]].devid);
+										h264_dec_src_264(decmsg[decframe[itk]].addr,decmsg[decframe[itk]].len,oldw[decmsg[decframe[itk]].devid],16*((oldh[decmsg[decframe[itk]].devid]+15)/16) ,decmsg[decframe[itk]].devid);     
+									}
 								}
-								else if(next_switch_device == 0) {
-									if(decmsg[decframe[itk]].devid == 0) {
-										if(cur_switch_device != next_switch_device) {
-											msi_cmd(R_VIDEO_P0, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 1);
-											msi_cmd(R_VIDEO_P1, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 0);
-											cur_switch_device = next_switch_device;
-										}
+								else if(sw_dev.next_switch_device == 0) {
+									if(sw_dev.cur_switch_device != sw_dev.next_switch_device) {
+										msi_cmd(R_VIDEO_P0, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 1);
+										msi_cmd(R_VIDEO_P1, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 0);
+										sw_dev.cur_switch_device = sw_dev.next_switch_device;
+									}
+									if(decmsg[decframe[itk]].devid == 0 && decmsg[decframe[itk]].type == 1 && sw_dev.dev0_wait_I_frame == 1) {
+										sw_dev.dev0_wait_I_frame = 0;
+									}
+									if(decmsg[decframe[itk]].devid == 0 && sw_dev.dev0_wait_I_frame == 0) {
 										scale2_output_larger_local_change(decmsg[decframe[itk]].devid, devtab[decmsg[decframe[itk]].devid].larger);
 										scale2_output_size_local_change(decmsg[decframe[itk]].devid,1,0,0,640,360);	
 										scale2_cfg_run(H264_DEC,decmsg[decframe[itk]].devid);
 										h264_dec_src_264(decmsg[decframe[itk]].addr,decmsg[decframe[itk]].len,oldw[decmsg[decframe[itk]].devid],16*((oldh[decmsg[decframe[itk]].devid]+15)/16) ,decmsg[decframe[itk]].devid);
-									}										
+									}
+									sw_dev.dev1_wait_I_frame = 1;										
 								}
-								else if(next_switch_device == 1){
-									if(decmsg[decframe[itk]].devid == 1) {
-										if(cur_switch_device != next_switch_device) {
-											msi_cmd(R_VIDEO_P0, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 0);
-											msi_cmd(R_VIDEO_P1, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 1);
-											cur_switch_device = next_switch_device;
-										}
+								else if(sw_dev.next_switch_device == 1){
+									if(sw_dev.cur_switch_device != sw_dev.next_switch_device) {
+										msi_cmd(R_VIDEO_P0, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 0);
+										msi_cmd(R_VIDEO_P1, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 1);
+										sw_dev.cur_switch_device = sw_dev.next_switch_device;
+									}
+									if(decmsg[decframe[itk]].devid == 1 && decmsg[decframe[itk]].type == 1 && sw_dev.dev1_wait_I_frame == 1) {
+										sw_dev.dev1_wait_I_frame = 0;
+									}
+									if(decmsg[decframe[itk]].devid == 1 && sw_dev.dev1_wait_I_frame == 0) {
 										scale2_output_larger_local_change(decmsg[decframe[itk]].devid,devtab[decmsg[decframe[itk]].devid].larger);
 										scale2_output_size_local_change(decmsg[decframe[itk]].devid,1,0,0,640,360);
 										scale2_cfg_run(H264_DEC,decmsg[decframe[itk]].devid);
 										h264_dec_src_264(decmsg[decframe[itk]].addr,decmsg[decframe[itk]].len,oldw[decmsg[decframe[itk]].devid],16*((oldh[decmsg[decframe[itk]].devid]+15)/16) ,decmsg[decframe[itk]].devid);	
-									}											
+									}
+									sw_dev.dev0_wait_I_frame = 1;											
 								}
 							}
 
@@ -902,7 +926,7 @@ void tcp_handle_server_init(){
 void protocol_server_init(){
 	uint8_t i = 0;
 	struct h264_device *h264_dev;
-	struct msi *scale2 = scale2_msi("scale2", 640, 360, 640, 360, FSTYPE_YUV_P0, 10);
+	struct msi *scale2 = scale2_msi("scale2", 1280, 720, 640, 360, FSTYPE_YUV_P0, 10);
     if (scale2)
     {
 		msi_add_output(scale2, NULL, R_VIDEO_P0);
@@ -911,8 +935,8 @@ void protocol_server_init(){
     }
 	
 	for(i = 0;i < STA_NUM;i++){
-		server_resolution[i].target_width = 640;
-		server_resolution[i].target_high = 360;
+		server_resolution[i].target_width = 1280;
+		server_resolution[i].target_high = 720;
 	}
 
 	//scaler_msi_gol = scale2;
@@ -921,6 +945,10 @@ void protocol_server_init(){
 	for(i=0; i<10; i++) {
 		devtab[i].larger = 10;
 	}
+	//初始化msi(由于原架构原因,将msi放在全局)
+	extern struct msi *h264_buf_msi(const char *msi_name);
+	server_output_msi = h264_buf_msi(S_BABY_H264_SEND);
+
 	h264_drv_init(h264_dev);
 	h264_dec_room_init(2,1280,720);
 	net_h264_sema_init();	
@@ -942,7 +970,7 @@ void user_protocol()
 
 static void babyprotocol_switch_device(int8_t device)
 {
-	next_switch_device = device;
+	sw_dev.next_switch_device = device;
 }
 
 int32_t atcmd_babyprotocol_switch_device(const char *cmd, char *argv[], uint32 argc)

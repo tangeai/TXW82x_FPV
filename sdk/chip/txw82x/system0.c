@@ -5,10 +5,12 @@
 #include "csi_kernel.h"
 #include "sys_config.h"
 #include "dev/dma/hg_m2m_dma.h"
-#include "lib/ota/al_typedef.h"
+#include "lib/ApplicationLoader/al_typedef.h"
 #ifdef CONFIG_SLEEP
 #include "lib/common/dsleepdata.h"
 #endif
+#include "lib/lmac/lmac.h"
+
 #include "dev/xspi/hg_xspi_psram.h"
 #include "dev/xspi/hg_xspi_flash.h"
 #include "dev/adc/hgadc_v1.h"
@@ -184,6 +186,8 @@ __SYS_INIT void sys_start_cpu1(uint32_t run_addr)
     #else
     CoreSetting->psram_rsv_addr_core0 = 0;
     #endif
+    CoreSetting->lmac_module_init_mask = (WIFI_MODULE_MULTI_MAC_EN ? LMAC_MODULE_INIT_BIT_MULTI_MAC : 0)        |\
+                                         (WIFI_MODULE_RX_REORDER_EN ? LMAC_MODULE_INIT_BIT_RX_REORDER : 0);
     sysctrl_cpu1_softrst_en();
     __NOP();
     __NOP();
@@ -245,7 +249,7 @@ __SYS_INIT void SystemInit(void)
     }
 
     firmware_info_t info_in_fls = (firmware_info_t)&__al_user_sram_start;
-    fls_user_data_t user_data   = (fls_user_data_t)info_in_fls->user.user_data;
+    user_info_t user_data   = (user_info_t)info_in_fls->user.user_data;
     if (info_in_fls->user.user_data) {
         if (user_data->fw_magic == (0xC791B319)) {
             

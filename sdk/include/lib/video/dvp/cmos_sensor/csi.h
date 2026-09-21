@@ -240,7 +240,10 @@ void get_single_dvp(uint16_t *w,uint16_t *h);
 #ifndef IPF_EN
 #define IPF_EN					0
 #endif
+
+#ifndef DET_EN
 #define DET_EN					1
+#endif
 
 #ifndef VPP_BUF1_EN
 #define VPP_BUF1_EN				0
@@ -646,7 +649,15 @@ extern const _Sensor_Ident_ gc2053_init_csi1;
 extern SENSOR_OP_SECTION const _Sensor_Adpt_ gc2053_cmd_csi1;
 #endif
 
-
+#if DEV_SENSOR_GC2083_CSI1
+extern const _Sensor_Ident_ gc2083_init_csi1;
+extern SENSOR_OP_SECTION const _Sensor_Adpt_ gc2083_cmd_csi1;
 #endif
 
+#if DEV_SENSOR_SC2336P_CSI1
+extern const _Sensor_Ident_ sc2336p_init_csi1;
+extern SENSOR_OP_SECTION const _Sensor_Adpt_ sc2336p_cmd_csi1;
+#endif
+
+#endif
 

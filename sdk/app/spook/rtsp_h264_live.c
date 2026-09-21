@@ -86,8 +86,9 @@ static void self_creat(struct rtsp_source *source, void *priv)
             AUENC_INIT auenc_init;
             r->a_msi = rtsp_audio_msi_init(R_RTP_AUDIO);
             auenc_init.destroy_self = 0;
-            auenc_init.src_msi = get_auadc_msi(AUSYS_AUAD);
-            r->audio_msi = audio_encode_init(AAC_ENC, audio_adc_get_samplerate(AUSYS_AUAD), &auenc_init);
+            auenc_init.src_msi = get_auadc_msi(MAIN_MIC_ID);
+            auenc_init.channels = audio_adc_get_channels(MAIN_MIC_ID);
+            r->audio_msi = audio_encode_init(AAC_ENC, audio_adc_get_samplerate(MAIN_MIC_ID), &auenc_init);
             if (r->audio_msi)
             {
                 audio_code_add_output(r->audio_msi, R_RTP_AUDIO);

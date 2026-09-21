@@ -51,7 +51,18 @@ int32_t client_remote_playback_init(const char *filename)
         msi_do_cmd(playback_msi, MSI_CMD_VIDEO_DEMUX_CTRL, MSI_VIDEO_DEMUX_START, 0);
         return RET_OK;
     }
-    audio_decode_deinit(aac_msi);
+    else {
+        protocol_client_filtertype(FSTYPE_H264_GEN420_DATA);
+        audio_decode_deinit(aac_msi);
+        intercom_encode_pause(1, 1);
+        opus_msi = msi_find("SR_OPUS_ENCODE", 1);
+        if(opus_msi) {
+            msi_put(opus_msi);
+            audio_code_set_src_msi(opus_msi, get_auadc_msi(MAIN_MIC_ID));
+        }
+		intercom_set_stream_type(intercom_live_audio, intercom_live_audio);
+        intercom_encode_pause(0, 0); 
+    }
     return RET_ERR;
 }
 
@@ -67,7 +78,7 @@ int32_t client_remote_playback_deinit(void)
         opus_msi = msi_find("SR_OPUS_ENCODE", 1);
         if(opus_msi) {
             msi_put(opus_msi);
-            audio_code_set_src_msi(opus_msi, get_auadc_msi(AUSYS_AUAD));
+            audio_code_set_src_msi(opus_msi, get_auadc_msi(MAIN_MIC_ID));
         }
 		intercom_set_stream_type(intercom_live_audio, intercom_live_audio);
         intercom_encode_pause(0, 0); 

@@ -25,6 +25,7 @@ extern int32 sys_wifi_event_hdl_pairled(uint8 ifidx, uint16 evt, uint32 param1, 
 extern int32 sys_wifi_event_hdl_walkietalkie(uint8 ifidx, uint16 evt, uint32 param1, uint32 param2);
 extern void sys_event_hdl_wifi_pair(uint32 event_id, uint32 data, uint32 priv);
 extern void sys_event_hdl_walkie_talkie(uint32 event_id, uint32 data, uint32 priv);
+extern void sys_event_ble_netconfig(uint32 event_id, uint32 data, uint32 priv);
 
 //更新 sys_status 信息
 static void sys_event_hdl_dhcp(uint32 event_id, uint32 data, uint32 priv)

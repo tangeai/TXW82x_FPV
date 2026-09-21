@@ -29,7 +29,7 @@ struct aac_decode_struct {
     uint8_t destroy_self;
     uint8_t next_status;
     uint8_t current_status;
-    uint8_t inbuf[BUFF_SIZE];
+    uint8_t *inbuf;
     int16_t dec_buf[1024*2];
 };
 
@@ -112,7 +112,7 @@ static void aac_file_decode(struct aac_decode_struct *s)
             }
             if(aac_info.channels == 2) {
                 for(uint32_t i=0; i<dec_samples; i++) 
-                    data[i] = s->dec_buf[2*i];
+                    data[i] = ((int32)(s->dec_buf[2*i]) + s->dec_buf[2*i+1]) / 2;
             }
 			else {
 				for(uint32_t i=0; i<dec_samples; i++)
@@ -220,7 +220,7 @@ static void aac_msi_decode(struct aac_decode_struct *s)
                 send_data = (int16_t*)send_frame_buf->data;
                 if(aac_info.channels == 2) {
                     for(uint32_t i=0; i<dec_samples; i++) 
-                        send_data[i] = s->dec_buf[2*i];
+                        send_data[i] = ((int32)(s->dec_buf[2*i]) + s->dec_buf[2*i+1]) / 2;
                 }
                 else {
                     for(uint32_t i=0; i<dec_samples; i++)
@@ -280,8 +280,6 @@ aac_decode_end:
 static void aac_decode_thread(void *d)
 {
     struct aac_decode_struct *s = (struct aac_decode_struct *)d;
-
-    msi_get(s->msi);
 
     if(s->direct_to_dac) {
         msi_cmd("R_AUDAC",MSI_CMD_AUDAC,MSI_AUDAC_SET_FILTER_TRACK,(uint32_t)(&(s->audio_track)));
@@ -493,6 +491,10 @@ static int32_t aac_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
                     AAC_CODE_FREE(aac_decode_s->msi_name);
                     aac_decode_s->msi_name = NULL;
                 }
+				if(aac_decode_s->inbuf) {
+					AAC_CODE_FREE(aac_decode_s->inbuf);
+					aac_decode_s->inbuf = NULL;
+				}
                 AAC_CODE_FREE(aac_decode_s);
                 aac_decode_s = NULL;
             }
@@ -507,18 +509,26 @@ static int32_t aac_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
 struct msi *aac_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec_init)
 {
 #if AUDIO_EN
+	uint8_t msi_isnew = 0;
     char *msi_name = NULL;
+    uint32_t random_bytes = 0;
 
     msi_name = (char*)AAC_CODE_ZALLOC(sizeof(char)*32);
     if(msi_name == NULL) {
-        os_printf("alloc autpc msi namefail\n");
+        os_printf("alloc aac decode msi namefail\n");
         return NULL;
     }
-    os_snprintf(msi_name, 20, "SR_AAC_DECODE_""%04d", (int)(os_jiffies()));
-	struct msi *msi = msi_new(msi_name, MAX_AAC_DECODE_RXBUF, NULL);
+create_msi_again:
+    os_random_bytes((uint8_t*)(&random_bytes), 4);
+    os_snprintf(msi_name, 20, "SR_AAC_DECODE_""%04u", random_bytes%10000);
+	struct msi *msi = msi_new(msi_name, MAX_AAC_DECODE_RXBUF, &msi_isnew);
 	if(msi == NULL) {
 		AAC_INFO("create aac decode msi fail!\r\n");
+        AAC_CODE_FREE(msi_name);
 		return NULL;
+	}
+	else if(msi_isnew == 0) {
+		goto create_msi_again;
 	}
 	struct aac_decode_struct *aac_decode_s = (struct aac_decode_struct*)AAC_CODE_ZALLOC(sizeof(struct aac_decode_struct));
 	if(!aac_decode_s) {
@@ -540,6 +550,11 @@ struct msi *aac_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec
         AAC_INFO("create aac decode event fail!\r\n");
         goto aac_decode_init_err;
     }
+	aac_decode_s->inbuf = (uint8_t*)AAC_CODE_MALLOC(BUFF_SIZE * sizeof(uint8_t));
+	if(aac_decode_s->inbuf == NULL) {
+		AAC_INFO("aac decode alloc inbuf fail!\r\n");
+		goto aac_decode_init_err;
+	}
 	if(filename) {
 		aac_decode_s->aac_fp = osal_fopen((const char*)filename, "rb");
 		if(aac_decode_s->aac_fp == NULL) {
@@ -575,6 +590,7 @@ struct msi *aac_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec
 		AAC_INFO("create aac decode task fail!\r\n");
 		goto aac_decode_init_err;
 	}
+    msi_get(msi);
 	return msi;
 	
 aac_decode_init_err:

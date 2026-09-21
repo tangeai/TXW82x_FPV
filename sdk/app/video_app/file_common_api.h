@@ -21,7 +21,7 @@ uint8_t takephoto_name(const char *img_dir, char *file_path, int filepath_size);
 uint8_t takephoto_name_day(const char *img_dir, char *file_path, int filepath_size);
 int32_t takephoto_name_no_dir(char *filename, int filename_size);
 int32_t takephoto_name_no_dir_time(char *filename, int filename_size, struct timeval *time);
-int32_t takephoto_name_add_dir(char *filename, int filename_size,char *path, const char *dir_name);
+int32_t takephoto_name_add_dir(char *path, int path_size, char *filename, const char *dir_name);
 uint8_t get_mp4_file_name(const char *rec_dir, char *sub_path, char *file_name);
 uint8_t get_extension_file_name(const char *rec_dir, char *sub_path, char *file_name, const char *extension_name);
 uint8_t get_extension_file_name_time(const char *rec_dir, char *sub_path, char *file_name, const char *extension_name, struct timeval *time);

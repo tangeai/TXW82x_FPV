@@ -39,6 +39,7 @@ extern void sys_wifi_init(void);
 extern void sys_network_init(void);
 extern void sys_dhcpd_start(void);
 extern void sys_dhcpc_check(void);
+extern void sys_ble_init();
 
 static __init void sys_cpurpc_init()
 {
@@ -53,6 +54,13 @@ __init static void sys_cfg_load(void)
 
     os_printf("use default params.\r\n");
     syscfg_default();
+#ifdef SYS_APP_BBM_CAM
+    if(sys_cfgs.wifi_mode == WIFI_MODE_STA) {
+        sys_cfgs.ipaddr = NET_IP_ADDR_DEFAULT;
+        sys_cfgs.ipaddr &= 0xFFFFFF;
+        sys_cfgs.ipaddr |= (((uint32)sys_cfgs.mac[5]) << 24);        
+    }
+#endif
     syscfg_save();
 }
 
@@ -203,6 +211,8 @@ __init static void sys_app_init(void)
 
 #ifdef SYS_APP_FPV
     sys_app_fpv_init();
+#elif defined(SYS_APP_DOUBLE_SENSOR)
+    sys_app_double_sensor_init();
 #elif defined(SYS_DOUBLE_SENSOR_SPICE_DEMO)
     sys_app_double_sensor_splice_init();
 #endif
@@ -243,6 +253,11 @@ __init static void sys_app_init(void)
 #ifdef SYS_APP_ISP_TUNNING
     sys_app_isp_tunning_init();
 #endif
+
+#ifdef SYS_APP_AHD_SNESOR
+    sys_app_ahd_init();
+#endif
+
 }
 
 __init static void usr_app_init(void)
@@ -275,6 +290,7 @@ int main(void)
         os_run_work_delay(&main_wk, 1000);
     }else{ // normal mode
         sys_wifi_init();
+        sys_ble_init();
         sys_network_init();
         do_global_ctors();
         sys_app_init();

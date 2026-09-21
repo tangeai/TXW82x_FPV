@@ -149,6 +149,7 @@ static int32_t jpg_thumb_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t p
         {
             os_run_work(&jpg_thumb->work);
         }
+        break;
         case MSI_CMD_FREE_FB:
         {
             struct framebuff *fb = (struct framebuff *) param1;

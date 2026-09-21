@@ -5,6 +5,7 @@
 #include "lib/multimedia/framebuff.h"
 #include "lib/heap/av_heap.h"
 #include "lib/heap/av_psram_heap.h"
+#include "lib/audio/wsola/wsola_process.h"
 
 #ifdef PSRAM_HEAP
 #define MAGIC_VOICE_MALLOC av_psram_malloc
@@ -27,9 +28,10 @@ typedef enum {
 
 typedef struct {
     struct msi *msi;
-    struct msi *autpc_msi;
+    WsolaStream *wsola_stream;
     struct fbpool tx_pool;
     int16_t *buf;
+    int16_t *outbuf;
     uint8_t new_type;
     uint8_t current_type;
     uint32_t table_index;

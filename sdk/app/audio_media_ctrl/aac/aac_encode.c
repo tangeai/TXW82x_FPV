@@ -9,6 +9,9 @@
 #define MAX_AAC_ENCODE_RXBUF    4
 #define MAX_AAC_ENCODE_TXBUF    20
 
+#define FRAME_SIZE              1024
+#define FRAME_NBYTES            2048
+
 struct aac_encode_struct {
     struct fbpool tx_pool;
     struct os_event event;
@@ -21,9 +24,10 @@ struct aac_encode_struct {
     uint8_t destroy_self;
     uint8_t next_status;
     uint8_t current_status;
-    uint8_t enc_buf[1536];
-	int16_t inbuf[1024];
+    uint8_t *enc_buf;
+	int16_t *inbuf;
     uint32_t samplerate;
+    uint32_t channels;
     AUDIO_INFO audio_info;
 };
 
@@ -47,17 +51,19 @@ static void aac_encode_thread(void *d)
     struct aac_encode_struct *s = (struct aac_encode_struct *)d;
     AUCODE_HDL *aac_enc = NULL;
 
-    s->msi->enable = 1;
-    msi_get(s->msi);
+	s->msi->enable = 1;
 
-    aac_enc = audio_coder_open(AAC_ENC, s->samplerate, 1);
+    aac_enc = audio_coder_open(AAC_ENC, s->samplerate, s->channels);
     if (aac_enc == NULL) 
         goto aac_encode_thread_end;
 
-    s->audio_info.nsamples = 1024;
-    s->audio_info.time_interval = s->audio_info.nsamples * 1000 / s->samplerate;
+    s->audio_info.nsamples = FRAME_SIZE * s->channels;
+    s->audio_info.time_interval = FRAME_SIZE * 1000 / s->samplerate;
     s->audio_info.samplerate = s->samplerate;
-
+	s->audio_info.channels = s->channels;
+	
+	inbuf_reslen = FRAME_NBYTES * s->channels;
+	
     while(1) {
         os_event_wait(&s->event, coder_clear_event, &clear_flag, OS_EVENT_WMODE_OR | OS_EVENT_WMODE_CLEAR, 0);
         if(clear_flag & coder_clear_event) {
@@ -67,18 +73,18 @@ static void aac_encode_thread(void *d)
         if(s->next_status == AUCODEC_PAUSE) { 
             if(s->current_status == AUCODEC_RUN) {
                 audio_coder_close(aac_enc);
-                aac_enc = audio_coder_open(AAC_ENC, s->samplerate, 1);
+                aac_enc = audio_coder_open(AAC_ENC, s->samplerate, s->channels);
                 if (aac_enc == NULL) 
                     goto aac_encode_thread_end;
             }
             s->current_status = AUCODEC_PAUSE;
-            inbuf_reslen = 2048;
+            inbuf_reslen = FRAME_NBYTES * s->channels;
             inbuf_offset = 0;
         }
 		recv_frame_buf = msi_get_fb(s->msi, 0);
         if(recv_frame_buf) {
             if(clear_finish == 0) {
-                inbuf_reslen = 2048;
+                inbuf_reslen = FRAME_NBYTES * s->channels;
                 inbuf_offset = 0;                
                 goto aac_encode_frame_end;
             }
@@ -102,8 +108,8 @@ static void aac_encode_thread(void *d)
                     os_memcpy(s->inbuf + (inbuf_offset/2), recv_data + (data_offset/2), inbuf_reslen);
                     data_len -= inbuf_reslen;
                     data_offset += inbuf_reslen;
-                    enc_bytes = audio_encode_data(aac_enc, s->inbuf, 1024, s->enc_buf);   
-                    inbuf_reslen = 2048;
+                    enc_bytes = audio_encode_data(aac_enc, s->inbuf, FRAME_SIZE * s->channels, s->enc_buf);   
+                    inbuf_reslen = FRAME_NBYTES * s->channels;
                     inbuf_offset = 0;
                     if(enc_bytes < 0) {
                         AAC_INFO("aac encode failed\n");
@@ -131,7 +137,7 @@ static void aac_encode_thread(void *d)
                             AAC_DEBUG("aac encode send framebuff:%p,ret:%d\r\n",send_frame_buf,ret);  
                             send_frame_buf = NULL;   
                         }
-                        audio_time += (1024 * 1000 / s->samplerate);
+                        audio_time += (FRAME_SIZE * 1000 / s->samplerate);
                         if(data_len == 0)
                             update_audio_time = 1;
                     }
@@ -305,6 +311,12 @@ static int32_t aac_encode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
                 if(aac_encode_s->event.hdl) {
                     os_event_del(&aac_encode_s->event);
                 }
+                if(aac_encode_s->enc_buf) {
+                    AAC_CODE_FREE(aac_encode_s->enc_buf);
+                }
+                if(aac_encode_s->inbuf) {
+                    AAC_CODE_FREE(aac_encode_s->inbuf);
+                }
                 if(aac_encode_s->aac_fp) {
                     osal_fclose(aac_encode_s->aac_fp);
                     aac_encode_s->aac_fp = NULL;
@@ -320,7 +332,7 @@ static int32_t aac_encode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
     return ret;
 }
 
-struct msi *aac_encode_init(char *filename, uint32_t samplerate, uint8_t direct_to_record, AUENC_INIT *auenc_init)
+struct msi *aac_encode_init(char *filename, uint32_t samplerate, uint32_t channels, uint8_t direct_to_record, AUENC_INIT *auenc_init)
 { 
 #if AUDIO_EN
     uint8_t msi_isnew = 0;
@@ -352,9 +364,16 @@ struct msi *aac_encode_init(char *filename, uint32_t samplerate, uint8_t direct_
         if(auenc_init->src_msi && (msi_add_output(auenc_init->src_msi, NULL, msi->name) != RET_OK)) {
             goto aac_encode_init_err;
         }
+        aac_encode_s->enc_buf = (uint8_t*)AAC_CODE_MALLOC(sizeof(uint8_t) * 1536 * channels);
+        aac_encode_s->inbuf = (int16_t*)AAC_CODE_MALLOC(sizeof(int16) * 1024 * channels);
+        if(aac_encode_s->enc_buf == NULL || aac_encode_s->inbuf == NULL) {
+            AAC_INFO("alloc aac buf fail!\r\n");
+            goto aac_encode_init_err;
+        }
         aac_encode_s->msi = msi;
         aac_encode_s->src_msi = auenc_init->src_msi;
         aac_encode_s->samplerate = samplerate;
+        aac_encode_s->channels = channels;
         aac_encode_s->destroy_self = auenc_init->destroy_self;
 		aac_encode_s->next_status = AUCODEC_RUN;
 		aac_encode_s->current_status = AUCODEC_RUN;
@@ -389,6 +408,7 @@ struct msi *aac_encode_init(char *filename, uint32_t samplerate, uint8_t direct_
 			AAC_INFO("create aac encode task fail!\r\n");
 			goto aac_encode_init_err;
 		}
+		msi_get(msi);
 	}
 	return msi;
     

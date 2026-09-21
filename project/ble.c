@@ -19,14 +19,13 @@
 #include "lib/bluetooth/uble/ble_demo.h"
 
 /* BLE 配网 */
-#if SYS_APP_BLENC
 #define BLE_NETCONFIG_OK "network_connect_succ"
 
 void sys_event_ble_netconfig(uint32 event_id, uint32 data, uint32 priv)
 {
     switch (event_id) {
         case SYS_EVENT(SYS_EVENT_WIFI, SYSEVT_WIFI_CONNECTTED):
-#if BLE_PROV_MODE == 2
+#if SYS_APP_BLENC == 2
             os_printf(KERN_NOTICE"WiFi Connected, BLE Notify: %s\r\n", BLE_NETCONFIG_OK);
             uble_gatt_notify(10, (uint8 *)BLE_NETCONFIG_OK, os_strlen(BLE_NETCONFIG_OK));
             os_sleep(1);
@@ -46,7 +45,7 @@ void sys_event_ble_netconfig(uint32 event_id, uint32 data, uint32 priv)
             wificfg_flush(WIFI_MODE_STA);
             netdev_set_wifi_mode((struct netdev *)dev_get(HG_WIFI0_DEVID), WIFI_MODE_STA);
             ieee80211_iface_start(WIFI_MODE_STA);
-#if BLE_PROV_MODE == 1
+#if SYS_APP_BLENC == 1
             ble_set_mode(0, 38);
 #endif
             break;
@@ -55,13 +54,18 @@ void sys_event_ble_netconfig(uint32 event_id, uint32 data, uint32 priv)
 
 __init void sys_ble_netconfig_init()
 {
-    ble_demo_init();
-#if BLE_PROV_MODE == 1
+#if SYS_APP_BLENC == 1
     ble_set_mode(1, 38);
-#elif BLE_PROV_MODE == 2
+#elif SYS_APP_BLENC == 2
     ble_set_coexist_en(1, 0);
     ble_set_mode(3, 38);
 #endif
 }
+
+__init void sys_ble_init()
+{
+#if BLE_SUPPORT
+    ble_demo_init();
 #endif
+}
 

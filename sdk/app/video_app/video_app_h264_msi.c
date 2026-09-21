@@ -229,17 +229,37 @@ void    ue_se_enc(uint16 in_data)
     len_suf += 1;
     exp_out = (in_data & 0x1ff);
 }
+
+static void h264_sps_append_ue(BitBuffer *buffer, uint16_t value)
+{
+    uint32_t code_num = (uint32_t)value + 1;
+    uint32_t tmp      = code_num;
+    uint8_t  suffix_bits = 0;
+
+    while (tmp > 1)
+    {
+        tmp >>= 1;
+        suffix_bits++;
+    }
+    if (suffix_bits)
+    {
+        bit_buffer_append(buffer, 0, suffix_bits, 0);
+    }
+    bit_buffer_append(buffer, (uint16_t)code_num, suffix_bits + 1, 0);
+}
+
 // main  1920 1080
 void h264_sps_gen_test(BitBuffer *buffer, uint16_t wrap_w, uint16_t wrap_h, uint8_t fr)
 {
     uint8_t level_idc  = 52; // h264 0x50
-    uint16  img_x      = wrap_w / 16;
+    uint16  img_x      = (wrap_w + 0xf) / 16;
     uint16  img_y      = (wrap_h + 0xf) / 16;
     uint8_t crop_en    = 0;
-    uint8_t crop_y     = (img_y * 16 - wrap_h) / 2;
+    uint16  crop_x     = (img_x * 16 - wrap_w) / 2;
+    uint16  crop_y     = (img_y * 16 - wrap_h) / 2;
     uint8_t full_range = fr;
 
-    if (crop_y)
+    if (crop_x || crop_y)
     {
         crop_en = 1;
     }
@@ -269,9 +289,11 @@ void h264_sps_gen_test(BitBuffer *buffer, uint16_t wrap_w, uint16_t wrap_h, uint
     // img crop
     if (crop_en)
     {
-        bit_buffer_append(buffer, 0x000f, 4, 0);
-        ue_se_enc((crop_y + 1));
-        bit_buffer_append(buffer, exp_out, len_exp, 0);
+        bit_buffer_append(buffer, 0x0001, 1, 0);
+        h264_sps_append_ue(buffer, 0);
+        h264_sps_append_ue(buffer, crop_x);
+        h264_sps_append_ue(buffer, 0);
+        h264_sps_append_ue(buffer, crop_y);
     }
     else
     {
@@ -526,7 +548,7 @@ static int8_t h264_output_msi(struct list_head *get_f, struct video_h264_msi_s *
             }
             h264_len_tmp -= cp_len;
             tmp_buf = get_h264_first_buf(get_f);
-            hw_memcpy0(h264_buf + cp_offset, get_h264_first_buf(get_f), cp_len);
+            hw_memcpy(h264_buf + cp_offset, get_h264_first_buf(get_f), cp_len);
             del_h264_first_node(get_f);
             cp_offset += cp_len;
         }
@@ -724,8 +746,9 @@ static int32_t vpp_start_h264(uint32_t irq_data)
 {
     struct video_h264_msi_s *video_h264 = (struct video_h264_msi_s *) irq_data;
     struct h264_device      *h264_dev   = video_h264->h264_dev;
-    // 如果需要拼接,就要等待镜头2完成才能启动
-    if (video_msg.video_type_cur == ISP_VIDEO_1 || video_msg.camera_mode != CAM_DUAL_SPLICE_SLAVE_MODE)
+    
+    // 拼接或者已经第二个镜头已经done或者是单镜头,则启动
+    if (video_msg.video_type_cur == ISP_VIDEO_1 || video_msg.camera_mode == CAM_SINGLE_MASTER_MODE)
     {
         h264_open(h264_dev);
         h264_set_sw_ready(h264_dev);
@@ -743,6 +766,8 @@ struct msi *h264_msi_init_with_mode(uint32_t drv1_from, uint16_t drv1_w, uint16_
     struct msi              *msi = msi_new(S_H264, 0, &isnew);
     struct video_h264_msi_s *video_h264;
     uint8_t                  vpp_kick = 0;
+    //如果需要自适应识别w和h(仅仅适合vpp data0和vpp data1),则传入参数应该为0
+    uint32_t auto_w_h = drv1_w|drv1_h|drv2_w|drv2_h;
 
     if (msi && isnew)
     {
@@ -754,7 +779,6 @@ struct msi *h264_msi_init_with_mode(uint32_t drv1_from, uint16_t drv1_w, uint16_
         video_h264->h264_dev = (struct h264_device *) dev_get(HG_H264_DEVID);
         if (video_h264->h264_dev)
         {
-
             if (drv1_from == GEN420_DATA || drv2_from == GEN420_DATA)
             {
                 extern int32_t h264_gen420_kick();
@@ -784,53 +808,39 @@ struct msi *h264_msi_init_with_mode(uint32_t drv1_from, uint16_t drv1_w, uint16_
                     }
                 }
             }
-            // 自己适应w和h
-            if (drv1_from == VPP_DATA0)
+            // 如果强行配置两个都是VPP_DATA0或者VPP_DATA1,代表是特殊的模式(双镜头),就使用参数即可
+            if ((drv1_from == drv2_from) && (drv1_from == VPP_DATA0 || drv1_from == VPP_DATA1) && auto_w_h)
             {
-                vpp_kick++;
-                get_vpp_w_h(&drv1_w, &drv1_h);
             }
-            else if (drv1_from == VPP_DATA1)
+            else
             {
-                vpp_kick++;
-                get_vpp1_w_h(&drv1_w, &drv1_h);
-            }
-            else if (drv1_from == SCALER_DATA)
-            {
-                ret = get_vpp_scale_w_h(&drv1_w, &drv1_h);
-                if (!ret)
+                // 自己适应w和h
+                if (drv1_from == VPP_DATA0)
                 {
-                    set_vpp_scale_w_h(1, drv1_w, drv1_h);
+                    vpp_kick++;
+                    get_vpp_w_h(&drv1_w, &drv1_h);
                 }
-                else
+                else if (drv1_from == VPP_DATA1)
                 {
-                    drv1_from = ~0;
+                    vpp_kick++;
+                    get_vpp1_w_h(&drv1_w, &drv1_h);
                 }
-            }
-
-            if (drv2_from == VPP_DATA0)
-            {
-                vpp_kick++;
-                get_vpp_w_h(&drv2_w, &drv2_h);
-            }
-            else if (drv2_from == VPP_DATA1)
-            {
-                vpp_kick++;
-                get_vpp1_w_h(&drv2_w, &drv2_h);
-            }
-            else if (drv2_from == SCALER_DATA)
-            {
-                ret = get_vpp_scale_w_h(&drv2_w, &drv2_h);
-                if (!ret)
+                else if (drv1_from == SCALER_DATA)
                 {
-                    set_vpp_scale_w_h(1, drv2_w, drv2_h);
-                }
-                else
-                {
-                    drv2_from = ~0;
+                    if(!drv1_w|| !drv1_h)
+                    {
+                        ret = get_vpp_scale_w_h(&drv1_w, &drv1_h);
+                        if (!ret)
+                        {
+                            set_vpp_scale_w_h(1, drv1_w, drv1_h);
+                        }
+                        else
+                        {
+                            drv1_from = ~0;
+                        }
+                    }
                 }
             }
-
             video_h264->drv1_from = drv1_from;
             video_h264->drv2_from = drv2_from;
             h264_set_oe_select(video_h264->h264_dev, 0, 0);
@@ -1035,5 +1045,56 @@ struct msi *h264_msi_init_with_mode_for_264wq(uint32_t drv1_from, uint16_t drv1_
         os_run_work_delay(&video_h264->work, 1);
     }
 h264_msi_init_with_mode_end:
+    return msi;
+}
+
+
+struct msi *h264_msi_init_with_gen420(uint16_t drv1_w, uint16_t drv1_h)
+{
+    int                      ret   = 0;
+    uint8_t                  isnew = 0;
+    struct msi              *msi   = msi_new(S_H264, 0, &isnew);
+    struct video_h264_msi_s *video_h264;
+
+    if (msi && isnew)
+    {
+        video_h264 = (struct video_h264_msi_s *) STREAM_LIBC_ZALLOC(sizeof(struct video_h264_msi_s));
+        ASSERT(video_h264);
+        msi->priv   = (void *) video_h264;
+        msi->enable = 1;
+
+        video_h264->h264_dev = (struct h264_device *) dev_get(HG_H264_DEVID);
+        if (video_h264->h264_dev)
+        {
+            video_h264->drv1_from = GEN420_DATA;
+            video_h264->drv2_from = ~0;
+            h264_set_oe_select(video_h264->h264_dev, 0, 0);
+            ret = h264_enc(video_h264->drv1_from, drv1_w, drv1_h, -1, 0, 0);
+
+            if (ret)
+            {
+                if (video_h264)
+                {
+                    STREAM_LIBC_FREE(video_h264);
+                }
+                msi_destroy(msi);
+                msi = NULL;
+                goto h264_msi_init_gen420_end;
+            }
+            else
+            {
+                h264_open(video_h264->h264_dev);
+                msi->action     = h264_msi_action;
+                video_h264->msi = msi;
+                fbpool_init(&video_h264->tx_pool, MAX_VIDEO_APP_264);
+            }
+        }
+        // 启动workqueue
+        // 创建一个任务去做h264的工作
+        // OS_TASK_INIT("video_h264", &video_h264->task, h264_msi_thread, (void*)video_h264, OS_TASK_PRIORITY_ABOVE_NORMAL, NULL, 1024);
+        OS_WORK_INIT(&video_h264->work, h264_msi_work, 0);
+        os_run_work_delay(&video_h264->work, 1);
+    }
+h264_msi_init_gen420_end:
     return msi;
 }

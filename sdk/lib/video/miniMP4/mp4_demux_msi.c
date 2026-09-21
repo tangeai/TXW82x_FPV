@@ -1292,9 +1292,10 @@ void mp4_demux_thread(void *d)
                 fb->len   = aframe_size + 7;
                 fb->mtype = F_AUDIO;
                 osal_fseek(mp4_demux->fp, aframe_offset);
-                err = osal_fread(fb->data + 7, 1, aframe_size, mp4_demux->fp);
+                err = osal_fread(fb->data, 1, aframe_size, mp4_demux->fp);
                 if (err)
                 {
+					os_memmove(fb->data+7, fb->data, aframe_size);
                     aac_dsi_to_adts(mp4_demux->aac_dsi, fb->data, aframe_size);
                     _os_printf("A");
                     msi_output_fb(mp4_demux->msi, fb);

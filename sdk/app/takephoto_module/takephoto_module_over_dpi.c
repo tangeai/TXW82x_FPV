@@ -18,6 +18,7 @@
 #include "hal/jpeg.h"
 #include "video_msi.h"
 #include "scale_msi/scale3_normal_msi.h"
+#include "yuv_from_cmd_msi.h"
 struct msi        *scale3_msi_pic_thumb(const char *name, uint8_t only, uint32_t normal_magic, uint32_t thumb_magic);
 extern struct msi *jpg_decode_msi(const char *name);
 extern struct msi *jpg_decode_msg_msi(const char *name, uint16_t out_w, uint16_t out_h, uint16_t step_w, uint16_t step_h, uint32_t filter);
@@ -36,6 +37,22 @@ static uint8_t filter(void *f, uint8_t recv_type)
     }
 
     return res;
+}
+
+static uint32_t over_dpi_normal_magic;
+static uint32_t over_dpi_thumb_magic;
+
+int takephoto_over_dpi_get_magic(uint32_t *normal_magic, uint32_t *thumb_magic)
+{
+    if (normal_magic)
+    {
+        *normal_magic = over_dpi_normal_magic;
+    }
+    if (thumb_magic)
+    {
+        *thumb_magic = over_dpi_thumb_magic;
+    }
+    return (over_dpi_normal_magic && over_dpi_thumb_magic) ? 0 : -1;
 }
 
 /****************************************************************************************************************************
@@ -181,6 +198,8 @@ void takephoto_with_thumb_over_dpi_init(const char *thumb_msi_name, uint8_t jpg_
 
     // 生成对应照片与缩略图的yuv
     gen_thumb_normal_yuv(normal_jpg_msi, thumb_msi, normal_magic, thumb_magic);
+    over_dpi_normal_magic = normal_magic;
+    over_dpi_thumb_magic  = thumb_magic;
 }
 
 /********************************************************************************************
@@ -227,31 +246,11 @@ void common_takephoto_over_dpi_init(uint8_t jpg_num)
     // 将scale3绑定到缩略图和大分辨率拍照那里
     msi_add_output(NULL, S_PREVIEW_SCALE3, normal_jpg_msi->name);
     msi_add_output(NULL, S_PREVIEW_SCALE3, thumb_msi->name);
-}
+    over_dpi_normal_magic = NORMAL_MAGIC;
+    over_dpi_thumb_magic  = THUMB_MAGIC;
 
-// 同时生成缩略图,如果不需要缩略图,thumb_w=0或者thumb_h=0
-// 注意，normal_w=0或者normal_h=0,表示获取跟镜头一致的分辨率yuv
-static void common_takephoto_over_dpi_api(struct msi *scale3_msi, uint16_t normal_w, uint16_t noraml_h, uint16_t thumb_w, uint16_t thumb_h)
-{
-    struct scale3_normal_cmd_s cmd;
-    gettimeofday(&cmd.t, NULL);
-
-    if (thumb_w && thumb_h)
-    {
-        cmd.w          = thumb_w;
-        cmd.h          = thumb_h;
-        cmd.magic      = THUMB_MAGIC;
-        cmd.is_thumb   = 0;
-        cmd.force_type = YUV_ARG_TAKEPHOTO;
-        msi_do_cmd(scale3_msi, MSI_CMD_SCALE3_NORMAL, MSI_SCLAE3_NORMAL_ADD_DPI, (uint32_t) &cmd);
-    }
-
-    cmd.w          = normal_w;
-    cmd.h          = noraml_h;
-    cmd.is_thumb   = 1;
-    cmd.magic      = NORMAL_MAGIC;
-    cmd.force_type = YUV_ARG_TAKEPHOTO;
-    msi_do_cmd(scale3_msi, MSI_CMD_SCALE3_NORMAL, MSI_SCLAE3_NORMAL_ADD_DPI, (uint32_t) &cmd);
+    // 大分辨率拍照的yuv获取(为了拍照接口,兼容旧版本)
+    compat_get_scale3_msi_init();
 }
 
 /***********************************************************************************************
@@ -261,7 +260,8 @@ static void common_takephoto_over_dpi_api(struct msi *scale3_msi, uint16_t norma
  * thumb_w:缩略图的宽度
  * thumb_h:缩略图的高度
  **********************************************************************************************/
-void common_takephoto_over_api(uint16_t over_w, uint16_t over_h, uint16_t thumb_w, uint16_t thumb_h, uint8_t takephoto_num)
+extern void get_yuv_from_scale3(uint8_t force_type, struct yuv_msg_s *msg1, struct yuv_msg_s *msg2, uint16_t count);
+void        common_takephoto_over_api(uint16_t over_w, uint16_t over_h, uint16_t thumb_w, uint16_t thumb_h, uint8_t takephoto_num)
 {
     struct msi *scale1_jpg_recode_msi = msi_find(R_SCALE1_JPG_RECODE, 1);
     if (scale1_jpg_recode_msi)
@@ -271,14 +271,20 @@ void common_takephoto_over_api(uint16_t over_w, uint16_t over_h, uint16_t thumb_
         msi_put(scale1_jpg_recode_msi);
     }
 
-    // 去将scale3启动可以产生缩略图和原图yuv
-    struct msi *scale3 = msi_find(S_PREVIEW_SCALE3, 1);
-    if (scale3)
-    {
-        for (int i = 0; i < takephoto_num; i++)
-        {
-            common_takephoto_over_dpi_api(scale3, 0, 0, thumb_w, thumb_h);
-        }
-        msi_put(scale3);
-    }
+    struct yuv_msg_s msg1;
+    memset(&msg1, 0, sizeof(msg1));
+    msg1.w        = thumb_w;
+    msg1.h        = thumb_h;
+    msg1.encode_w = 0;
+    msg1.encode_h = 0;
+    msg1.magic    = THUMB_MAGIC;
+
+    struct yuv_msg_s msg2;
+    memset(&msg2, 0, sizeof(msg2));
+    msg2.w        = 0;
+    msg2.h        = 0;
+    msg2.encode_w = over_w;
+    msg2.encode_h = over_h;
+    msg2.magic    = NORMAL_MAGIC;
+    get_yuv_from_scale3(YUV_ARG_TAKEPHOTO, &msg1, &msg2, takephoto_num);
 }

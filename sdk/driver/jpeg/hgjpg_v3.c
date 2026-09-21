@@ -247,7 +247,7 @@ void jpg_csr_encode_config(struct hgjpg_hw *p_jpg,uint32 image_h,uint32 image_w)
 		image_h = ((image_h/16)+1)*16;
 	p_jpg->CSR2 = ((image_h * image_w) /256)-1;
 	p_jpg->CSR3 = (image_w<<16)|(image_w/16 - 1);
-
+	p_jpg->CSR0 = 1;
 }
 
 int32 hgjpg_open(struct jpg_device *p_jpg){

@@ -22,7 +22,6 @@ void print_level(int8 level);
 
 void hw_memcpy(void *dest, const void *src, uint32 size);
 void hw_memset(void *dest, uint8 val, uint32 n);
-void hw_memcpy0(void *dest, const void *src, uint32 size);
 void hw_memcpy_no_cache(void *dest, const void *src, uint32 size);
 
 void *_os_memcpy(void *str1, const void *str2, int32 n);

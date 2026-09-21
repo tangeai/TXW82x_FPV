@@ -14,25 +14,20 @@
 #include "lib/heap/av_heap.h"
 #include "lib/heap/av_psram_heap.h"
 #include "lib/multimedia/msi.h"
+#include "lib/scale/scale_common.h"
+#include "lib/scale/scale_dev.h"
 #include "lib/video/dvp/jpeg/jpg_common.h"
 #include "osal/event.h"
 #include "user_work/user_work.h"
+#include "mem_cache.h"
+#define JPG_DECODE_TTL 1000
 
-#ifndef DECODE_MAX_W
-#define DECODE_MAX_W (320)
-#endif
-
-#ifndef DECODE_MAX_H
-#define DECODE_MAX_H (180)
-#endif
-#define DECODE_MAX_SIZE (DECODE_MAX_W * DECODE_MAX_H * 3 / 2)
-
-extern void scale2_from_jpeg_config_for_msi(struct scale_device *scale_dev, uint32_t yinsram, uint32_t uinsram, uint32_t vinsram, uint32_t yuvoutbuf, uint32 in_w, uint32 in_h, uint32 out_w,
-                                            uint32 out_h, uint8_t larger);
 // data申请空间函数
 #define STREAM_MALLOC av_psram_malloc
 #define STREAM_FREE   av_psram_free
 #define STREAM_ZALLOC av_psram_zalloc
+
+#define STREAM_LIBC_MALLOC av_malloc
 
 // 结构体申请空间函数
 #define STREAM_LIBC_MALLOC av_malloc
@@ -49,7 +44,8 @@ struct jpg_msi_s
 {
     struct os_work       work;
     struct msi          *msi;
-    struct fbpool        tx_pool;
+    struct mem_info    **mem_info;
+    uint32_t             mem_info_size;
     uint8_t             *scaler2buf_y;
     uint8_t             *scaler2buf_u;
     uint8_t             *scaler2buf_v;
@@ -71,17 +67,57 @@ struct jpg_msi_s
     uint8_t hardware_ready;
     uint8_t hardware_err;
     uint8_t is_register_isr;
+    uint8_t scale_unlock;
     // 是否自动释放空间(可能会导致碎片化严重,但是可以充分利用空间)
     uint8_t auto_free_space;
 };
 
+static struct framebuff *jpg_decode_alloc_output_fb(struct jpg_msi_s *decode, uint32_t size)
+{
+    uint8_t          *data;
+    struct framebuff *fb;
+
+    data = mem_cache_alloc(decode->mem_info, decode->mem_info_size, size, STREAM_MALLOC);
+    if (!data)
+    {
+        return NULL;
+    }
+    fb   = fb_alloc(data, size, 0, decode->msi);
+    if (!fb)
+    {
+        mem_cache_free(data);
+        return NULL;
+    }
+
+    fb->priv = (void *) STREAM_LIBC_ZALLOC(sizeof(struct jpg_decode_arg_s));
+    if (!fb->priv)
+    {
+        msi_delete_fb(NULL, fb);
+        return NULL;
+    }
+
+    return fb;
+}
+
+static void jpg_decode_scale_unlock(struct jpg_msi_s *decode)
+{
+    if (decode->scale_unlock)
+    {
+        scale_mutex_unlock(2, SCALE_LOCK_JPG_DECODE);
+        decode->scale_unlock = 0;
+    }
+}
+
 static void stream_jpg_decode_scale2_done(uint32 irq_flag, uint32 irq_data, uint32 param1)
 {
+    struct jpg_msi_s *decode = (struct jpg_msi_s *)irq_data;
+    jpg_decode_scale_unlock(decode);
 }
 
 static void stream_jpg_decode_scale2_ov_isr(uint32 irq_flag, uint32 irq_data, uint32 param1)
 {
-    // struct scale_device *scale_dev = (struct scale_device *)irq_data;
+    struct jpg_msi_s *decode = (struct jpg_msi_s *)irq_data;
+    jpg_decode_scale_unlock(decode);
     os_printf("sor2");
 }
 
@@ -97,13 +133,13 @@ static void stream_jpg_decode_err(uint32 irq_flag, uint32 irq_data, uint32 param
 {
     struct jpg_msi_s *decode = (struct jpg_msi_s *) irq_data;
     os_printf("decode err\r\n");
+    jpg_decode_scale_unlock(decode);
     // decode->hardware_ready = 1;
     decode->hardware_err = 1;
 }
 
 static int32 jpg_decode_work(struct os_work *work)
 {
-
     int               ret;
     uint8_t           unlock = 0;
     struct jpg_msi_s *decode = (struct jpg_msi_s *) work;
@@ -126,6 +162,7 @@ static int32 jpg_decode_work(struct os_work *work)
             // 不再解码了
             msi_delete_fb(NULL, decode->current_fb);
             decode->current_fb = NULL;
+            jpg_decode_scale_unlock(decode);
 
             // 这里最好将硬件模块停止
 
@@ -147,6 +184,7 @@ static int32 jpg_decode_work(struct os_work *work)
                 // 不再解码了
                 msi_delete_fb(NULL, decode->current_fb);
                 decode->current_fb = NULL;
+                jpg_decode_scale_unlock(decode);
             }
             // 解锁
             unlock = 1;
@@ -164,6 +202,8 @@ static int32 jpg_decode_work(struct os_work *work)
             _os_printf("&");
 
             msi_output_fb(decode->msi, fb);
+            jpg_decode_scale_unlock(decode);
+
             // 无论是完成还是失败,都要释放这张图片了
             msi_delete_fb(NULL, decode->parent_fb);
             decode->parent_fb       = NULL;
@@ -250,9 +290,32 @@ static int32 jpg_decode_work(struct os_work *work)
         {
             goto not_decode;
         }
+        ret = scale_mutex_lock(2, SCALE_LOCK_JPG_DECODE, NULL);
+        if (ret)
+        {
+            unlock = 1;
+            goto not_decode;
+        }
+        decode->scale_unlock = 1;
         // jpg_open(decode->jpg_dev);
         // 申请到fb,申请解码空间
-        fb = fbpool_get(&decode->tx_pool, 0, decode->msi);
+        {
+            struct jpg_decode_arg_s *msg = (struct jpg_decode_arg_s *) decode->parent_fb->data;
+            if (msg)
+            {
+                uint32_t out_size = msg->yuv_arg.out_w * msg->yuv_arg.out_h * 3 / 2;
+                fb                = jpg_decode_alloc_output_fb(decode, out_size);
+            }
+            else
+            {
+                os_printf("%s:%d\tdecode msg isn't normal\tmsg:%X\tname:%s\n", __FUNCTION__, __LINE__, msg, decode->parent_fb->msi->name);
+                msi_delete_fb(NULL, decode->parent_fb);
+                decode->parent_fb = NULL;
+                fb                = NULL;
+                unlock            = 1;
+                goto not_decode;
+            }
+        }
         if (fb)
         {
             // 因为这个是解码的数据,所以默认parent_fb的data是一个参数内容,而不是真实的data,真实jpg的data应该是附在parent_fb后面其他节点
@@ -262,7 +325,6 @@ static int32 jpg_decode_work(struct os_work *work)
             {
                 // 为fb申请解码空间,申请不到下次申请
                 fb->len = msg->yuv_arg.out_w * msg->yuv_arg.out_h * 3 / 2;
-                if (fb->len <= decode->max_data_size)
                 {
                     struct jpg_decode_arg_s *cfg;
                     cfg = (struct jpg_decode_arg_s *) fb->priv;
@@ -283,18 +345,6 @@ static int32 jpg_decode_work(struct os_work *work)
 
                     decode->current_fb       = fb;
                     decode->last_decode_time = os_jiffies();
-                }
-                else
-                {
-                    os_printf(KERN_ERR"config err,max size w:%d\th:%d\tmax_mem:%d\n",DECODE_MAX_W,DECODE_MAX_H,decode->max_data_size);
-                    // 不符合,需要删除,不去编码
-                    msi_delete_fb(NULL, decode->parent_fb);
-                    decode->parent_fb = NULL;
-
-                    msi_delete_fb(NULL, fb);
-                    fb     = NULL;
-                    // 解锁
-                    unlock = 1;
                 }
             }
             else
@@ -320,8 +370,10 @@ static int32 jpg_decode_work(struct os_work *work)
 not_decode:
     if (unlock)
     {
+        jpg_decode_scale_unlock(decode);
         jpg_mutex_unlock(JPGID1, JPG_LOCK_DECODE);
     }
+    mem_cache_gc(decode->mem_info, decode->mem_info_size, JPG_DECODE_TTL, STREAM_FREE);
     os_run_work_delay(work, 1);
     return 0;
 }
@@ -334,29 +386,8 @@ static int decode_msi_action(struct msi *msi, uint32 cmd_id, uint32 param1, uint
     {
         case MSI_CMD_POST_DESTROY:
         {
-            struct framebuff *fb;
-            // 释放资源fb资源文件,priv是独立申请的
-            while (1)
-            {
-                fb = fbpool_get(&decode->tx_pool, 0, NULL);
-                if (!fb)
-                {
-                    break;
-                }
-                // 预分配空间释放
-                if (fb->priv)
-                {
-                    STREAM_LIBC_FREE(fb->priv);
-                }
-
-                // 预分配空间释放
-                if (fb->data)
-                {
-                    STREAM_FREE(fb->data);
-                    fb->data = NULL;
-                }
-            }
-            fbpool_destroy(&decode->tx_pool);
+            jpg_decode_scale_unlock(decode);
+            mem_cache_destroy(decode->mem_info, decode->mem_info_size, STREAM_FREE);
             if (decode->scaler2buf_y)
             {
                 STREAM_LIBC_FREE(decode->scaler2buf_y);
@@ -386,6 +417,7 @@ static int decode_msi_action(struct msi *msi, uint32 cmd_id, uint32 param1, uint
             os_work_cancle2(&decode->work, 1);
             // 关闭硬件
             scale_close(decode->scale_dev);
+            jpg_decode_scale_unlock(decode);
             jpg_close(decode->jpg_dev);
 
             if (decode->current_fb)
@@ -404,9 +436,16 @@ static int decode_msi_action(struct msi *msi, uint32 cmd_id, uint32 param1, uint
         case MSI_CMD_FREE_FB:
         {
             struct framebuff *fb = (struct framebuff *) param1;
-            fbpool_put(&decode->tx_pool, fb);
-            // 不需要内核去释放fb
-            ret = RET_OK + 1;
+            if (fb)
+            {
+                if (fb->priv)
+                {
+                    STREAM_LIBC_FREE(fb->priv);
+                    fb->priv = NULL;
+                }
+                mem_cache_free(fb->data);
+                fb->data = NULL;
+            }
         }
         break;
 
@@ -453,12 +492,12 @@ static int decode_msi_action(struct msi *msi, uint32 cmd_id, uint32 param1, uint
 
                 case MSI_DECODE_READY:
                 {
-
                     struct jpg_msi_s        *decode = (struct jpg_msi_s *) msi->priv;
                     struct framebuff        *fb     = (struct framebuff *) arg;
                     uint32                   dst    = (uint32_t) fb->data;
                     struct jpg_decode_arg_s *cfg    = (struct jpg_decode_arg_s *) fb->priv;
                     uint8_t                  err    = 0;
+
                     // 如果空间不够,就重新申请把
                     if (decode->p1_w > decode->now_decode_pw)
                     {
@@ -514,10 +553,30 @@ static int decode_msi_action(struct msi *msi, uint32 cmd_id, uint32 param1, uint
                     }
                     if (!err)
                     {
-                        //jpg_open(decode->jpg_dev);
-                        scale2_from_jpeg_config_for_msi(decode->scale_dev, (uint32_t)decode->scaler2buf_y, (uint32_t)decode->scaler2buf_u, (uint32_t)decode->scaler2buf_v, dst, cfg->decode_w, cfg->decode_h, cfg->yuv_arg.out_w,
-                                                        cfg->yuv_arg.out_h, 10);
-
+                        uint8_t large = 10;
+                        if (cfg->step_w < cfg->yuv_arg.out_w)
+                        {
+                            large = cfg->yuv_arg.out_w * 10 / cfg->step_w;
+                        }
+                        else if (cfg->step_w < cfg->yuv_arg.out_h)
+                        {
+                            large = cfg->yuv_arg.out_h * 10 / cfg->step_h;
+                        }
+                        struct scale_cfg scale_cfg;
+                        memset(&scale_cfg, 0, sizeof(scale_cfg));
+                        scale_cfg.scale_dev   = decode->scale_dev;
+                        scale_cfg.yinbuf      = (uint32_t)decode->scaler2buf_y;
+                        scale_cfg.uinbuf      = (uint32_t)decode->scaler2buf_u;
+                        scale_cfg.vinbuf      = (uint32_t)decode->scaler2buf_v;
+                        scale_cfg.yuvoutbuf   = dst;
+                        scale_cfg.in_w        = cfg->decode_w;
+                        scale_cfg.in_h        = cfg->decode_h;
+                        scale_cfg.out_w       = cfg->yuv_arg.out_w;
+                        scale_cfg.out_h       = cfg->yuv_arg.out_h;
+                        scale_cfg.stream_type = MJPEG_DEC;
+                        scale_cfg.loc_mode    = SCALE_ALIGN_CENTER;
+                        scale2_config_for_msi(&scale_cfg);
+                        
                         if (!decode->is_register_isr)
                         {
                             scale_request_irq(decode->scale_dev, FRAME_END, (scale_irq_hdl) &stream_jpg_decode_scale2_done, (uint32) decode);
@@ -579,23 +638,12 @@ struct msi *jpg_decode_msi(const char *name)
     struct jpg_msi_s *decode = (struct jpg_msi_s *) msi->priv;
     if (is_new)
     {
-        decode      = (struct jpg_msi_s *) STREAM_LIBC_ZALLOC(sizeof(struct jpg_msi_s));
+        decode      = (struct jpg_msi_s *) STREAM_LIBC_ZALLOC(sizeof(struct jpg_msi_s) + sizeof(struct mem_info *) * MAX_DECODE_YUV_TX);
         decode->msi = msi;
         msi->priv   = (void *) decode;
         msi->action = decode_msi_action;
-
-        uint32_t init_count = 0;
-        void    *priv;
-        fbpool_init(&decode->tx_pool, MAX_DECODE_YUV_TX);
-        while (init_count < MAX_DECODE_YUV_TX)
-        {
-            uint8_t *data = (uint8_t *) STREAM_MALLOC(DECODE_MAX_SIZE);
-			ASSERT(data);
-            sys_dcache_invalid_range((uint32_t*)data, DECODE_MAX_SIZE);
-            priv          = (void *) STREAM_LIBC_ZALLOC(sizeof(struct jpg_decode_arg_s));
-            FBPOOL_SET_INFO(&decode->tx_pool, init_count, data, 0, priv);
-            init_count++;
-        }
+        decode->mem_info      = (struct mem_info **) (decode + 1);
+        decode->mem_info_size = MAX_DECODE_YUV_TX;
 
         decode->jpg_dev = (struct jpg_device *) dev_get(HG_JPG1_DEVID);
         decode->scale_dev       = (struct scale_device *) dev_get(HG_SCALE2_DEVID);
@@ -605,7 +653,6 @@ struct msi *jpg_decode_msi(const char *name)
         decode->now_decode_pw   = 0;
         decode->hardware_ready  = 1;
         decode->auto_free_space = 1;
-        decode->max_data_size   = DECODE_MAX_SIZE;
 
         msi->enable = 1;
         OS_WORK_INIT(&decode->work, jpg_decode_work, 0);

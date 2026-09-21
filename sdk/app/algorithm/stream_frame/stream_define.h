@@ -51,6 +51,7 @@ enum
 #define R_OSD_ENCODE                "osd_encode"
 #define R_OSD_SHOW                  "osd_show"
 #define R_LCD_OSD                   "LCD_OSD"
+#define R_LCD_ROTATE_YUV            "LCD_ROTATE_YUV"
 #define R_CSC_VIDEO_P2              "CSC_VIDEO_P2"
 #define R_VIDEO_P1                  "VIDEO_P1"
 #define R_VIDEO_P0                  "VIDEO_P0"
@@ -80,11 +81,17 @@ enum
 #define R_THUMB_DECODE_MSG          "THUMB_DECODE_MSG"
 #define R_THUMB_DECODE_MSG_USB      "THUMB_DECODE_MSG_USB"
 #define R_USBD_VIDEO                "usbd_video_msi"
+#define R_USBD_VIDEO_MJPEG          "usbd_video_mjpeg"
+#define R_USBD_VIDEO_H264           "usbd_video_h264"
 #define R_FILE_MSI                  "file_msi"
 #define R_RTP_H264                  "rtp-h264" // 图传的视频
 #define R_AVI_ENCODE_MSI            "avi_encode_msi"
 #define R_CSC_MSI                   "csc_msi"
 #define R_YUV_THUMB                 "YUV_THUMB"
+#define R_SCALE1_H264               "SCALE1_H264"
+#define R_COMMON_GEN420             "COMMON_GEN420"
+#define R_COMMON_SCALE1             "COMMON_SCALE1"
+#define R_COMPAT_TAKEPHOTO          "_COMPAT_TAKEPHOTO"
 // S
 #define S_PDM                       "pdm"
 #define S_ADC_AUDIO                 "adc_audio"
@@ -120,29 +127,32 @@ enum
 #define S_AVI_PLAYER                "avi_player"
 #define S_DEBUG_STREAM              "s_debug_stream"
 #define S_MP4_THUMB                 "mp4_thumb"
+#define S_BABY_H264_SEND            "baby_h264_send"
+#define S_COMPAT_SCALE3_YUV         "_compat_get_scale3_yuv"
 
 // SR
-#define SR_OTHER_JPG                "other_jpg"
-#define SR_OTHER_JPG_USB1           "other_jpg_usb1"
-#define SR_OTHER_JPG_USB2           "other_jpg_usb2"
-#define SR_OTHER_JPG_USB3           "other_jpg_usb3"
-#define SR_USB_RECODE_DEOCDE        "usb_recode_decode"
-#define SR_YUV_WATERMARK            "yuv_watermark"
-#define SR_LCD_YUV_WATERMARK        "lcd_yuv_watermark"
-#define SR_LCD_YUV_SCALE2           "lcd_yuv_scale2"
-#define USB_ODPI_TAKEPHOTO_CTRL     "usb_odpi_takephoto"
-#define USB_OVER_DPI_NORMAL_DECODE  "usb_odpi_normal_decode"
-#define USB_OVER_DPI_THUMB_DECODE   "usb_odpi_thumb_decode"
-#define SR_VIDEO_USB                "video_usb"
-#define SR_ZBAR_JPG                 "zbar_parse"
-#define SR_OVER_DPI_JPG             "over_dpi_jpg"
-#define SR_OVER_DPI_THUMB_JPG       "over_dpi_thumb"
-#define SR_USB_OVER_DPI_THUMB_JPG   "usb_over_dpi_thumb"
-#define SR_GEN420_720P_JPG          "GEN420_720P_MJPG"
-#define ROUTE_USB                   "route-usb"
-#define AUTO_JPG                    "auto-jpg"
-#define AUTO_JPG1                    "auto-jpg1"
-#define AUTO_H264                    "auto-h264"
+#define SR_OTHER_JPG               "other_jpg"
+#define SR_OTHER_JPG_USB1          "other_jpg_usb1"
+#define SR_OTHER_JPG_USB2          "other_jpg_usb2"
+#define SR_OTHER_JPG_USB3          "other_jpg_usb3"
+#define SR_USB_RECODE_DEOCDE       "usb_recode_decode"
+#define SR_YUV_WATERMARK           "yuv_watermark"
+#define SR_LCD_YUV_WATERMARK       "lcd_yuv_watermark"
+#define SR_LCD_YUV_SCALE2          "lcd_yuv_scale2"
+#define USB_ODPI_TAKEPHOTO_CTRL    "usb_odpi_takephoto"
+#define USB_OVER_DPI_NORMAL_DECODE "usb_odpi_normal_decode"
+#define USB_OVER_DPI_THUMB_DECODE  "usb_odpi_thumb_decode"
+#define SR_VIDEO_USB               "video_usb"
+#define SR_ZBAR_JPG                "zbar_parse"
+#define SR_OVER_DPI_JPG            "over_dpi_jpg"
+#define SR_OVER_DPI_THUMB_JPG      "over_dpi_thumb"
+#define SR_USB_OVER_DPI_THUMB_JPG  "usb_over_dpi_thumb"
+#define SR_GEN420_720P_JPG         "GEN420_720P_MJPG"
+#define SR_SCALE3_TAKEPHOTO        "scale3_takephoto"
+#define ROUTE_USB                  "route-usb"
+#define AUTO_JPG                   "auto-jpg"
+#define AUTO_JPG1                  "auto-jpg1"
+#define AUTO_H264                  "auto-h264"
 
 // 高16位是大类型(统一宏),低16位是细分类型
 #define SET_DATA_TYPE(type1, type2) (type1 << 16 | type2)
@@ -201,6 +211,7 @@ struct jpg_node_s
 {
     uint16_t w, h;
     uint32_t jpg_len;
+    void    *output_msi;
 };
 
 struct fb_h264_s
@@ -229,6 +240,8 @@ struct yuv_arg_s
     uint32_t type; // 不同类型的yuv代表携带的信息不一致?(暂时没有想到更好方法,暂时通过这个去识别,如果某些模块只要yuv,是可以不识别的)
     uint32_t y_size;
     uint32_t y_off;
+    uint32_t u_off;
+    uint32_t v_off;
     uint32_t uv_off;
     uint32_t out_w;
     uint32_t out_h;
@@ -239,6 +252,7 @@ struct yuv_arg_s
     uint32_t magic;          // 一个类似随机数?有些msi可以通过识别这个magic来判断是否为自己所需要的数据};
     uint8_t  video_only;     // 多屏显示层专用，用于只显示当前层画面
     uint8_t  extern_fb_flag; // 临时增加,用于scale3使用
+    void    *msi;            // 主要是为了yuv重新编码后输出的msi,如果不需要重新编码,则不需要设置
 };
 
 // 解码,yuv通用参数放前面,与yuv_arg_s保持一致
@@ -255,6 +269,9 @@ struct jpg_decode_arg_s
 struct takephoto_yuv_arg_s
 {
     struct yuv_arg_s yuv_arg;
+    // 最终目标编码的size(一般是给scale1去用)
+    uint16_t         target_encode_w;
+    uint16_t         target_encode_h;
     char             name[64];
 };
 
@@ -308,6 +325,8 @@ enum MSI_SCALE3_NORMAL_CMD
     MSI_SCALE3_START,
     MSI_SCLAE3_NORMAL_ADD_DPI, // 从scale3增加一个获取某个分辨率的yuv数据,暂定内部只有一个buf,
                                // 用于分时复用,考虑连拍的问题,如果采用一次性全部获取,会导致推屏丢帧严重
+    MSI_SCALE3_ADD_STREAM,     // 动态添加输出流,param2=&struct scale3_stream_cfg_s
+    MSI_SCALE3_DEL_STREAM,     // 动态删除输出流,param2=cam_id
 
 };
 
@@ -321,6 +340,10 @@ enum MSI_SCALE2_CMD
 {
     MSI_SCALE2_START,
     MSI_SCALE2_SET_FILTER_TYPE,
+    MSI_SCALE2_SET_LOC_MODE,
+    MSI_SCALE2_SET_X_Y,
+    MSI_SCALE2_SET_W_H,
+    MSI_SCALE2_SET_STYPE,
 };
 
 enum MSI_LCD_VIDEO_CMD
@@ -356,6 +379,7 @@ enum MSI_JPEG_CONCAT
     MSI_SET_SCALE1_TYPE,
     MSI_SET_TIME,
     MSI_SET_SCALE1_AUTO_FLAG,
+    MSI_SET_OUTPUT_MSI,
 };
 
 enum MSI_JPEG_HARDWARE
@@ -369,6 +393,7 @@ enum MSI_JPEG_HARDWARE
     MSI_JPEG_SET_TIME,
     MSI_JPEG_SET_LEN,
     MSI_JPEG_SET_SCALE1_FLAG,
+    MSI_JPEG_SET_OUTPUT_MSI,
 };
 
 enum MSI_AUTO_JPG
@@ -400,6 +425,7 @@ enum MSI_JPG_THUMB
 {
     MSI_JPG_THUMB_TAKEPHOTO,
     MSI_JPG_THUMB_TAKEPHOTO_SETPATH,
+    MSI_JPG_SET_FILTER,
 };
 
 enum MSI_DECODE_CMD
@@ -439,6 +465,8 @@ enum MSI_MEDIA_CTRL_CMD
     MSI_MEDIA_CTRL_GET_RECTIME,
     MSI_MEDIA_CTRL_SET_RECORD_SIZE,
     MSI_MEDIA_CTRL_SET_RECORD_SEC,
+    MSI_MEDIA_CTRL_THUMB,
+    MSI_MEDIA_CTRL_FIXED_FPS,
 };
 
 enum MSI_VIDEO_DEMUX_CTRL_CMD

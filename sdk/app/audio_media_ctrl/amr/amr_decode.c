@@ -36,7 +36,7 @@ struct amr_decode_struct {
     uint8_t amr_type;
     uint8_t next_status;
     uint8_t current_status;
-    uint8_t inbuf[BUFF_SIZE];    
+    uint8_t *inbuf;    
 	uint32_t buf_size;
 	uint32_t buf_offset;
 };
@@ -196,8 +196,6 @@ amr_decode_end:
 static void amr_decode_thread(void *d)
 {
     struct amr_decode_struct *s = (struct amr_decode_struct *)d;
-    
-    msi_get(s->msi);
 
     if(s->direct_to_dac) {
         msi_cmd("R_AUDAC",MSI_CMD_AUDAC,MSI_AUDAC_SET_FILTER_TRACK,(uint32_t)(&(s->audio_track)));
@@ -375,6 +373,10 @@ static int32_t amr_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
                     AMR_DECODE_FREE(amr_decode_s->msi_name);
                     amr_decode_s->msi_name = NULL;
                 }
+				if(amr_decode_s->inbuf) {
+					AMR_DECODE_FREE(amr_decode_s->inbuf);
+					amr_decode_s->inbuf = NULL;
+				}
                 AMR_DECODE_FREE(amr_decode_s);
                 amr_decode_s = NULL;
             }
@@ -389,18 +391,26 @@ static int32_t amr_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
 struct msi *amr_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec_init)
 {
 #if AUDIO_EN
+    uint8_t msi_isnew = 0;
     char *msi_name = NULL;
+    uint32_t random_bytes = 0;
 
     msi_name = (char*)AMR_DECODE_ZALLOC(sizeof(char)*32);
     if(msi_name == NULL) {
-        os_printf("alloc autpc msi namefail\n");
+        os_printf("alloc amr decode msi namefail\n");
         return NULL;
     }
-    os_snprintf(msi_name, 20, "SR_AMR_DECODE_""%04d", (int)(os_jiffies()));
-    struct msi *msi = msi_new(msi_name, 0, NULL);
+create_msi_again:
+    os_random_bytes((uint8_t*)(&random_bytes), 4);
+    os_snprintf(msi_name, 20, "SR_AMR_DECODE_""%04u", random_bytes%10000);
+    struct msi *msi = msi_new(msi_name, 0, &msi_isnew);
 	if(msi == NULL) {
 		AMR_INFO("create amr decode msi fail!\r\n");
+        AMR_DECODE_FREE(msi_name);
 		return NULL;
+	}
+	else if(msi_isnew == 0) {
+		goto create_msi_again;
 	}
 	struct amr_decode_struct *amr_decode_s = (struct amr_decode_struct*)AMR_DECODE_ZALLOC(sizeof(struct amr_decode_struct));
 	if(!amr_decode_s) {
@@ -433,6 +443,11 @@ struct msi *amr_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec
         AMR_INFO("create amr decode event fail!\r\n");
         goto amr_decode_init_err;
     }
+	amr_decode_s->inbuf = (uint8_t*)AMR_DECODE_MALLOC(BUFF_SIZE * sizeof(uint8_t));
+	if(amr_decode_s->inbuf == NULL) {
+		AMR_INFO("amr decode alloc inbuf fail!\r\n");
+		goto amr_decode_init_err;
+	}
 	amr_decode_s->msi = msi;
     amr_decode_s->msi_name = msi_name;
     amr_decode_s->loop_mode = loop_mode;
@@ -457,6 +472,7 @@ struct msi *amr_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec
 		AMR_INFO("create amr decode task fail!\r\n");
 		goto amr_decode_init_err;
 	}
+    msi_get(msi);
     return msi;
 	
 amr_decode_init_err:

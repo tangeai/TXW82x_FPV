@@ -21,6 +21,7 @@
 #include "lib/audio/audio_code/audio_code.h"
 #include "lib/audio/audio_proc/audio_proc.h"
 #include "lib/audio/wsola/wsola_process.h"
+#include "lib/audio/resample/resample.h"
 
 #if RTT_USB_EN
 #include "rtthread.h"
@@ -230,9 +231,10 @@ static void app_hardware_init(uint8_t vcam)
 #endif
 
 #if AUDIO_EN
-    reg_auproc_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-    reg_wsola_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-    reg_aucoder_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
+	reg_auproc_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+	reg_wsola_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+	reg_aures_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+    reg_aucoder_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
     aucode_mutex_init();
     audio_adc_init(AUSYS_AUAD, 8000, 1, 4, 0);
     audio_dac_init();

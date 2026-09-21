@@ -23,6 +23,8 @@ uint32 get_boot_loader_offset();
 int16 get_code_crc(uint8 *buf,uint32 len,uint16 *crc);//返回ota代码的crc(只需要前面256byte)
 uint16 get_code_crc16();    //获取当前代码的crc
 
+void rom_qspi_reboot_trampoline(int al_loader_is_exist);
+
 #ifdef __cplusplus
 }
 #endif

@@ -85,8 +85,8 @@ __init static void sys_wifi_parameter_init(void)
 #endif
 
 #ifdef CONFIG_SLEEP
-    void *bgn_dsleep_init(void *ops);
-    bgn_dsleep_init(ops);
+    void *bgn_dsleep_init(void *ops, uint32 flags);
+    bgn_dsleep_init(ops, 0);
 #endif
 }
 

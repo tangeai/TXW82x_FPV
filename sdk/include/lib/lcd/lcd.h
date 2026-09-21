@@ -165,8 +165,6 @@ typedef struct _lcd_desc_s {
 lcddev_t;
 
 
-
-
 extern lcddev_t  lcdstruct;
 void scale_soft_run(uint8_t *softbuf,uint32_t w,uint32 h);
 void scale_to_lcd_config_soft(uint8_t *softbuf,uint32_t w,uint32_t h);
@@ -180,8 +178,7 @@ void lcd_module_run();
 void lcd_user_frame(uint32 frame_addr);
 void jpg_decode_to_lcd(uint32 photo,uint32 jpg_w,uint32 jpg_h,uint32 video_w,uint32 video_h);
 int32 jpg_decode_is_finish();
-void mipi_dsi_init(uint32 w,uint32 h,uint32 dclk,uint8 vsa,uint8 vbp,uint8 vfp,uint8 hsa,uint8 hbp,uint8 hfp,uint8 lanenum,uint8 colortype);
-
-
+void mipi_dsi_init(uint32 w, uint32 h, uint32 dclk, uint8 vsa, uint8 vbp, uint8 vfp, uint8 hsa, uint8 hbp, uint8 hfp, uint8 lanenum, uint8 colortype);
+void mipi_dsi_init_no_panel(uint32 w, uint32 h, uint32 dclk, uint8 vsa, uint8 vbp, uint8 vfp, uint8 hsa, uint8 hbp, uint8 hfp, uint8 lanenum, uint8 colortype);
 
 #endif

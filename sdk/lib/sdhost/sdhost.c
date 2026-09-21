@@ -26,6 +26,7 @@ struct sdh_device *sdh_test;
 struct os_semaphore sem;
 
 #define SD_SAMPLE_VALUE_PRINT       (1)
+#define SD_DATA_RETRY_PER_POINT     (3)
 
 #ifdef PSRAM_HEAP
 #define SDHC_HEAP_MALLOC  os_malloc_psram
@@ -801,7 +802,8 @@ int sd_multiple_write(struct sdh_device * host,uint32 lba,uint32 len,uint8 *buf)
     uint32 backup_lba = host->new_lba;
     uint32 block_num  = len/SECTOR_SIZE;
     struct rt_mmcsd_cmd  cmd;	
-    uint8  retry_cnt  = 0;
+    uint16 retry_cnt  = 0;
+    uint16 retry_limit = ((uint16)host->sd_write_sample_num + 1U) * SD_DATA_RETRY_PER_POINT;
     uint8  curr_index = 0;
     uint8  retry_sample_cnt = 0;
     uint8  sample_point_bak = 0;
@@ -911,18 +913,24 @@ __retry:
                 }
             }
 
-            if (host->sd_write_retry != LL_SDHC_RETRY_ERR) {
+            if ((host->sd_write_retry != LL_SDHC_RETRY_ERR) && (retry_cnt < retry_limit)) {
                 retry_cnt++;
                 /* retry 3 times @ every sample point */
-                if (0 == (retry_cnt % 3)) {
+                if (0 == (retry_cnt % SD_DATA_RETRY_PER_POINT)) {
                     host->sd_write_retry = (host->sd_write_retry == LL_SDHC_RETRY_DEFAULT) ? LL_SDHC_RETRY_SELECT_POINT : LL_SDHC_RETRY_DEFAULT;
                 }
                 
-                curr_lba  = host->new_lba - host->data.blks;
-                block_num = host->data.blks;
-                kick_buf  = kick_buf + (block_num - host->data.blks) * SECTOR_SIZE;
+                uint32 retry_blocks = host->data.blks;
+                uint32 completed_blocks = (block_num > retry_blocks) ? (block_num - retry_blocks) : 0;
+
+                curr_lba  = host->new_lba - retry_blocks;
+                kick_buf  = kick_buf + completed_blocks * SECTOR_SIZE;
+                block_num = retry_blocks;
                 goto __retry;
-            }   
+            } else if (retry_cnt >= retry_limit) {
+                host->sd_write_retry = LL_SDHC_RETRY_ERR;
+                SDHC_ERR_PRINTF("sd err: write retry limit %d!\r\n", retry_limit);
+            }
         } 
 
         if (ret == MMCSD_NO_ERR) {
@@ -947,7 +955,8 @@ int sd_multiple_read(struct sdh_device * host,uint32 lba, uint32 len, uint8* buf
     uint32 curr_lba    = lba;
     uint32 backup_lba  = host->new_lba;
     uint32 block_num   = len/SECTOR_SIZE;
-    uint8  retry_cnt   = 0;
+    uint16 retry_cnt   = 0;
+    uint16 retry_limit = ((uint16)host->sd_read_sample_num + 1U) * SD_DATA_RETRY_PER_POINT;
     uint8  curr_index  = 0;
     uint8  retry_sample_cnt = 0;
     uint8  sample_point_bak = 0;
@@ -1048,7 +1057,7 @@ __retry:
 
                 if (retry_sample_cnt >= host->sd_read_sample_num) {
                     host->sd_read_sample = sample_point_bak;
-                    host->sd_write_retry = LL_SDHC_RETRY_ERR;
+                    host->sd_read_retry = LL_SDHC_RETRY_ERR;
                     /* disable retry */
 //                    host->sd_write_retry_flag = 1;
                     SDHC_ERR_PRINTF("sd err: sel all rd point!\r\n");
@@ -1057,18 +1066,24 @@ __retry:
                 }
             }
 
-            if (host->sd_read_retry != LL_SDHC_RETRY_ERR) {
+            if ((host->sd_read_retry != LL_SDHC_RETRY_ERR) && (retry_cnt < retry_limit)) {
                 retry_cnt++;
                 /* retry 3 times @ every sample point */
-                if (0 == (retry_cnt % 3)) {
+                if (0 == (retry_cnt % SD_DATA_RETRY_PER_POINT)) {
                     host->sd_read_retry = (host->sd_read_retry == LL_SDHC_RETRY_DEFAULT) ? LL_SDHC_RETRY_SELECT_POINT : LL_SDHC_RETRY_DEFAULT;
                 }
                 
-                curr_lba  = host->new_lba - host->data.blks;
-                block_num = host->data.blks;
-                kick_buf  = kick_buf + (block_num - host->data.blks) * SECTOR_SIZE;
+                uint32 retry_blocks = host->data.blks;
+                uint32 completed_blocks = (block_num > retry_blocks) ? (block_num - retry_blocks) : 0;
+
+                curr_lba  = host->new_lba - retry_blocks;
+                kick_buf  = kick_buf + completed_blocks * SECTOR_SIZE;
+                block_num = retry_blocks;
                 goto __retry;
-            }   
+            } else if (retry_cnt >= retry_limit) {
+                host->sd_read_retry = LL_SDHC_RETRY_ERR;
+                SDHC_ERR_PRINTF("sd err: read retry limit %d!\r\n", retry_limit);
+            }
         } 
 
         if((ret == MMCSD_NO_ERR)) {
@@ -1416,7 +1431,19 @@ uint32 sd_init(struct sdh_device * host, uint32 clk, uint32 flags)
     uint32 ret;
     uint32 resp[4];
     uint32 ocr;
-    uint8  bw  = 1;
+    uint8  bw = (flags & SDHC_INIT_FLAGS_BUS_WIDTH_4) ? 4 : 1;
+
+#if defined (TXW82X)
+    if ((bw == 4) &&
+        ((MACRO_PIN(PIN_SDH_DAT1) == 255) ||
+         (MACRO_PIN(PIN_SDH_DAT2) == 255) ||
+         (MACRO_PIN(PIN_SDH_DAT3) == 255)))
+    {
+        SDHC_ERR_PRINTF("sd 4-bit init requires DAT1/DAT2/DAT3 pins\r\n");
+        return RET_ERR;
+    }
+#endif
+
     SDHC_WARN_PRINTF("open_width:%d\r\n",bw);
 
 

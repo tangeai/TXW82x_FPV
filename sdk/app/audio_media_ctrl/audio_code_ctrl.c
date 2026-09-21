@@ -10,15 +10,19 @@
 struct msi *audio_encode_init(uint32_t coder, uint32_t samplerate, AUENC_INIT *auenc_init)
 {
     struct msi *msi = NULL;
+    if(auenc_init->channels != 1 || auenc_init->channels != 2) {
+        auenc_init->channels = 1;
+        os_printf("audio encoder channels parm err!");
+    }
     switch(coder) {
         case AAC_ENC:
-            msi = aac_encode_init(NULL, samplerate, 0, auenc_init);
+            msi = aac_encode_init(NULL, samplerate, auenc_init->channels, 0, auenc_init);
             break;
         case ALAW_ENC:
-            msi = alaw_encode_init(samplerate, auenc_init);
+            msi = alaw_encode_init(samplerate, auenc_init->channels, auenc_init);
             break;
         case OPUS_ENC:
-            msi = opus_encode_init(samplerate, auenc_init);
+            msi = opus_encode_init(samplerate, 1, auenc_init);
             break;
         default:
             break;

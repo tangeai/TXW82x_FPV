@@ -183,7 +183,7 @@ static int avi_record_running(struct msi *msi, uint32_t save_time, void *fp, con
                     goto avi_record_running_end;
                 }
 
-                audio_frq            = avi_record->audio_encode ? audio_adc_get_samplerate(AUSYS_AUAD) : 0;
+                audio_frq            = avi_record->audio_encode ? audio_adc_get_samplerate(MAIN_MIC_ID) : 0;
                 odml_msg->win_w      = width;
                 odml_msg->win_h      = height;
                 odml_msg->frame_rate = fps;

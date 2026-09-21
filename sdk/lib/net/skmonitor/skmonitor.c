@@ -85,7 +85,7 @@ static void sock_monitor_task(void *args)
                 }
                 if (mntr->sock > ret) {
                     ret = mntr->sock;
-                }
+                }
             }
             mntr = mntr->next;
         }

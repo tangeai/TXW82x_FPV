@@ -86,7 +86,7 @@ static void enter_audio_dac_test_ui(lv_event_t * e)
     audec_init.use_tpc = 0;
 	audec_init.destroy_self = 0;
     audec_init.src_msi = NULL;
-    ui_s->audio_play_msi = audio_file_play_init("0:count.wav", 1, &audec_init);
+    ui_s->audio_play_msi = audio_file_play_init("0:count.wav", 1, &audec_init,0);
     #endif
 
     lv_obj_add_event_cb(ui, exit_audio_dac_test_ui, LV_EVENT_PRESSED, ui_s);

@@ -7,6 +7,7 @@
 #include "lib/video/mipi_csi/mipi_csi.h"
 #include "lib/video/h264/h264_drv.h"
 #include "lib/video/vpp/vpp_dev.h"
+#include "lib/video/dual/dual_org_dev.h"
 #include "lib/video/para_in/para_in_dev.h"
 #include "lib/multimedia/msi.h"
 #include "stream_define.h"
@@ -21,6 +22,7 @@
 #include "lib/audio/audio_code/audio_code.h"
 #include "lib/audio/audio_proc/audio_proc.h"
 #include "lib/audio/wsola/wsola_process.h"
+#include "lib/audio/resample/resample.h"
 
 #if RTT_USB_EN
 #include "rtthread.h"
@@ -53,7 +55,7 @@
 #include "takephoto_module/takephoto.h"
 #include "scale_msi/scale3_normal_msi.h"
 #include "mp4_encode_msi2.h"
-
+#include "yuv_from_cmd_msi.h"
 
 int32 atcmd_recv(uint8 *data, int32 len);
 void  user_workqueue_init(uint16 pri, void *stack, uint16 stack_size);
@@ -252,7 +254,7 @@ __init static void fpv_app_init(void)
         else if (camera_w == 1280 && camera_h == 720)
         {
             common_takephoto_normal_init(R_THUMB);
-            common_takephoto_over_dpi_init(JPGID0);
+            common_takephoto_over_dpi_init(JPGID1);
             takephoto_from = VPP_DATA0;
         }
         // 其他摄像头,主要是为了拍照720P的图片,1080P摄像头从VPP_DATA1,不支持大分辨率拍照
@@ -378,6 +380,8 @@ void        hardware_init(uint8_t vcam)
     mipi_debug.debug_io1    = PD_5;
     mipi_debug.debug_io2    = PD_6;
     mipi_debug.debug_io3    = PD_7;
+    mipi_debug.debug_io4    = 255;
+    mipi_debug.debug_io5    = 255;
     mipi_debug.debug_type0  = 6;
     mipi_debug.debug_type1  = 7;
     mipi_debug.debug_type2  = 8;
@@ -385,7 +389,7 @@ void        hardware_init(uint8_t vcam)
 #if DVP_EN
     int ret;
     ret = mipi_csi_hardware_config(HG_MIPI_CSI_DEVID, 1, CAM_DUAL_MASTER_SLAVE_MODE, 1, SENSOR_TYPE_SLAVE0, 24, &mipi_debug);
-    mipi_csi_hardware_config(HG_MIPI1_CSI_DEVID, 1, CAM_DUAL_MASTER_SLAVE_MODE, 1, ret?SENSOR_TYPE_SLAVE1:SENSOR_TYPE_SLAVE0, 24, &mipi_debug);
+    mipi_csi_hardware_config(HG_MIPI1_CSI_DEVID, 1, CAM_DUAL_MASTER_SLAVE_MODE, 1, ret ? SENSOR_TYPE_SLAVE1 : SENSOR_TYPE_SLAVE0, 24, &mipi_debug);
 #else
 
     mipi_csi_hardware_config(HG_MIPI_CSI_DEVID, 1, CAM_SINGLE_MASTER_MODE, 0, SENSOR_TYPE_MASTER, 24, &mipi_debug);
@@ -431,18 +435,18 @@ void        hardware_init(uint8_t vcam)
 #endif
 
 #if TOUCH_PAD_EN
-    touch_pad_hareware_init();
+    touch_pad_hardware_init();
 #endif
 
 #if DUAL_EN
-    void dorg_double_sensor(uint32 src0_w, uint32 src0_h, uint32 src1_w, uint32 src1_h, uint32 src0_raw_num, uint32 src1_raw_num, uint8_t dvp_type, uint8_t csi0_type, uint8_t csi1_type);
     dorg_double_sensor(1280, 720, 1280, 720, RAW8, RAW10, 1, 2, 3);
 #endif
 
 #if AUDIO_EN
-    reg_auproc_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-    reg_wsola_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-    reg_aucoder_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
+    reg_auproc_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+    reg_wsola_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+    reg_aures_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+    reg_aucoder_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
     aucode_mutex_init();
     audio_adc_init(AUSYS_AUAD, 8000, 1, 4, 0);
     audio_dac_init();
@@ -501,10 +505,10 @@ void        hardware_init(uint8_t vcam)
     };
 #else
     struct hg_lv_mem_hooks hook = {
-            .malloc  = av_psram_malloc,
-            .realloc = av_psram_realloc,
-            .zalloc  = av_psram_zalloc,
-            .free    = av_psram_free,
+            .malloc  = _os_malloc_psram,
+            .realloc = _os_realloc_psram,
+            .zalloc  = _os_zalloc_psram,
+            .free    = _os_free_psram,
     };
 #endif
     hg_lv_mem_register(&hook);

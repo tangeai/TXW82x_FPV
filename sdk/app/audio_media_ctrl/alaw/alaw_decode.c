@@ -150,8 +150,6 @@ static void alaw_decode_thread(void *d)
 {
     struct alaw_decode_struct *s = (struct alaw_decode_struct *)d;
 
-    msi_get(s->msi);
-
     if(s->direct_to_dac) {
         msi_cmd("R_AUDAC",MSI_CMD_AUDAC,MSI_AUDAC_SET_FILTER_TRACK,(uint32_t)(&(s->audio_track)));
     }
@@ -366,19 +364,27 @@ static int32_t alaw_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t
 struct msi *alaw_decode_init(AUDEC_INIT *audec_init)
 {
 #if AUDIO_EN
+    uint8_t msi_isnew = 0;
     char *msi_name = NULL;
+    uint32_t random_bytes = 0;
 
     msi_name = (char*)ALAW_CODE_ZALLOC(sizeof(char)*32);
     if(msi_name == NULL) {
-        os_printf("alloc autpc msi namefail\n");
+        os_printf("alloc alaw decode msi namefail\n");
         return NULL;
     }
-    os_snprintf(msi_name, 20, "SR_ALAW_DECODE_""%04d", (int)(os_jiffies()));
-	struct msi *msi = msi_new(msi_name, MAX_ALAW_DECODE_RXBUF, NULL);
+create_msi_again:
+    os_random_bytes((uint8_t*)(&random_bytes), 4);
+    os_snprintf(msi_name, 20, "SR_ALAW_DECODE_""%04u", random_bytes%10000);
+	struct msi *msi = msi_new(msi_name, MAX_ALAW_DECODE_RXBUF, &msi_isnew);
 	if(msi == NULL) {
 		ALAW_INFO("create alaw decode msi fail!\r\n");
+        ALAW_CODE_FREE(msi_name);
 		return NULL;
-	}    
+	} 
+	else if(msi_isnew == 0) {
+		goto create_msi_again;
+	}   
 	struct alaw_decode_struct *alaw_decode_s = (struct alaw_decode_struct*)ALAW_CODE_ZALLOC(sizeof(struct alaw_decode_struct));
 	if(!alaw_decode_s) {
 		ALAW_INFO("alaw_decode_s malloc fail!\r\n");
@@ -414,6 +420,7 @@ struct msi *alaw_decode_init(AUDEC_INIT *audec_init)
 		ALAW_INFO("create opus decode task fail!\r\n");
 		goto alaw_decode_init_err;
 	}
+    msi_get(msi);
 	return msi;
 	
 alaw_decode_init_err:

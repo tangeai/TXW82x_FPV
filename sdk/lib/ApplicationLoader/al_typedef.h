@@ -92,6 +92,8 @@ enum verify_mode {
 
 #define XZ_HEADER_MAGIC		            "ZHTX-XZ-FILE" /**< XZ压缩文件头标志 */
 
+#define FW_MAGIC                        (0xC791B319) /**< 固件魔数标志 */
+
 /**
  * @struct xz_info
  * @brief XZ压缩文件头信息
@@ -239,13 +241,32 @@ struct system_info {
     uint8 firmware_has_run;   /**< 固件曾经成功运行过 */
 };
 
-struct fls_user_data {
+/**
+ * @struct loader_info
+ * @brief Loader信息结构体
+ */
+struct loader_info {
+    uint32 ld_addr[2];      /**< Loader地址[0:主,1:备] */
+    uint32 ld_version[2];   /**< Loader版本 */
+    uint32 ld_is_cipher[2]; /**< 是否加密标志 */
+    uint32 ld_valid_num;    /**< 有效Loader数量 */
+    uint32 target_ld_index; /**< 目标Loader索引 */
+};
+
+/**
+ * @struct user_info
+ * @brief 用户数据结构体
+ */
+struct user_info {
     uint32 fw_magic;        /**< 固件魔数(0xA5A55A5A) */
-    uint32 loader_bytes;
+    uint32 loader_bytes;    /**< 当前有效Loader镜像实际字节数，不表示槽容量 */
     uint32 loader_steps;
     uint32 spi_density_id;
+    TYPE_BOOTLOADER    rom_boot_info;
+    TYPE_CLOCK_CFG     rom_clk_info;
+    struct loader_info loader_info;
 };
-typedef struct fls_user_data* fls_user_data_t;
+typedef struct user_info* user_info_t;
 
 /**
   * @}

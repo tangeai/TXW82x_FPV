@@ -62,6 +62,14 @@ int gettimeofday(struct timeval *ptimeval, struct timezone *ptimezone)
     return 0;
 }
 
+int gettimeofday2(struct timeval *ptimeval, uint64 msec)
+{
+    int64 diff_ns = (msec * 1000 * 1000) - sys_time_base_ns;
+    ptimeval->tv_sec  = (sys_time_real_ns + diff_ns) / NANOSECONDS_PER_SECOND;
+    ptimeval->tv_usec = ((sys_time_real_ns + diff_ns) % NANOSECONDS_PER_SECOND) / 1000;
+    return 0;
+}
+
 int settimeofday(const struct timeval *tv, const struct timezone *tz)
 {
     uint32 f = disable_irq();

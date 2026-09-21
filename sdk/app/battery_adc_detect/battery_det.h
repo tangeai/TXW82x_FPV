@@ -3,5 +3,6 @@
 
 void bat_ad_init();
 int bat_get_level();
+void poweron_check(void);
 
 #endif

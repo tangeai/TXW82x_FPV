@@ -117,6 +117,7 @@ struct mp4_encode_msi_s
     uint8_t                 filter_type;
     uint8_t                 srcID;
     uint8_t                 mode; // 普通录像 / 缩时录影 / 事件触发
+    uint8_t                 thumb_en;
     int16_t                 max_video_count;
     uint32_t                rec_time;
     uint32_t                rec_second;
@@ -125,6 +126,7 @@ struct mp4_encode_msi_s
     uint32_t                audio_batch_buf_size;
     uint32_t                timeLapse_count;
     uint32_t                file_size;
+    uint16_t                fps;
 };
 
 extern struct msi *mp4_thumb_msi_init(const char *filename, uint8_t srcID, uint8_t filter);
@@ -714,13 +716,16 @@ static int mp4_encode_running(struct msi *msi, uint32_t save_time, void *fp, con
     uint8_t     h264_count   = 0;
     uint8_t     asps_data[2];
 
+    uint32_t video_need_count          = 0;
+    uint32_t video_already_write_connt = 0;
+
     uint32_t now_time             = 0;
     uint32_t last_fb_time         = 0;
     uint32_t video_first_time     = 0;
     uint32_t audio_first_time     = 0;
     uint32_t second               = 0;
     uint32_t last_adjust_pts_time = os_jiffies();
-    int      delta                = 66;
+    int      delta                = 40;
     int      average_pts          = delta * 90;
     int      acc_pts              = 0;
     int      acc_pts_tmp          = 0;
@@ -732,7 +737,6 @@ static int mp4_encode_running(struct msi *msi, uint32_t save_time, void *fp, con
     struct framebuff *audio_batch[MP4_AUDIO_BATCH_SIZE] = {0};
     uint32_t          audio_batch_cnt                   = 0;
     uint32_t          audio_batch_start_time            = 0;
-    uint32_t          start = 0, end = 0;
 
     os_printf(KERN_DEBUG "max_video_count: %d, mode: %s\r\n", mp4_encode->max_video_count, mp4_mode_str(mp4_encode));
 
@@ -755,12 +759,14 @@ static int mp4_encode_running(struct msi *msi, uint32_t save_time, void *fp, con
     {
         goto mp4_encode_running_clean_end;
     }
-
+    mp4_set_video_fps(mp4_msg, mp4_encode->fps);
     // 配置音频和视频
     if (has_audio)
     {
-        get_aac_config(audio_adc_get_samplerate(AUSYS_AUAD), asps_data);
+        uint32_t audio_sr = audio_adc_get_samplerate(MAIN_MIC_ID);
+        get_aac_config(audio_sr, asps_data);
         mp4_audio_cfg_init(mp4_msg, asps_data, sizeof(asps_data));
+        mp4_set_audio_samplerate(mp4_msg, audio_sr);
     }
     mp4_set_max_size(mp4_msg, filesize);
     // mp4_video_cfg_init(mp4_msg, 1280, 720);
@@ -772,8 +778,15 @@ static int mp4_encode_running(struct msi *msi, uint32_t save_time, void *fp, con
     }
 
     // 启动缩略图生成
-    mp4_thumb_msi = mp4_thumb_msi_init(h264_filename, FRAMEBUFF_SOURCE_CAMERA0, FSTYPE_NONE);
-    msi->enable   = 1;
+    if (mp4_encode->thumb_en)
+    {
+        mp4_thumb_msi = mp4_thumb_msi_init(h264_filename, FRAMEBUFF_SOURCE_CAMERA0, FSTYPE_NONE);
+    }
+    else
+    {
+        mp4_thumb_msi = NULL;
+    }
+    msi->enable = 1;
     while (fp)
     {
         os_event_wait(&mp4_encode->evt, MSI_MP4_STOP | MSI_MP4_EVENT_STOP, &MP4_status, OS_EVENT_WMODE_OR, 0);
@@ -919,13 +932,7 @@ static int mp4_encode_running(struct msi *msi, uint32_t save_time, void *fp, con
                     write_start_time = os_jiffies();
                 }
                 mp4_video_cfg_init(mp4_msg, h264_priv->w, h264_priv->h);
-                start = os_jiffies();
                 error |= write_h264_pps_sps(mp4_msg, nal_head_buf, nal_size + nal_head_size);
-                end = os_jiffies();
-                if (end - start > 500)
-                {
-                    os_printf(KERN_ERR "write_h264_pps_sps times: %d\n", end - start);
-                }
 
                 if (0 != error)
                 {
@@ -957,17 +964,27 @@ static int mp4_encode_running(struct msi *msi, uint32_t save_time, void *fp, con
             {
                 _os_printf(KERN_INFO "T");
                 error |= write_h264_data(mp4_msg, last_nal_head_buf, fb->len - (last_nal_head_buf - fb->data), MP4_TIMELAPSE_TIME);
+                video_already_write_connt++;
                 write_size += (fb->len - (last_nal_head_buf - fb->data));
             }
             else
             {
                 _os_printf(KERN_INFO "M");
-                start = os_jiffies();
                 error |= write_h264_data(mp4_msg, last_nal_head_buf, fb->len - (last_nal_head_buf - fb->data), delta);
-                end = os_jiffies();
-                if (end - start > 500)
+                video_already_write_connt++;
+
+                // 判断是否需要补帧
+                if (mp4_encode->fps)
                 {
-                    os_printf(KERN_ERR "write_h264_data times: %d\n", end - start);
+                    video_need_count = (fb->time - video_first_time) * mp4_encode->fps / 1000;
+                    if (video_need_count > video_already_write_connt)
+                    {
+                        for (int i = 0; i < video_need_count - video_already_write_connt; i++)
+                        {
+                            error |= write_h264_data(mp4_msg, NULL, 0, delta);
+                            video_already_write_connt++;
+                        }
+                    }
                 }
             }
 
@@ -1070,15 +1087,20 @@ static int mp4_encode_running(struct msi *msi, uint32_t save_time, void *fp, con
             }
         }
 
-        if (mp4_msg && sps_pps_flag && mp4_is_realtime_mode(mp4_encode))
+        if (mp4_msg && sps_pps_flag && mp4_is_realtime_mode(mp4_encode) && mp4_sync_judge(mp4_msg, 1000))
         {
-            start = os_jiffies();
-            error |= mp4_sync_time(mp4_msg, 1000);
-            end = os_jiffies();
-            if (end - start > 500)
+            uint8_t sync_lock = 0;
+            if (mp4_encode->file_process.need_lock && !holding_lock)
             {
-                os_printf(KERN_ERR "mp4_syn_time times: %d\n", end - start);
+                os_mutex_lock(&mult_record.mutex, osWaitForever);
+                sync_lock = 1;
             }
+            error |= mp4_sync(mp4_msg);
+            if (sync_lock)
+            {
+                os_mutex_unlock(&mult_record.mutex);
+            }
+
             if (0 != error)
             {
                 os_printf(KERN_ERR "%s:%d\n", __FUNCTION__, __LINE__);
@@ -1369,7 +1391,7 @@ static int32_t MP4_encode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
                     ret = RET_ERR;
                 }
             }
-            else if (fb->mtype == F_H264 && mp4_encode->filter_type != (uint16_t) ~0)
+            else if (fb->mtype == F_H264 && mp4_encode->filter_type != (uint8_t) ~0)
             {
                 if (mp4_encode->srcID != 0 && fb->srcID != mp4_encode->srcID)
                 {
@@ -1457,6 +1479,18 @@ static int32_t MP4_encode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
                     }
                 }
                 break;
+
+                case MSI_MEDIA_CTRL_THUMB:
+                {
+                    mp4_encode->thumb_en = arg;
+                }
+                break;
+
+                case MSI_MEDIA_CTRL_FIXED_FPS:
+                {
+                    mp4_encode->fps = arg;
+                }
+                break;
             }
         }
         break;
@@ -1527,9 +1561,10 @@ struct msi *mp4_encode_msi2_init(const char *mp4_msi_name, uint8_t srcID, uint8_
         }
 
         os_event_init(&mp4_encode->evt);
-        mp4_encode->msi = msi;
-        msi->priv       = mp4_encode;
-        msi->action     = MP4_encode_msi_action;
+        mp4_encode->msi      = msi;
+        mp4_encode->thumb_en = 1;
+        msi->priv            = mp4_encode;
+        msi->action          = MP4_encode_msi_action;
     }
     else
     {
@@ -1558,10 +1593,9 @@ mp4_encode_msi_init_end:
     return msi;
 }
 
-
 struct msi *gen_mp4_thumb_init(const char *thumb_msi_name, uint32_t *magic, uint8_t jpg_num);
-struct msi *yuv_thumb_msi_init(const char *output_name,uint32_t magic);
-void mp4_thumb_init()
+struct msi *yuv_thumb_msi_init(const char *output_name, uint32_t magic);
+void        mp4_thumb_init()
 {
     uint32_t    thumb_magic = 0;
     struct msi *thumb       = gen_mp4_thumb_init(S_MP4_THUMB, &thumb_magic, 0);

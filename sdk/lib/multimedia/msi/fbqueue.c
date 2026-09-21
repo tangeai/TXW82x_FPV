@@ -29,6 +29,11 @@ int32 fbq_init(struct fbqueue *q, uint8 *qbuff, int32 qsize)
     return RET_ERR;
 }
 
+int32 fbq_count(struct fbqueue *q)
+{
+    return RB_COUNT(&q->rbQ);
+}
+
 int32 fbq_destory(struct fbqueue *q)
 {
     if (q && q->init) {

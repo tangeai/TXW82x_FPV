@@ -87,6 +87,7 @@ typedef enum
 {
     SDHC_INIT_FLAGS_SINGLE_BLK_RW_EN = BIT(0),
     SDHC_INIT_FLAGS_BUSY_FILTER_EN   = BIT(1),
+    SDHC_INIT_FLAGS_BUS_WIDTH_4      = BIT(2),
 } TYPE_SDHC_INIT_FLAGS;
 
 enum {
@@ -624,7 +625,6 @@ uint32 sdhost_deinit_for_sleep();
 
 int usb_sd_scsi_read(uint32 lba, uint32 count, uint8* buf);
 int usb_sd_scsi_write(uint32 lba, uint32 count, uint8* buf);
- 
 
 
 #endif

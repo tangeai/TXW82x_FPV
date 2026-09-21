@@ -211,6 +211,14 @@ static const SensorTable SensorTable_CSI1[] = {
 	{ &gc2053_init_csi1, &gc2053_cmd_csi1 },
 #endif
 
+#if DEV_SENSOR_GC2083_CSI1
+	{ &gc2083_init_csi1, &gc2083_cmd_csi1 },
+#endif
+
+#if DEV_SENSOR_SC2336P_CSI1
+	{ &sc2336p_init_csi1, &sc2336p_cmd_csi1 },
+#endif
+
     { NULL, NULL },
 };
 
@@ -355,9 +363,15 @@ void mipi_csi_fovie_isr(uint32 irq,uint32 dev,uint32 param){
 	os_printf(KERN_ERR"------------------------------------------------------------------------------mipi fv\r\n");
 }
 
-void mipi_csi_sip_isr(uint32 irq,uint32 dev,uint32 param){
-	//dvp_vpp_reset();
-	os_printf(KERN_ERR"sip reset mipi csi_dev %08x \r\n",param);
+
+//MIPI CSI 接收端收到的行数和配置预期行数不匹配
+void mipi_csi_vsip_isr(uint32 irq,uint32 dev,uint32 param){
+	os_printf(KERN_ERR"vsip reset mipi csi_dev %08x \r\n",param);
+}
+
+//MIPI CSI 接收端检测到单行内部数据异常
+void mipi_csi_hsip_isr(uint32 irq,uint32 dev,uint32 param){
+	os_printf(KERN_ERR"hsip reset mipi csi_dev %08x \r\n",param);
 }
 
 uint32_t io_mipi_csi1_remap_cfg(){
@@ -733,7 +747,8 @@ void dual_mipi_csi_reset(enum fps_mode mode, float fps)
 	//mipi_csi_hsync_rec_time(mipi_csi_dev,5);
 	mipi_csi_hsync_rec_enable(mipi_csi_dev,1);	
 	mipi_csi_input_format(mipi_csi_dev,sensor0_adapt->sensor_isp->input_format); 
-	mipi_csi_request_irq(mipi_csi_dev,CSI2_VSIP_ISR, (mipi_csi_irq_hdl )&mipi_csi_sip_isr,0);
+	mipi_csi_request_irq(mipi_csi_dev,CSI2_VSIP_ISR, (mipi_csi_irq_hdl )&mipi_csi_vsip_isr,0);
+	mipi_csi_request_irq(mipi_csi_dev,CSI2_HSIP_ISR, (mipi_csi_irq_hdl )&mipi_csi_hsip_isr,0);
 	mipi_csi_request_irq(mipi_csi_dev,CSI2_FOVIE_ISR,(mipi_csi_irq_hdl )&mipi_csi_fovie_isr,0);
 	mipi_csi_open(mipi_csi_dev);
 	
@@ -754,7 +769,8 @@ void dual_mipi_csi_reset(enum fps_mode mode, float fps)
 	mipi_csi_img_size(mipi1_csi_dev,sensor1_adapt->pixelw, sensor1_adapt->pixelh);
 	mipi_csi_hsync_rec_enable(mipi1_csi_dev,1);	
 	mipi_csi_input_format(mipi1_csi_dev,sensor1_adapt->sensor_isp->input_format); 
-	mipi_csi_request_irq(mipi1_csi_dev,CSI2_VSIP_ISR, (mipi_csi_irq_hdl )&mipi_csi_sip_isr,0);
+	mipi_csi_request_irq(mipi1_csi_dev,CSI2_VSIP_ISR, (mipi_csi_irq_hdl )&mipi_csi_vsip_isr,0);
+	mipi_csi_request_irq(mipi1_csi_dev,CSI2_HSIP_ISR, (mipi_csi_irq_hdl )&mipi_csi_hsip_isr,0);
 	mipi_csi_request_irq(mipi1_csi_dev,CSI2_FOVIE_ISR,(mipi_csi_irq_hdl )&mipi_csi_fovie_isr,0);
 	mipi_csi_open(mipi1_csi_dev);
 
@@ -871,7 +887,8 @@ int mipi_csi_hardware_config(uint32_t csi_dev_id, uint8_t init_en, uint8_t camer
 		//mipi_csi_hsync_rec_time(mipi_csi_dev,5);
 		mipi_csi_hsync_rec_enable(mipi_csi_dev,1);	
 		mipi_csi_input_format(mipi_csi_dev,p_sensor_cmd->sensor_isp->input_format); 
-		mipi_csi_request_irq(mipi_csi_dev,CSI2_VSIP_ISR, (mipi_csi_irq_hdl )&mipi_csi_sip_isr,0);
+		mipi_csi_request_irq(mipi_csi_dev,CSI2_VSIP_ISR, (mipi_csi_irq_hdl )&mipi_csi_vsip_isr,0);
+		mipi_csi_request_irq(mipi_csi_dev,CSI2_HSIP_ISR, (mipi_csi_irq_hdl )&mipi_csi_hsip_isr,0);
 		mipi_csi_request_irq(mipi_csi_dev,CSI2_FOVIE_ISR,(mipi_csi_irq_hdl )&mipi_csi_fovie_isr,0);
 		mipi_csi_open(mipi_csi_dev);
 
@@ -914,7 +931,8 @@ int mipi_csi_hardware_config(uint32_t csi_dev_id, uint8_t init_en, uint8_t camer
 		mipi_csi_img_size(mipi1_csi_dev,p_sensor_cmd->pixelw,p_sensor_cmd->pixelh);
 		mipi_csi_hsync_rec_enable(mipi1_csi_dev,1);	
 		mipi_csi_input_format(mipi1_csi_dev,p_sensor_cmd->sensor_isp->input_format); 
-		mipi_csi_request_irq(mipi1_csi_dev,CSI2_VSIP_ISR, (mipi_csi_irq_hdl )&mipi_csi_sip_isr,0);
+		mipi_csi_request_irq(mipi1_csi_dev,CSI2_VSIP_ISR, (mipi_csi_irq_hdl )&mipi_csi_vsip_isr,0);
+		mipi_csi_request_irq(mipi1_csi_dev,CSI2_HSIP_ISR, (mipi_csi_irq_hdl )&mipi_csi_hsip_isr,0);
 		mipi_csi_request_irq(mipi1_csi_dev,CSI2_FOVIE_ISR,(mipi_csi_irq_hdl )&mipi_csi_fovie_isr,0);
 		mipi_csi_open(mipi1_csi_dev);
 
@@ -943,6 +961,7 @@ int mipi_csi_hardware_config(uint32_t csi_dev_id, uint8_t init_en, uint8_t camer
 			video_msg.csi0_iw = p_sensor_cmd->pixelw;
 			video_msg.csi0_ih = p_sensor_cmd->pixelh;
 			video_msg.csi0_type = 1;
+            set_cur_video_size(video_msg.csi0_type,p_sensor_cmd->pixelw,p_sensor_cmd->pixelh);
 			video_msg.video_type_cur  = ISP_VIDEO_0;
 			video_msg.video_type_last = ISP_VIDEO_0;
 			video_msg.video_num++;			
@@ -954,6 +973,7 @@ int mipi_csi_hardware_config(uint32_t csi_dev_id, uint8_t init_en, uint8_t camer
 			video_msg.csi1_iw = p_sensor_cmd->pixelw;
 			video_msg.csi1_ih = p_sensor_cmd->pixelh;
 			video_msg.csi1_type = 1;
+            set_cur_video_size(video_msg.csi1_type,p_sensor_cmd->pixelw,p_sensor_cmd->pixelh);
 			video_msg.video_type_cur  = ISP_VIDEO_0;
 			video_msg.video_type_last = ISP_VIDEO_0;
 			video_msg.video_num++;			
@@ -1005,3 +1025,6 @@ void get_single_mipi(uint32_t csi_dev_id,uint16_t *w,uint16_t *h)
 	}
 	return;
 }
+
+
+

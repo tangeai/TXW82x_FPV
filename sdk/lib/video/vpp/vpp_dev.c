@@ -20,7 +20,7 @@
 #include "hal/osd_enc.h"
 
 uint32 motion_det_pot_check(uint8_t *old_y, uint8_t *new_y, uint8_t *copy, uint16 w, uint16 h, uint8_t blk_thd, uint8_t md_blk_num);
-void   md_set_pot_x_y(uint16 x, uint16 y);
+void md_set_pot_x_y(ISP_VIDEO_E sensor_id, uint16 x,uint16 y);
 
 #define VPP_MALLOC av_malloc
 #define VPP_FREE   av_free
@@ -94,23 +94,45 @@ struct vpp_cfg_s vpp_msg = {
 #endif
 
 // uint8 motion_detect_buf[9*1024/*((IMAGE_W+31)/32)  * ((IMAGE_H+31)/32) + 3 + 4*((IMAGE_W+31)/32)*/]__attribute__ ((aligned(4)));//加3是为了防止blk数不是word对齐
-volatile uint32_t photo_complex = 0;
+
 uint8            *motion_detect_buf          = NULL;
-uint8            *motion_detect_oldframe_buf = NULL;
-uint8            *mdet_result;
+uint8            *mdet_oldframe_sensor1_buf     = NULL;
+uint8            *mdet_oldframe_sensor2_buf     = NULL;
+
+uint8            *mdet_result_sensor1 = NULL;
+uint8            *mdet_result_sensor2 = NULL;
+	
 uint16            motion_blk_threshold    = 0;
 uint16            motion_blknum_threshold = 0;
-uint8            *yuvbuf1                 = NULL;
+uint8             *yuvbuf1         = NULL;
+uint8             *yuvbuf1_u       = NULL;
+uint8             *yuvbuf1_v       = NULL;
 uint8_t          *vpp_data1_psram_buf     = NULL;
 uint8_t          *vpp_data2_psram_buf     = NULL;
 volatile uint8_t *psram_ptr               = NULL;
 volatile uint8_t *psram_user_ptr          = NULL;
-
+volatile uint32_t photo_complex = 0;
 uint8             *yuvbuf         = NULL;
+uint8             *yuvbuf_u       = NULL;
+uint8             *yuvbuf_v       = NULL;
 uint8             *vpp_encode_ipf = NULL;
 struct video_cfg_t video_msg;
 func_done_fn       vpp_deal_dev_func_table[VPP_FUNC_DONE_NUM];
 volatile uint32    vpp_deal_dev_func_arg_table[VPP_FUNC_DONE_NUM];
+
+void set_cur_video_size(uint16_t dev_type,uint16_t w,uint16_t h)
+{
+    video_msg.cur_type = dev_type;
+    video_msg.cur_iw = w;
+    video_msg.cur_ih = h;
+}
+
+void get_vpp_dev_w_h(uint16_t *dev_type,uint16_t *w,uint16_t *h)
+{
+    *w = video_msg.cur_iw;
+    *h = video_msg.cur_ih;
+}
+
 
 int32 vppdone_func_register(uint8_t id, func_done_fn func, uint32 arg)
 {
@@ -192,6 +214,124 @@ uint8_t set_vpp_bu1_shrink(uint16_t w, uint16_t shrink_w)
     else
     {
         os_printf(KERN_INFO "%s success,w:%d\tshrink_w:%d\tshrink:%d\n", __FUNCTION__, w, shrink_w, shrink);
+    }
+    return ret;
+}
+
+// vpp转换w和h,如果没有使能,返回非0
+// 如果返回0,则转换值在*w和*h表现
+int32_t tran_vpp_w_h(uint8_t which, uint16_t *w, uint16_t *h)
+{
+    int32_t ret = RET_OK;
+    if (which == 1 && VPP_BUF1_EN == 0)
+    {
+        return RET_ERR;
+    }
+        uint16_t d_w = w?*w:0;
+        uint16_t d_h = h?*h:0;
+    // 镜头0,直接返回
+    if (which == 0)
+    {
+        return RET_OK;
+    }
+    // 镜头1,则去运算,不整除则返回失败
+    else if (which == 1)
+    {
+
+
+        uint16_t s_c = *w;
+        uint16_t s_h = *h;
+
+        switch (vpp_msg.shrink)
+        {
+            case SHRINK_1_2:
+                if (d_w)
+                {
+                    d_w = d_w / 2;
+                }
+                if (d_h)
+                {
+                    d_h = d_h / 2;
+                }
+                if(!((s_c == (d_w * 2)) && (s_h == (d_h * 2))))
+                {
+                    ret = RET_ERR;
+                }
+                break;
+            case SHRINK_1_3:
+                if (d_w)
+                {
+                    d_w = d_w / 3;
+                }
+                if (d_h)
+                {
+                    d_h = d_h / 3;
+                }
+
+                if(!((s_c == (d_w * 3)) && (s_h == (d_h * 3))))
+                {
+                    ret = RET_ERR;
+                }
+                break;
+            case SHRINK_1_4:
+                if (w)
+                {
+                    d_w = d_w / 4;
+                }
+                if (d_h)
+                {
+                    d_h = d_h / 4;
+                }
+
+                if(!((s_c == (d_w * 4)) && (s_h == (d_h * 4))))
+                {
+                    ret = RET_ERR;
+                }
+                break;
+            case SHRINK_1_6:
+                if (d_w)
+                {
+                    d_w = d_w / 6;
+                }
+                if (d_h)
+                {
+                    d_h = d_h / 6;
+                }
+
+                if(!((s_c == (d_w * 6)) && (s_h == (d_h * 6))))
+                {
+                    ret = RET_ERR;
+                }
+                break;
+            case SHRINK_2_3:
+                if (d_w)
+                {
+                    d_w = d_w * 2 / 3;
+                }
+                if (d_h)
+                {
+                    d_h = d_h * 2 / 3;
+                }
+
+                if(!((s_c == (d_w * 3/2)) && (s_h == (d_h * 3/2))))
+                {
+                    ret = RET_ERR;
+                }
+                break;
+            case SHRINK_1_1:
+                if (d_w)
+                {
+                    d_w = d_w;
+                }
+                if (d_h)
+                {
+                    d_h = d_h;
+                }
+                break;
+            default:
+                ret = RET_ERR;
+                break;
+        }
     }
     return ret;
 }
@@ -364,6 +504,62 @@ void *get_vpp_buf(uint8_t which)
         return yuvbuf1;
     }
     return NULL;
+}
+
+int32_t get_vpp_buf_y_u_v(uint8_t which,uint32_t *y,uint32_t *u,uint32_t *v)
+{
+    int32_t ret = RET_ERR;
+    ASSERT(which == 0 || which == 1);
+    if (which == 0)
+    {
+        if(y)
+        {
+            *y = (uint32_t)yuvbuf;
+        }
+        if(u)
+        {
+            *u = (uint32_t)yuvbuf_u;
+        }
+        if(v)
+        {
+            *v = (uint32_t)yuvbuf_v;
+        }
+        ret = RET_OK;
+    }
+    else if (which == 1)
+    {
+        if(y)
+        {
+            *y = (uint32_t)yuvbuf1;
+        }
+        if(u)
+        {
+            *u = (uint32_t)yuvbuf1_u;
+        }
+        if(v)
+        {
+            *v = (uint32_t)yuvbuf1_v;
+        }
+        ret = RET_OK;
+    }
+    return ret;
+}
+
+static void set_vpp_buf(uint8_t which,uint8_t *y,uint8_t *u,uint8_t *v)
+{
+    ASSERT(which == 0 || which == 1);
+    if (which == 0)
+    {
+        yuvbuf = y;
+        yuvbuf_u = u;
+        yuvbuf_v = v;
+    }
+    else if (which == 1)
+    {
+        yuvbuf1 = y;
+        yuvbuf1_u = u;
+        yuvbuf1_v = v;
+    }
 }
 
 void *get_vpp_psram_buf()
@@ -747,7 +943,7 @@ void vpp_video_recfg(uint32 dev, uint32_t w, uint32_t h, uint8_t input_from)
             _os_printf("buf1 shrink no this cfg\r\n");
             break;
     }
-
+#if (PSRAM_FRAME_SAVE == 0)
     // buf1的配置
     {
         uint32_t malloc_line;
@@ -763,9 +959,10 @@ void vpp_video_recfg(uint32 dev, uint32_t w, uint32_t h, uint8_t input_from)
         vpp_set_buf1_shrink(p_vpp, vpp_msg.shrink);
 
         vpp_set_buf1_y_addr(p_vpp, (uint32) yuvbuf1);
-        vpp_set_buf1_u_addr(p_vpp, (uint32) yuvbuf1 + buf1w * malloc_line);
-        vpp_set_buf1_v_addr(p_vpp, (uint32) yuvbuf1 + buf1w * malloc_line + buf1w * malloc_line / 4);
+        vpp_set_buf1_u_addr(p_vpp, (uint32) yuvbuf1_u);
+        vpp_set_buf1_v_addr(p_vpp, (uint32) yuvbuf1_v);
     }
+#endif
     vpp_set_buf1_en(p_vpp, 1);
 
 #endif
@@ -784,9 +981,9 @@ void vpp_video_recfg(uint32 dev, uint32_t w, uint32_t h, uint8_t input_from)
         vpp_set_buf0_count(p_vpp, vpp_msg.vpp_buf0_line_num);
         vpp_set_buf0_en(p_vpp, 1);
 
-        vpp_set_buf0_y_addr(p_vpp, (uint32) yuvbuf);
-        vpp_set_buf0_u_addr(p_vpp, (uint32) yuvbuf + w * malloc_line);
-        vpp_set_buf0_v_addr(p_vpp, (uint32) yuvbuf + w * malloc_line + w * malloc_line / 4);
+        //vpp_set_buf0_y_addr(p_vpp, (uint32) yuvbuf);
+        //vpp_set_buf0_u_addr(p_vpp, (uint32) yuvbuf + w * malloc_line);
+        //vpp_set_buf0_v_addr(p_vpp, (uint32) yuvbuf + w * malloc_line + w * malloc_line / 4);
     }
 
 #if DET_EN
@@ -986,20 +1183,57 @@ void vpp_frame_done(uint32 irq, uint32 dev, uint32 param)
     gettimeofday(&ptimeval, NULL);
     time_t time_val = (time_t) ptimeval.tv_sec;
 	
-
-    if ((motion_detect_buf != NULL) && (motion_detect_oldframe_buf != NULL))
-    { // det enable
-        if (vpp_md_cnt != md_isr_cnt)
-        {
-            detw = (vpp_msg.vpp_w + 31) / 32;
-            deth = (vpp_msg.vpp_h + 31) / 32;
-            loc  = motion_det_pot_check(motion_detect_oldframe_buf, motion_detect_buf + 4 * ((vpp_msg.vpp_w + 31) / 32), mdet_result, detw, deth, 30, 20);
-            if (loc != 0xffffffff)
-            {
-                md_set_pot_x_y((loc % detw) * 32, (loc / detw) * 32);
+    //单目
+    if(video_msg.video_num  == 1){
+        if ((motion_detect_buf != NULL) && (mdet_oldframe_sensor1_buf != NULL))
+        { // det enable
+            if (vpp_md_cnt != md_isr_cnt)
+			{
+                detw = (vpp_msg.vpp_w + 31) / 32;
+                deth = (vpp_msg.vpp_h + 31) / 32;
+                loc  = motion_det_pot_check(mdet_oldframe_sensor1_buf, motion_detect_buf + 4 * ((vpp_msg.vpp_w + 31) / 32), mdet_result_sensor1, detw, deth, 10, 20);
+                if (loc != 0xffffffff){
+                    md_set_pot_x_y(ISP_VIDEO_0, (loc % detw) * 32, (loc / detw) * 32);
+                }
             }
+            memcpy(mdet_oldframe_sensor1_buf, motion_detect_buf + 4 * ((vpp_msg.vpp_w + 31) / 32), ((vpp_msg.vpp_w + 31) / 32) * ((vpp_msg.vpp_h + 31) / 32));
         }
-        memcpy(motion_detect_oldframe_buf, motion_detect_buf + 4 * ((vpp_msg.vpp_w + 31) / 32), ((vpp_msg.vpp_w + 31) / 32) * ((vpp_msg.vpp_h + 31) / 32));
+	}
+     //双目
+    else if(video_msg.video_num  == 2){
+        if((motion_detect_buf != NULL)&&(mdet_oldframe_sensor1_buf != NULL)&&(mdet_oldframe_sensor2_buf != NULL)){
+            //sensor 0
+            if(video_msg.video_type_cur == ISP_VIDEO_0)
+            {
+                if (vpp_md_cnt != md_isr_cnt)
+                {
+                    detw = (vpp_msg.vpp_w + 31) / 32;
+                    deth = (vpp_msg.vpp_h + 31) / 32;
+                    loc  = motion_det_pot_check(mdet_oldframe_sensor1_buf, motion_detect_buf + 4 * ((vpp_msg.vpp_w + 31) / 32), mdet_result_sensor1, detw, deth, 30, 20);
+
+                    if(loc != 0xffffffff){
+                        md_set_pot_x_y(ISP_VIDEO_0, (loc % detw) * 32, (loc / detw) * 32);
+                    }		
+                }
+                memcpy(mdet_oldframe_sensor1_buf, motion_detect_buf + 4 * ((vpp_msg.vpp_w + 31) / 32), ((vpp_msg.vpp_w + 31) / 32) * ((vpp_msg.vpp_h + 31) / 32));
+                
+            }
+            //sensor 1
+            else if(video_msg.video_type_cur == ISP_VIDEO_1)
+            {
+                if (vpp_md_cnt != md_isr_cnt)
+                {
+                    detw = (vpp_msg.vpp_w + 31) / 32;
+                    deth = (vpp_msg.vpp_h + 31) / 32;
+                    loc  = motion_det_pot_check(mdet_oldframe_sensor2_buf, motion_detect_buf + 4 * ((vpp_msg.vpp_w + 31) / 32), mdet_result_sensor2, detw, deth, 30, 20);
+
+                    if(loc != 0xffffffff){
+                        md_set_pot_x_y(ISP_VIDEO_1, (loc % detw) * 32, (loc / detw) * 32);
+                    }
+                }	
+                memcpy(mdet_oldframe_sensor2_buf, motion_detect_buf + 4 * ((vpp_msg.vpp_w + 31) / 32), ((vpp_msg.vpp_w + 31) / 32) * ((vpp_msg.vpp_h + 31) / 32));
+            }
+	    }
     }
 
     if (last_time_val != time_val)
@@ -1008,41 +1242,11 @@ void vpp_frame_done(uint32 irq, uint32 dev, uint32 param)
         last_time_val = time_val;
     }
 
-#if 0
-    if (video_msg.video_num > 1)
+    if (video_msg.video_num > 1 && video_msg.camera_mode == CAM_DUAL_MASTER_SLAVE_MODE)
     {
-        if (video_msg.video_type_cur != ISP_VIDEO_0)
-        { // 上次完成是副镜头，这次要处理主镜头
-            if (video_msg.dvp_type == 1)
-            {
-                vpp_video_recfg(dev, video_msg.dvp_iw, video_msg.dvp_ih, VPP_INPUT_FROM);
-            }
-            else if (video_msg.csi0_type == 1)
-            {
-                vpp_video_recfg(dev, video_msg.csi0_iw, video_msg.csi0_ih, VPP_INPUT_FROM);
-            }
-            else if (video_msg.csi1_type == 1)
-            {
-                vpp_video_recfg(dev, video_msg.csi1_iw, video_msg.csi1_ih, VPP_INPUT_FROM);
-            }
-        }
-        else
-        { // 上次完成是主镜头，这次要处理副镜头
-            if (video_msg.dvp_type == 2)
-            {
-                vpp_video_recfg(dev, video_msg.dvp_iw, video_msg.dvp_ih, VPP_INPUT_FROM);
-            }
-            else if (video_msg.csi0_type == 2)
-            {
-                vpp_video_recfg(dev, video_msg.csi0_iw, video_msg.csi0_ih, VPP_INPUT_FROM);
-            }
-            else if (video_msg.csi1_type == 2)
-            {
-                vpp_video_recfg(dev, video_msg.csi1_iw, video_msg.csi1_ih, VPP_INPUT_FROM);
-            }
-        }
+        vpp_video_recfg(dev, video_msg.cur_iw, video_msg.cur_ih, VPP_INPUT_FROM);//
     }
-#endif
+
     for (itk = 0; itk < VPP_FUNC_DONE_NUM; itk++)
     {
         if (vpp_deal_dev_func_table[itk])
@@ -1149,7 +1353,8 @@ void vpp_frame_done(uint32 irq, uint32 dev, uint32 param)
 		//720P --->260us
 		photo_complex = compute_block_laplacian_mean(motion_detect_buf + 4 * ((vpp_msg.vpp_w + 31) / 32),(vpp_msg.vpp_h + 31) / 32,(vpp_msg.vpp_w + 31) / 32);
 	}
-	_os_printf(KERN_DEBUG "F(%d)",photo_complex);
+	//_os_printf(KERN_DEBUG "F(%d)",photo_complex);
+    _os_printf("F");
 }
 volatile uint8 itp_done = 0;
 void           vpp_itp_done(uint32 irq, uint32 dev, uint32 param)
@@ -1195,12 +1400,16 @@ void vpp_itp_save_only(struct vpp_device *p_vpp, uint16_t w, uint16_t h, uint32_
 // uint8 yuv_staic_buf[1280*32 + 1280*16]__attribute__ ((aligned(4),section(".usersram2.src")));;
 bool vpp_cfg(uint32_t w, uint32_t h, uint8_t input_from)
 {
+    uint32_t line_iw = w;
     vpp_msg.vpp_w = w;
     vpp_msg.vpp_h = h;
-    //如果需要拼接,则设置double_psram_for_buf1
-    if(video_msg.camera_mode == CAM_DUAL_SPLICE_SLAVE_MODE)
-    {
+    
+    if(video_msg.camera_mode == CAM_DUAL_SPLICE_SLAVE_MODE){
+        //如果需要拼接,则设置double_psram_for_buf1
         vpp_msg.double_psram_for_buf1 = 1;
+    }else if(video_msg.camera_mode == CAM_DUAL_MASTER_SLAVE_MODE){
+        //多目经过dual_org模块, 分辨率不同时, 取宽度更大的一路，计算line buf所需内存空间
+        line_iw = VPP_MAX3(video_msg.dvp_iw, video_msg.csi0_iw, video_msg.csi1_iw);
     }
     
     if (!w || !h)
@@ -1305,10 +1514,14 @@ bool vpp_cfg(uint32_t w, uint32_t h, uint8_t input_from)
                 _os_printf("no room yuvbuf1\r\n");
                 return FALSE;
             }
+            else
+            {
+                set_vpp_buf(1,yuvbuf1,yuvbuf1 + buf1w * malloc_line,yuvbuf1 + buf1w * malloc_line + buf1w * malloc_line / 4);
+            }
         }
         vpp_set_buf1_y_addr(vpp_dev, (uint32) yuvbuf1);
-        vpp_set_buf1_u_addr(vpp_dev, (uint32) yuvbuf1 + buf1w * malloc_line);
-        vpp_set_buf1_v_addr(vpp_dev, (uint32) yuvbuf1 + buf1w * malloc_line + buf1w * malloc_line / 4);
+        vpp_set_buf1_u_addr(vpp_dev, (uint32) yuvbuf1_u);
+        vpp_set_buf1_v_addr(vpp_dev, (uint32) yuvbuf1_v);
         vpp_set_buf1_count(vpp_dev, vpp_msg.vpp_buf1_line_num);
     }
 #else
@@ -1383,11 +1596,15 @@ bool vpp_cfg(uint32_t w, uint32_t h, uint8_t input_from)
         }
         if (yuvbuf == NULL)
         {
-            yuvbuf = (uint8_t *) VPP_MALLOC(w * malloc_line + w * malloc_line / 2);
+            yuvbuf = (uint8_t *) VPP_MALLOC(line_iw * malloc_line + line_iw * malloc_line / 2);
             if (yuvbuf == NULL)
             {
                 _os_printf("no room yuvbuf0\r\n");
                 return FALSE;
+            }
+            else
+            {
+                set_vpp_buf(0,yuvbuf,yuvbuf + line_iw * malloc_line,yuvbuf + line_iw * malloc_line + line_iw * malloc_line / 4);
             }
         }
         vpp_set_buf0_count(vpp_dev, vpp_msg.vpp_buf0_line_num);
@@ -1396,8 +1613,8 @@ bool vpp_cfg(uint32_t w, uint32_t h, uint8_t input_from)
         vpp_set_buf0_y_addr(vpp_dev, (uint32) psram_buf);
 #else
         vpp_set_buf0_y_addr(vpp_dev, (uint32) yuvbuf);
-        vpp_set_buf0_u_addr(vpp_dev, (uint32) yuvbuf + w * malloc_line);
-        vpp_set_buf0_v_addr(vpp_dev, (uint32) yuvbuf + w * malloc_line + w * malloc_line / 4);
+        vpp_set_buf0_u_addr(vpp_dev, (uint32) yuvbuf + line_iw * malloc_line);
+        vpp_set_buf0_v_addr(vpp_dev, (uint32) yuvbuf + line_iw * malloc_line + line_iw * malloc_line / 4);
 #endif
     }
 
@@ -1449,11 +1666,10 @@ bool vpp_cfg(uint32_t w, uint32_t h, uint8_t input_from)
 
 #if DET_EN
     motion_detect_buf = (uint8_t *) VPP_MALLOC(((w + 31) / 32) * ((h + 31) / 32) + 4 * ((w + 31) / 32));
-
-    if ((motion_detect_buf == NULL))
-    {
+    if (motion_detect_buf == NULL){
         goto det_module_end;
     }
+    memset(motion_detect_buf,0,((w + 31) / 32) * ((h + 31) / 32) + 4 * ((w + 31) / 32));
 
     vpp_set_motion_calbuf(vpp_dev, (uint32_t) motion_detect_buf);
     vpp_set_motion_range(vpp_dev, 0, 0, w, h);   // 检测图像范围,blk大小为32*32个像素点
@@ -1463,21 +1679,25 @@ bool vpp_cfg(uint32_t w, uint32_t h, uint8_t input_from)
     if (vpp_msg.mdt)
     {
         // 申请空间,支持返回移动的区域坐标
-        motion_detect_oldframe_buf = (uint8_t *) VPP_MALLOC(((w + 31) / 32) * ((h + 31) / 32));
-        mdet_result                = (uint8_t *) VPP_MALLOC(((w + 31) / 32) * ((h + 31) / 32));
-        if (mdet_result == NULL || motion_detect_oldframe_buf == NULL)
-        {
-            VPP_FREE(motion_detect_oldframe_buf);
-            VPP_FREE(mdet_result);
-            motion_detect_oldframe_buf = NULL;
-            mdet_result                = NULL;
-        }
-        else
-        {
-            motion_blk_threshold    = 10;
-            motion_blknum_threshold = 10;
-            memset(motion_detect_oldframe_buf, 0, ((w + 31) / 32) * ((h + 31) / 32));
-        }
+        mdet_result_sensor1                 = (uint8_t *) VPP_MALLOC(((w + 31) / 32) * ((h + 31) / 32));
+		mdet_oldframe_sensor1_buf  = (uint8_t *) VPP_MALLOC(((w + 31) / 32) * ((h + 31) / 32));
+		if(mdet_oldframe_sensor1_buf == NULL){
+			goto det_module_end;
+		}
+		memset(mdet_oldframe_sensor1_buf,0,((w + 31) / 32) * ((h + 31) / 32));
+
+		if(video_msg.video_num  == 2){
+            mdet_result_sensor2                 = (uint8_t *) VPP_MALLOC(((w + 31) / 32) * ((h + 31) / 32));
+			mdet_oldframe_sensor2_buf  = (uint8_t *) VPP_MALLOC(((w + 31) / 32) * ((h + 31) / 32));
+			if(mdet_oldframe_sensor2_buf == NULL){
+				goto det_module_end;
+			}
+			memset(mdet_oldframe_sensor2_buf,0,((w + 31) / 32) * ((h + 31) / 32));		
+		}
+		
+        
+        
+
     }
 
     vpp_set_motion_det_enable(vpp_dev, 1);
@@ -1568,25 +1788,17 @@ int8_t vpp_dev_open()
 }
 
 /**************************************************检测移动侦测接口***************************************************** */
-struct mdt_coord_msg mdet_msg[4];
-uint32               mdxy;
+struct mdt_coord_msg mdet_msg[4] = {0};
+uint32 mdxy[2] = {0};
 
 uint32 motion_det_pot_check(uint8_t *old_y, uint8_t *new_y, uint8_t *copy, uint16 w, uint16 h, uint8_t blk_thd, uint8_t md_blk_num)
 {
     uint16   i, j;
     uint16   mw, mh;
-    //	uint16 mwc,mhc;
     uint16   bx, by;
-    //	uint16 bmx,bmy;
-    //	uint16 bxc,byc;
     uint32   local_base = 0;
-    //	uint32 check_local;
-    //	uint32 mov_cnt_max;
-    //	uint32 mov_cnt;
-    //	uint8_t turnaround;
     uint16   i1, j1;
     uint8_t  mloop;
-    //	uint8_t mxj;
     uint8_t  potd;
     uint8_t  mask;
     uint16_t mx0, mx1;
@@ -1595,7 +1807,6 @@ uint32 motion_det_pot_check(uint8_t *old_y, uint8_t *new_y, uint8_t *copy, uint1
     uint16_t mapdt_num;
     uint8_t  result_cnt[4];
     uint32_t result_loc[4];
-    //	uint8_t xad,yad;
     uint16   mvblk = 0;
     uint8_t  x0m, x1m, y0m, y1m;
 
@@ -1634,7 +1845,6 @@ uint32 motion_det_pot_check(uint8_t *old_y, uint8_t *new_y, uint8_t *copy, uint1
             {
                 for (i = 0; i < 2; i++)
                 {
-
                     if (old_y[i1 + j1 * w + i + j * w] == 255)
                     {
                         potd++;
@@ -1650,41 +1860,10 @@ uint32 motion_det_pot_check(uint8_t *old_y, uint8_t *new_y, uint8_t *copy, uint1
                                     my0 = mapdt_loc[mloop][4];
                                     my1 = mapdt_loc[mloop][5];
 
-                                    if (mx0 > 3)
-                                    {
-                                        x0m = mx0 - 3;
-                                    }
-                                    else
-                                    {
-                                        x0m = 0;
-                                    }
-
-                                    if ((mx1 + 3) > w)
-                                    {
-                                        x1m = w - 1;
-                                    }
-                                    else
-                                    {
-                                        x1m = mx1 + 3;
-                                    }
-
-                                    if (my0 > 3)
-                                    {
-                                        y0m = my0 - 3;
-                                    }
-                                    else
-                                    {
-                                        y0m = 0;
-                                    }
-
-                                    if ((my1 + 3) > h)
-                                    {
-                                        y1m = h - 1;
-                                    }
-                                    else
-                                    {
-                                        y1m = my1 + 3;
-                                    }
+                                    x0m = (mx0 > 3) ? (mx0 - 3) : 0;
+                                    y0m = (my0 > 3) ? (my0 - 3) : 0;
+                                    x1m = (mx1 + 3 > w) ? (w - 1) : (mx1 + 3);
+                                    y1m = (my1 + 3 > h) ? (h - 1) : (my1 + 3);
 
                                     if (((i1 + i) >= x0m) && ((i1 + i) <= x1m) && ((j1 + j) >= y0m) && ((j1 + j) <= y1m))
                                     {
@@ -1702,41 +1881,10 @@ uint32 motion_det_pot_check(uint8_t *old_y, uint8_t *new_y, uint8_t *copy, uint1
                                         mapdt_loc[mloop][0] = i1 + i;
                                         mapdt_loc[mloop][1] = j1 + j;
 
-                                        if (mapdt_loc[mloop][0] > 3)
-                                        {
-                                            mx0 = mapdt_loc[mloop][0] - 3;
-                                        }
-                                        else
-                                        {
-                                            mx0 = 0;
-                                        }
-
-                                        if ((mapdt_loc[mloop][0] + 3) > w)
-                                        {
-                                            mx1 = w - 1;
-                                        }
-                                        else
-                                        {
-                                            mx1 = mapdt_loc[mloop][0] + 3;
-                                        }
-
-                                        if (mapdt_loc[mloop][1] > 3)
-                                        {
-                                            my0 = mapdt_loc[mloop][1] - 3;
-                                        }
-                                        else
-                                        {
-                                            my0 = 0;
-                                        }
-
-                                        if ((mapdt_loc[mloop][1] + 3) > h)
-                                        {
-                                            my1 = h - 1;
-                                        }
-                                        else
-                                        {
-                                            my1 = mapdt_loc[mloop][1] + 3;
-                                        }
+                                        mx0 = (mapdt_loc[mloop][0] > 3) ? (mapdt_loc[mloop][0] - 3) : 0;
+                                        my0 = (mapdt_loc[mloop][1] > 3) ? (mapdt_loc[mloop][1] - 3) : 0;
+                                        mx1 = (mapdt_loc[mloop][0] + 3 > w) ? (w - 1) : (mapdt_loc[mloop][0] + 3);
+                                        my1 = (mapdt_loc[mloop][1] + 3 > h) ? (h - 1) : (mapdt_loc[mloop][1] + 3);
 
                                         mapdt_loc[mloop][2] = mx0;
                                         mapdt_loc[mloop][3] = mx1;
@@ -1816,10 +1964,8 @@ mdt_end:
             if (local_base < result_loc[i])
             {
                 local_base = result_loc[i];
-                //				printf("local_base:%d\r\n",local_base);
             }
         }
-
         return local_base;
     }
     else
@@ -1828,33 +1974,32 @@ mdt_end:
     }
 }
 
-void md_set_pot_x_y(uint16 x, uint16 y)
+
+void md_set_pot_x_y(ISP_VIDEO_E sensor_id, uint16 x,uint16 y)
 {
-    mdxy = ((y & 0xffff) << 16 | (x & 0xffff));
+	mdxy[sensor_id] = ((y&0xffff)<<16|(x&0xffff));
 }
+
 
 // 获取绝对位置
-uint32 md_get_pot_x_y()
+uint32 md_get_pot_x_y(ISP_VIDEO_E sensor_id)
 {
-    return mdxy;
+	return mdxy[sensor_id];
 }
 
-// 获取相对位置
-uint32 md_get_relative_pot_x_y(uint16_t r_w, uint16_t r_h, uint16_t *gx, uint16_t *gy)
+
+// 获取相对位置，sensor_id区分0/1摄像头
+uint32 md_get_relative_pot_x_y(ISP_VIDEO_E sensor_id, uint16_t r_w, uint16_t r_h, uint16_t *gx, uint16_t *gy)
 {
-    uint16_t x = (r_w * (mdxy & 0xffff) / vpp_msg.vpp_w) & 0xffff;
-    uint16_t y = (r_h * (mdxy >> 16) / vpp_msg.vpp_h) & 0xffff;
-    if (gx)
-    {
-        *gx = x;
-    }
-    if (gy)
-    {
-        *gy = y;
-    }
+    uint32 pos = mdxy[sensor_id]; 
+    uint16_t x = (r_w * (pos & 0xffff) / vpp_msg.vpp_w) & 0xffff;
+    uint16_t y = (r_h * (pos >> 16) / vpp_msg.vpp_h) & 0xffff;
+    if (gx) *gx = x;
+    if (gy) *gy = y;
     return y << 16 | x;
 }
 
+// 包围框缩放函数
 uint32 md_get_relative_pot_x0_y0_x1_y1(uint8_t num, uint16_t r_w, uint16_t r_h, uint16_t *gx0, uint16_t *gy0, uint16_t *gx1, uint16_t *gy1)
 {
     uint16_t x0 = (r_w * (mdet_msg[num].x0 * 32) / vpp_msg.vpp_w) & 0xffff;
@@ -1863,40 +2008,48 @@ uint32 md_get_relative_pot_x0_y0_x1_y1(uint8_t num, uint16_t r_w, uint16_t r_h, 
     uint16_t y1 = (r_h * (mdet_msg[num].y1 * 32) / vpp_msg.vpp_h) & 0xffff;
     if (mdet_msg[num].blkmv_cnt == 0)
     {
-        if (gx0)
-        {
-            *gx0 = 0;
-        }
-        if (gy0)
-        {
-            *gy0 = 0;
-        }
-        if (gx1)
-        {
-            *gx1 = 1;
-        }
-        if (gy1)
-        {
-            *gy1 = 1;
-        }
-
+        if (gx0) *gx0 = 0;
+        if (gy0) *gy0 = 0;
+        if (gx1) *gx1 = 1;
+        if (gy1) *gy1 = 1;
         return 1;
     }
-    if (gx0)
+    if (gx0) *gx0 = x0;
+    if (gy0) *gy0 = y0;
+    if (gx1) *gx1 = x1;
+    if (gy1) *gy1 = y1;
+    return 0;
+}
+
+void md_get_table_size(ISP_VIDEO_E sensor_id, uint16_t *w_out, uint16_t *h_out)
+{
+	uint16_t det_w = (vpp_msg.vpp_w + 31) / 32;
+    uint16_t det_h = (vpp_msg.vpp_h + 31) / 32;
+
+    if (w_out) *w_out = det_w;
+    if (h_out) *h_out = det_h;	
+	
+}
+
+// 图像划分32*32的亮度表，获取二值化后的亮度表（0=静止块，255=运动块）
+int8_t md_get_binary_table(ISP_VIDEO_E sensor_id, uint8_t *bin_buf)
+{
+    uint16_t det_w = (vpp_msg.vpp_w + 31) / 32;
+    uint16_t det_h = (vpp_msg.vpp_h + 31) / 32;
+
+    uint8_t *src_bin = NULL;
+
+    if (sensor_id == ISP_VIDEO_0)
     {
-        *gx0 = x0;
+        if (mdet_result_sensor1 == NULL) return -1;
+        src_bin = mdet_result_sensor1;
     }
-    if (gy0)
+    else if(sensor_id == ISP_VIDEO_1)
     {
-        *gy0 = y0;
+        if (mdet_result_sensor2 == NULL) return -1;
+        src_bin = mdet_result_sensor2;
     }
-    if (gx1)
-    {
-        *gx1 = x1;
-    }
-    if (gy1)
-    {
-        *gy1 = y1;
-    }
+    memcpy(bin_buf, src_bin, det_w * det_h);
+
     return 0;
 }

@@ -48,6 +48,7 @@ static const struct hgic_atcmd static_atcmds[] = {
     { "AT+HEAP", sys_heap_dump_hdl },
 	{ "AT+INMAP", sys_get_gpio_imap},
 	{ "AT+OUTMAP", sys_get_gpio_omap},
+    { "AT+VCAM2", sys_vcam2_conflict_detect},
 	{ NULL, sys_empty_atcmd},  //用于调用cpu1的atcmd
 
     /* WiFi参数设置 AT指令          */

@@ -470,7 +470,7 @@ const _Sensor_LSC          gc1084_lsc_init = {
     .p_lsc_tbl = (uint32 *)gc1084_lsc_tbl,
 };
 
-const _Sensor_LHS gc1084_lhs_map[] = {
+const _Sensor_LHS gc1084_lhs_map[9] = {
     // region defination: lower -> center -> upper(direction: anticlockwise)
     // region_lower, region_center, region_upper, hue adjust value, saturation adjust value
     //   (9 bits)      (9 bits)       (9 bits)          (9 bits)           (8 bits)
@@ -734,25 +734,15 @@ const _Sensor_ISP_Init gc1084_isp_init =
 
 SENSOR_OP_SECTION const _Sensor_Adpt_ gc1084_cmd = 
 {
-	.typ = 1, //YUV
 	.pixelw = 1280,
 	.pixelh= 720,
-	.hsyn = 1,
-	.vsyn = 1,
-	.rduline = 0,//
-	.rawwide = 1,//10bit
-	.colrarray = 1,//0:_RGRG_ 1:_GRGR_,2:_BGBG_,3:_GBGB_
 	.init = (uint8 *)GC1084InitTable,
-    .init_len = sizeof(GC1084InitTable),
     .slave_init = (uint8 *)initTable_slave_15fps,
     .nigth_mode_init = (uint8 *)initTable_slave_7fps,
     .sensor_stop_stream = (uint8 *)gc1084_stop_stream,
     .vts_reg = {0x0d41,0x0d42},
     .vts_reg_num = 2,
     .mipi_lane_num = 1,
-	.rotate_adapt = {0},
-	.mclk = 24000000,
-	.p_fun_adapt = {NULL,NULL,NULL},
     .sensor_isp = (_Sensor_ISP_Init *)&gc1084_isp_init,
 };
 

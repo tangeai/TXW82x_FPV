@@ -102,6 +102,7 @@
 
 #define CORE_WDTCON   (0xe4>>0)
 #define CORE_WDTKEY   (0xe8>>0)
+#define CORE_PMUCON16 (0xec>>0)
 #endif
 typedef struct
 {
@@ -188,7 +189,7 @@ __STATIC_INLINE void fun_name##_dis(void) { PMU_REG_CLR_BITS(reg, bits); }
 #define PMU_VDD_OC_PENDING          (PMU->LVD_CON & BIT(28))
 #define PMU_VDD_LV_PENDING          (PMU->LVD_CON & BIT(27))
 #define PMU_VCC_LV_PENDING          (PMU->LVD_CON & BIT(26))
-#define PMU_VCC1_LV_PENDING         (PMU->LVD_CON & BIT(25)) //?
+
 #define PMU_VCC15_LV_PENDING        (PMU->LVD_CON & BIT(24))
 #define pmu_vcc1_lv_int_en()        PMU_REG_CLR_BITS(PMU->LVD_CON, BIT(23))
 #define pmu_vcc1_lv_int_dis()       PMU_REG_SET_BITS(PMU->LVD_CON, BIT(23))
@@ -276,12 +277,8 @@ enum vcc1_lv_level {
 #define pmu_vcc_lv_detect_filter_en()               PMU_REG_CLR_BITS(PMU->LVD_CON1, BIT(28))
 #define pmu_vcc_lv_detect_filter_dis()              PMU_REG_SET_BITS(PMU->LVD_CON1, BIT(28))
 #define pmu_vdd_oc_lv_ldetect_filter_set(level)     PMU_REG_SET_VALUE(PMU->LVD_CON1, 0x0FE00000, level, 21)
-#define pmu_vdd_oc_lv_ldetect_filter_set(level)     PMU_REG_SET_VALUE(PMU->LVD_CON1, 0x0FE00000, level, 21)
-#define pmu_vdd_oc_lv_hdetect_filter_set(level)     PMU_REG_SET_VALUE(PMU->LVD_CON1, 0x01FC000, level, 14)
 #define pmu_vdd_oc_lv_hdetect_filter_set(level)     PMU_REG_SET_VALUE(PMU->LVD_CON1, 0x01FC000, level, 14)
 #define pmu_vcc_oc_lv_ldetect_filter_set(level)     PMU_REG_SET_VALUE(PMU->LVD_CON1, 0x00003f80, level, 7)
-#define pmu_vcc_oc_lv_ldetect_filter_set(level)     PMU_REG_SET_VALUE(PMU->LVD_CON1, 0x00003f80, level, 7)
-#define pmu_vcc_oc_lv_hdetect_filter_set(level)     PMU_REG_SET_VALUE(PMU->LVD_CON1, 0x0000007f, level, 0)
 #define pmu_vcc_oc_lv_hdetect_filter_set(level)     PMU_REG_SET_VALUE(PMU->LVD_CON1, 0x0000007f, level, 0)
 
 /* lvdcon2 */
@@ -294,12 +291,8 @@ enum vcc1_lv_level {
 #define pmu_vcc15_lv_detect_filter_en()             PMU_REG_CLR_BITS(PMU->LVD_CON2, BIT(28))
 #define pmu_vcc15_lv_detect_filter_dis()            PMU_REG_SET_BITS(PMU->LVD_CON2, BIT(28))
 #define pmu_vcc1_oc_lv_ldetect_filter_set(level)    PMU_REG_SET_VALUE(PMU->LVD_CON2, 0x0FE00000, level, 21)
-#define pmu_vcc1_oc_lv_ldetect_filter_set(level)    PMU_REG_SET_VALUE(PMU->LVD_CON2, 0x0FE00000, level, 21)
-#define pmu_vcc1_oc_lv_hdetect_filter_set(level)    PMU_REG_SET_VALUE(PMU->LVD_CON2, 0x001FC000, level, 14)
 #define pmu_vcc1_oc_lv_hdetect_filter_set(level)    PMU_REG_SET_VALUE(PMU->LVD_CON2, 0x001FC000, level, 14)
 #define pmu_vcc15_oc_lv_ldetect_filter_set(level)   PMU_REG_SET_VALUE(PMU->LVD_CON2, 0x00003f80, level, 7)
-#define pmu_vcc15_oc_lv_ldetect_filter_set(level)   PMU_REG_SET_VALUE(PMU->LVD_CON2, 0x00003f80, level, 7)
-#define pmu_vcc15_oc_lv_hdetect_filter_set(level)   PMU_REG_SET_VALUE(PMU->LVD_CON2, 0x0000007f, level, 0)
 #define pmu_vcc15_oc_lv_hdetect_filter_set(level)   PMU_REG_SET_VALUE(PMU->LVD_CON2, 0x0000007f, level, 0)
 
 /* CORE_PMUCON0 */
@@ -598,14 +591,7 @@ enum vcc_ldo_vol_level {
     VCC_LDO_VOL_2V55,
 };
 
-#define pmu_set_vcam2_vol(vcc_ldo_vol_level)            PMU_REG_SET_VALUE(PMU->PMUCON16, 0x07800000, vcc_ldo_vol_level, 23)
-enum vcam2_oc_level {
-    VCAM2_OC_750MA,
-    VCAM2_OC_250MA,
-    VCAM2_OC_150MA,
-    VCAM2_OC_100MA,
-};
-#define pmu_vcam2_oc_set(vcam2_oc_level)                PMU_REG_SET_VALUE(PMU->PMUCON16, 0x00600000, vcam2_oc_level, 21)
+
 
 struct system_reset_pending_bits {
   uint32  srp_mclr : 1,           /* mclr pin reset */
@@ -643,39 +629,167 @@ struct system_reset_info {
 extern struct system_reset_info sri;
 
 
+/**
+ * @brief Write a protected PMU register.
+ *
+ * @param reg_addr Absolute address of the target PMU register.
+ * @param data Value to write.
+ * @note The function temporarily disables local interrupts and performs the
+ *       PMU secure-address, secure-data, and secure-key write sequence.
+ */
 void pmu_reg_write(uint32 reg_addr, uint32 data) ;
 
-void pmu_dcdc_open(void);
-
+/**
+ * @brief Select and control the flash I/O power source.
+ *
+ * @param power_on 0 powers the flash I/O domain off; any non-zero value
+ *                 powers it on.
+ * @param suply_3p3v When powering on, non-zero selects VCC (3.3 V); 0
+ *                   selects the VDD18 LDO path.
+ */
 void pmu_vccfls_power_set(uint32 power_on, uint32 suply_3p3v);
-/* PC[8:13] power domain : VCC or VCC18 */
+/**
+ * @brief Select and control the PC8-PC13 I/O power source.
+ *
+ * @param power_on 0 powers the I/O domain off; any non-zero value powers it
+ *                 on.
+ * @param suply_3p3v When powering on, non-zero selects VCC (3.3 V); 0
+ *                   selects VCC18 (1.8 V).
+ */
 void pmu_vccsd_power_set(uint32 power_on, uint32 suply_3p3v);
+/**
+ * @brief Enable or disable the VDD18 LDO.
+ *
+ * @param en 0 disables the LDO; any non-zero value enables it.
+ * @param vol Output voltage from VCC_LDO_VOL_1V00 to VCC_LDO_VOL_2V55.
+ * @retval 0 Success.
+ * @retval -1 The voltage level is out of range.
+ * @note The LVD interrupt is temporarily disabled while the LDO registers and
+ *       pending status are updated.
+ */
 int32 pmu_vdd18_ldo_en(uint32 en, enum vcc_ldo_vol_level vol);
+/**
+ * @brief Get the VDD18 LDO enable state.
+ *
+ * @return Non-zero when the LDO is enabled; 0 when it is disabled.
+ * @note The enabled value is returned as the raw SYS_CON14 bit mask.
+ */
 int pmu_is_vdd18_ldo_en(void);
+/**
+ * @brief Get the configured VDD18 LDO voltage level.
+ *
+ * @return A value from enum vcc_ldo_vol_level.
+ */
 int pmu_get_vdd18_ldo_vol(void);
 
 /**
- * strongly recommend vol same with vcc18 when power for mipi sensor
+ * @brief Enable or disable the VCAM2 LDO.
+ *
+ * @param enables 0 disables the LDO; any non-zero value enables it.
+ *                Bit 31 clear selects packages where PC8 and VCAM2 are
+ *                internally double-bonded; PC8 is then configured as an
+ *                analog input without pull resistors. Bit 31 set selects
+ *                packages where PC8 and VCAM2 are bonded separately and
+ *                leaves PC8 unchanged.
+ * @param vol Output voltage from VCC_LDO_VOL_1V00 to VCC_LDO_VOL_2V55.
+ * @retval 0 Success.
+ * @retval -1 The voltage level is out of range.
+ * @note For a MIPI sensor, VCAM2 should normally use the same voltage as
+ *       VDD18, for example: pmu_vcam2_ldo_en(1, pmu_get_vdd18_ldo_vol()).
  */
-int32 pmu_vcam2_ldo_en(uint32 en, enum vcc_ldo_vol_level vol);
+int32 pmu_vcam2_ldo_en(uint32 enables, enum vcc_ldo_vol_level vol);
+/**
+ * @brief Get the VCAM2 LDO enable state.
+ *
+ * @return Non-zero when the LDO is enabled; 0 when it is disabled.
+ * @note The enabled value is returned as the raw SYS_CON14 bit mask.
+ */
 int pmu_is_vcam2_ldo_en(void);
+/**
+ * @brief Get the configured VCAM2 LDO voltage level.
+ *
+ * @return A value from enum vcc_ldo_vol_level.
+ */
 int pmu_get_vcam2_ldo_vol(void);
-/*
- * vcam ldo enable,  you maybe need pmu_get_vcam_vol(); pmu_vcam_is_en();
+/**
+ * @brief Enable or disable the VCAM LDO.
+ *
+ * @param en 0 disables the LDO; any non-zero value enables it.
+ * @param vol Output voltage from VCAM_VOL_2V50 to VCAM_VOL_3V30.
+ * @retval 0 Success.
+ * @retval -1 The voltage level is out of range.
+ * @note The LVD interrupt is temporarily disabled while the VCAM power and
+ *       over-current settings are updated.
  */
 int32 pmu_vcam_ldo_en(uint32 en, enum vcam_vol_level vol);
 
+/**
+ * @brief Select the secure temperature-sensor channel.
+ *
+ * @param chan_idx Channel index from 0 to 3; 0 selects the internal PMU
+ *                 channel.
+ * @note This reserved interface currently performs no hardware operation.
+ */
 void pmu_tsensor_chan_sel_sec(uint8 chan_idx);
+/**
+ * @brief Enable the secure analog-top power-domain path.
+ *
+ * @note This reserved interface currently performs no hardware operation.
+ */
 void pmu_pd_set_anatop_en_sec(void);
+/**
+ * @brief Enable or disable the JTAG pin mapping.
+ *
+ * @param val 0 disables the JTAG mapping; any non-zero value enables it.
+ * @return RET_OK.
+ */
 int jtag_map_set(uint8 val);
 
+/**
+ * @brief Enable the PMU temperature sensor.
+ *
+ * @note This reserved interface currently performs no hardware operation.
+ */
 void tsensor_open(void);
+/**
+ * @brief Disable the PMU temperature sensor.
+ *
+ * @note This reserved interface currently performs no hardware operation.
+ */
 void tsensor_close(void);
 
+/**
+ * @brief Handle an LVD interrupt and report the captured fault causes.
+ *
+ * @param data Interrupt callback context; currently unused.
+ * @note The handler captures the current status, clears the related pending
+ *       flags, and prints the LVD causes.
+ */
 void lvd_irq_handler(void *data);
+/**
+ * @brief Capture reset and LVD causes into the persistent reset information.
+ *
+ * @note The result is stored in the global sri object in the .no_init
+ *       section so it remains available during startup diagnostics.
+ */
 void sys_reset_detect(void);
+/**
+ * @brief Clear the reset- and LVD-related PMU pending flags.
+ */
 void sys_reset_pending_clr(void);
+/**
+ * @brief Print all captured system reset causes.
+ *
+ * @note Call sys_reset_detect() before this function to refresh sri.
+ */
 void sys_reset_show(void);
+/**
+ * @brief Configure the core VDD LDO voltage selection.
+ *
+ * @param vddcore Voltage selection; only the low three bits are used. Use a
+ *                value from enum pmu_vdd_vol_level.
+ * @note The function also configures the VDD LDO current limit to 200 mA.
+ */
 void pmu_vdd_core_set(uint32 vddcore);
 
 
