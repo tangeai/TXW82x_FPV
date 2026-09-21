@@ -228,6 +228,8 @@ static void aac_msi_decode(struct aac_decode_struct *s)
                 }
                 send_frame_buf->priv = &s->audio_track;
                 send_frame_buf->len = dec_samples*2;
+                /* Preserve demux PTS through asynchronous AAC -> PCM playback. */
+                send_frame_buf->time = recv_frame_buf->time;
                 send_frame_buf->mtype = F_AUDIO;
                 send_frame_buf->stype = FSTYPE_AUDIO_PCM;
                 s->audio_track.samplerate = aac_info.samplerate;
@@ -581,16 +583,17 @@ create_msi_again:
     if(audec_init->direct_to_dac && !aac_decode_s->use_tpc) {
 	    msi_add_output(msi, NULL, "R_AUDAC");
     }    
+    msi_get(msi); /* Hold the worker reference before it can be scheduled. */
 #if AAC_DEC_CTRL == AUCODER_RUN_IN_CPU1
     aac_decode_s->task_hdl = os_task_create("aac_decode_thread", aac_decode_thread, (void*)aac_decode_s, OS_TASK_PRIORITY_ABOVE_NORMAL, 0, NULL, 1024);
 #else
     aac_decode_s->task_hdl = os_task_create("aac_decode_thread", aac_decode_thread, (void*)aac_decode_s, OS_TASK_PRIORITY_NORMAL, 0, NULL, 2048);
 #endif
     if(aac_decode_s->task_hdl == NULL)  {
+        msi_put(msi);
 		AAC_INFO("create aac decode task fail!\r\n");
 		goto aac_decode_init_err;
 	}
-    msi_get(msi);
 	return msi;
 	
 aac_decode_init_err:

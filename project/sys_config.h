@@ -450,25 +450,55 @@
 #endif
 
 #ifdef PSRAM_HEAP
+#ifndef TCPIP_MBOX_SIZE
 #define TCPIP_MBOX_SIZE                 128
+#endif
+#ifndef DEFAULT_UDP_RECVMBOX_SIZE
 #define DEFAULT_UDP_RECVMBOX_SIZE       64
+#endif
+#ifndef DEFAULT_TCP_RECVMBOX_SIZE
 #define DEFAULT_TCP_RECVMBOX_SIZE       64
+#endif
+#ifndef DEFAULT_ACCEPTMBOX_SIZE
 #define DEFAULT_ACCEPTMBOX_SIZE         16
+#endif
 
 //#define MEM_LIBC_MALLOC 1
 //#define MEMP_MEM_MALLOC 1 
+#ifndef MEM_SIZE
 #define MEM_SIZE                        80*1024
+#endif
+#ifndef MEMP_NUM_PBUF
 #define MEMP_NUM_PBUF                   40
+#endif
+#ifndef MEMP_NUM_NETCONN
 #define MEMP_NUM_NETCONN                16
+#endif
+#ifndef MEMP_NUM_NETBUF
 #define MEMP_NUM_NETBUF                 64
+#endif
+#ifndef MEMP_NUM_UDP_PCB
 #define MEMP_NUM_UDP_PCB                8
+#endif
+#ifndef MEMP_NUM_TCP_PCB
 #define MEMP_NUM_TCP_PCB                16
+#endif
+#ifndef MEMP_NUM_TCP_SEG
 #define MEMP_NUM_TCP_SEG                320
+#endif
+#ifndef PBUF_POOL_SIZE
 #define PBUF_POOL_SIZE                  80
+#endif
 
+#ifndef TCP_SND_BUF
 #define TCP_SND_BUF                    (40 * TCP_MSS)
+#endif
+#ifndef TCP_WND
 #define TCP_WND                        (40 * TCP_MSS)
+#endif
+#ifndef TCP_TMR_INTERVAL
 #define TCP_TMR_INTERVAL                50
+#endif
 #endif
 
 #ifndef VIDEO_YUV_RANGE_TYPE

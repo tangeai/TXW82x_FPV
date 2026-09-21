@@ -420,6 +420,8 @@ int32 hgjpg_init(struct jpg_device *p_jpg,uint32 table_index,uint32 qt){
 	jpg_table_init(hw,thw,hufhw,table_index);
 	hw->DMA_CON = (qt<<1);
 	jpg_hw->addr_count = 0;
+	/* Match the hardware reset when restarting after an aborted JPEG frame. */
+	jpg_hw->deal_time = 0;
 
 	return 0;
 }

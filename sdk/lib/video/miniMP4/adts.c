@@ -131,7 +131,7 @@ void aac_dsi_to_adts(uint8_t *dsi, uint8_t *adts, uint32_t aac_data_length)
 
     adts[0] = 0xFF;                         //syncword hight 8 bits
     adts[1] = 0xF0;                         //syncword low 4 bits
-    adts[1] |= (0x01 << 3);                 //ID 0:MPEG-4,1:MPEG-2
+    adts[1] |= (0x00 << 3); /* Match MP4 MPEG-4 AAC (esds 0x40). */                 //ID 0:MPEG-4,1:MPEG-2
     adts[1] |= (0x00 << 1);                 //layer:00
     adts[1] |= (0x01 & 0x1);                //1:no CRC,0:is CRC
     adts[2] = (profile << 6);               //profile 0x01:AAC-LC

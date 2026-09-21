@@ -1739,7 +1739,7 @@ void h264_frame_done_isr(uint32 irq_flags, uint32 irq_data, uint32 param){
 		}
 
 	}	
-	_os_printf(KERN_DEBUG"Z%d",penc_cfg->src_from);
+	// _os_printf(KERN_DEBUG"Z%d",penc_cfg->src_from);
 
 }
 
@@ -1829,7 +1829,7 @@ void h264_frame_done_norekick_isr(uint32 irq_flags, uint32 irq_data, uint32 para
 	}
 	
 	penc_cfg->enc_runing = 0;
-	os_printf(KERN_DEBUG"Z%d",penc_cfg->src_from);
+	// os_printf(KERN_DEBUG"Z%d",penc_cfg->src_from);
 	h264_sema_up();
 }
 
@@ -2009,20 +2009,25 @@ void h264_main_sensor_cfg(struct h264_device *p_h264,uint32_t w,uint32_t h,uint8
 	enc_cfg.wrap_width      = w;
 	enc_cfg.wrap_height     = h;
 	enc_cfg.src_from        = src_from;
-	enc_cfg.enc_bps 		= 4000; //Kbit pre second
-	
-	enc_cfg.still_enc_bps   = 600;    //Kbit pre second
-	enc_cfg.move_enc_bps    = 4000;   //Kbit pre second	
-	enc_cfg.stilltomove     = 0;    //permil for judgmemnt is move or still
+    if(enc_cfg.frm_height > 720){       //1080p
+	    enc_cfg.enc_bps 	    = 800;
+	    enc_cfg.still_enc_bps   = 300;    /* 静止时码率 (stilltomove=0 时不生效) */
+	    enc_cfg.move_enc_bps    = 800;
+    }else{
+        enc_cfg.enc_bps         = 500;    //720p
+	    enc_cfg.still_enc_bps   = 150;
+	    enc_cfg.move_enc_bps    = 500;
+    }
+	enc_cfg.stilltomove     = 1;    //permil, 0 = 关闭动静切换, 保持固定 enc_bps
 	enc_cfg.move_keep_gop   = 5;
-	enc_cfg.frm_rate		= 25;	//fps
-#if H264_I_ONLY 
+	enc_cfg.frm_rate		= 15;	//fps
+#if H264_I_ONLY
 	enc_cfg.frm_gop 		= 1;	//IPPPP frame number of a gop
 	enc_cfg.rc_en			= 0;	//enc rate control enable
 #else
-	enc_cfg.frm_gop 		= 25;	//IPPPP frame number of a gop
+	enc_cfg.frm_gop 		= 45;	//IPPPP frame number of a gop
 	enc_cfg.rc_en			= 1;	//enc rate control enable
-#endif	
+#endif
 	enc_cfg.rc_grp			= 2;	//mb line number when RC change qp
 	enc_cfg.cc_corect		= 0;	//0: no corection; 1: corection
 	enc_cfg.rc_effort		= 2;	//0:low; 1: high; 2:relax;
@@ -2065,20 +2070,20 @@ void h264_second_sensor_cfg(struct h264_device *p_h264,uint32_t w,uint32_t h,uin
 	enc_2_cfg.wrap_width    = w;
 	enc_2_cfg.wrap_height   = h;
 	enc_2_cfg.src_from      = src_from;	
-	enc_2_cfg.enc_bps 		= 1000; //Kbit pre second
+	enc_2_cfg.enc_bps 		= 250; //Kbit pre second
 
-	enc_2_cfg.still_enc_bps = 300;    //Kbit pre second
-	enc_2_cfg.move_enc_bps  = 1000;   //Kbit pre second	
-	enc_2_cfg.stilltomove   = 0;    //permil for judgmemnt is move or still
+	enc_2_cfg.still_enc_bps = 100;    /* 静止时码率 (stilltomove=0 时不生效) */
+	enc_2_cfg.move_enc_bps  = 250;
+	enc_2_cfg.stilltomove   = 1;    //permil, 0 = 关闭动静切换
 	enc_2_cfg.move_keep_gop = 5;
-	enc_2_cfg.frm_rate		= 25;	//fps
+	enc_2_cfg.frm_rate		= 15;	//fps
 #if H264_I_ONLY
 	enc_2_cfg.frm_gop		= 1;	//IPPPP frame number of a gop
 	enc_2_cfg.rc_en 		= 0;	//enc rate control enable
 #else
-	enc_2_cfg.frm_gop 		= 25;	//IPPPP frame number of a gop
+	enc_2_cfg.frm_gop 		= 45;	//IPPPP frame number of a gop
 	enc_2_cfg.rc_en			= 1;	//enc rate control enable
-#endif	
+#endif
 	enc_2_cfg.rc_grp		= 2;	//mb line number when RC change qp
 	enc_2_cfg.cc_corect		= 0;	//0: no corection; 1: corection
 	enc_2_cfg.rc_effort		= 2;	//0:low; 1: high; 2:relax;

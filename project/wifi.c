@@ -7,6 +7,7 @@
 #include "lib/umac/ieee80211.h"
 #include "lib/lmac/lmac.h"
 #include "syscfg.h"
+#include "hal/netdev.h"
 
 __init static void sys_wifi_start_acs(void)
 {
@@ -153,6 +154,7 @@ __init void sys_wifi_init(void)
     sys_wifi_parameter_init();
 
     ieee80211_deliver_init(16, 60);
+#if 0 // AP/STA 由探鸽业务按配网状态启动。
 
 #if WIFI_AP_SUPPORT
     sys_wifi_ap_init();
@@ -167,5 +169,62 @@ __init void sys_wifi_init(void)
 #endif
 
     sys_wifi_start_acs();
+#endif
+
+}
+//------------------------------- Tange ----------------------------------------
+#include "lib/net/dhcpd/dhcpd.h"
+extern int GetNetworkState(void);
+extern void sys_network_init(void);
+void sys_dhcpd_start();
+static char network_inited = 0;
+void wifi_start_ap(const char *ssid, const char *key, int key_mgmt, int channel)
+{
+    os_printf(KERN_NOTICE "start AP mode, SSID=%s\r\n", ssid);
+    ieee80211_iface_create_ap(WIFI_MODE_AP, IEEE80211_BAND_2GHZ);
+
+	snprintf((char*)sys_cfgs.ssid, sizeof(sys_cfgs.ssid), "%s", ssid);
+	snprintf((char*)sys_cfgs.passwd, sizeof(sys_cfgs.passwd), "%s", key);
+	sys_cfgs.wifi_mode = WIFI_MODE_AP;
+	sys_cfgs.key_mgmt = key_mgmt;
+	wificfg_flush(WIFI_MODE_AP);
+
+	ieee80211_conf_set_psdata_cnt(WIFI_MODE_AP, 100);
+	ieee80211_iface_start(WIFI_MODE_AP);
+
+	if(!network_inited) {
+		sys_network_init();
+		network_inited = 1;
+	}
+
+	sys_dhcpd_start();
+
 }
 
+void wifi_stop_ap()
+{
+	dhcpd_stop();
+	ieee80211_iface_stop(WIFI_MODE_AP);
+}
+void wifi_start_sta(const char *ssid, const char *key, int key_mgmt)
+{
+	snprintf((char*)sys_cfgs.ssid, sizeof(sys_cfgs.ssid), "%s", ssid);
+	snprintf((char*)sys_cfgs.passwd, sizeof(sys_cfgs.passwd), "%s", key);
+	wpa_passphrase(sys_cfgs.ssid, (char*)sys_cfgs.passwd, sys_cfgs.psk);
+	sys_cfgs.wifi_mode = WIFI_MODE_STA;
+	sys_cfgs.key_mgmt = key_mgmt;
+
+    if(GetNetworkState() == 1){
+        wifi_stop_ap();
+    }
+
+    ieee80211_iface_create_sta(WIFI_MODE_STA, IEEE80211_BAND_2GHZ);
+	wificfg_flush(WIFI_MODE_STA);
+	ieee80211_iface_start(WIFI_MODE_STA);
+
+	if(!network_inited) {
+		sys_network_init();
+		network_inited = 1;
+	}
+
+}

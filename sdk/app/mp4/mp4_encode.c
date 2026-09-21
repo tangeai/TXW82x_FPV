@@ -1,3 +1,4 @@
+#include "project_config.h"
 #include "lib/fs/fatfs/osal_file.h"
 #include "lib/heap/av_psram_heap.h"
 #include "osal/string.h"
@@ -365,20 +366,12 @@ static void mp4_truncate(mp4_key_msg *msg, uint32_t offset)
     // osal_ftruncate(fp);
 }
 
-static void mp4_file_syn(mp4_key_msg *msg)
+static uint32_t mp4_file_syn(mp4_key_msg *msg)
 {
-    if (!msg || !msg->fp)
-    {
-        return;
-    }
-
+    if (!msg || !msg->fp) return 1;
     if (msg->ops_init && msg->ops.flush)
-    {
-        msg->ops.flush(msg->ops.file);
-        return;
-    }
-
-    osal_fsync(msg->fp);
+        return msg->ops.flush(msg->ops.file) != 0;
+    return osal_fsync(msg->fp) != FR_OK;
 }
 
 static int mp4_default_ops_write(void *file, const void *buf, uint32_t len)
@@ -510,11 +503,12 @@ static void mp4_default_ops_init(F_FILE *fp, file_ops_t *ops)
 #define BIG2_ENDIAN(X) (((X) & 0xFF00) >> 8 | ((X) & 0x00FF) << 8)
 #define BIG1_ENDIAN(X) ((X))
 
-#define STTS_COUNT (0x2000)
+/* 60s product clips: 4096 samples exceed 30fps * 60s, with room for jitter. */
+#define STTS_COUNT (4096)
 #define STSC_COUNT (1)
-#define STSZ_COUNT (0x20000)
-#define STCO_COUNT (0x20000)
-#define STSS_COUNT (0x10000)
+#define STSZ_COUNT (4096)
+#define STCO_COUNT (4096)
+#define STSS_COUNT (512)
 static const char          language[4] = "und";
 static const unsigned char box_ftyp[]  = {
 #if 1
@@ -1079,7 +1073,8 @@ uint32_t mp4_mp4a_write(F_FILE *fp, uint32_t offset, mp4_key_msg *msg)
     mp4a.dataReferenceIndex = BIG2_ENDIAN(1);
     mp4a.channelCount       = BIG2_ENDIAN(1);
     mp4a.sampleSize         = BIG2_ENDIAN(16);
-    mp4a.time_scale         = BIG2_ENDIAN(90000 & 0xffff);
+    /* AudioSampleEntry.sampleRate is a 16.16 sample rate, not media timescale. */
+    mp4a.time_scale         = BIG4_ENDIAN((msg->audio_samplerate ? msg->audio_samplerate : 8000U) << 16);
     mp4_seek(msg, offset, SEEK_SET);
     mp4_write(msg, &mp4a, 1, sizeof(mp4a));
     msg->msg_end = msg->msg_end > mp4_tell(msg) ? msg->msg_end : mp4_tell(msg);
@@ -1256,7 +1251,7 @@ uint32_t mp4_sync(mp4_key_msg *msg)
             mp4_seek(msg, vtrak->stts_write_offset, SEEK_SET);
             if (vtrak->stts_need_write_len)
             {
-                mp4_write(msg, vtrak->stts_tmp_buf, 1, vtrak->stts_need_write_len);
+                ret |= mp4_write(msg, vtrak->stts_tmp_buf, 1, vtrak->stts_need_write_len);
                 vtrak->stts_write_offset += vtrak->stts_need_write_len;
                 vtrak->stts_need_write_len = 0;
             }
@@ -1283,7 +1278,7 @@ uint32_t mp4_sync(mp4_key_msg *msg)
             }
 
             mp4_seek(msg, vtrak->stsc_write_offset, SEEK_SET);
-            mp4_write(msg, vtrak->stsc_tmp_buf, 1, vtrak->stsc_need_write_len);
+            ret |= mp4_write(msg, vtrak->stsc_tmp_buf, 1, vtrak->stsc_need_write_len);
             vtrak->stsc_write_offset += vtrak->stsc_need_write_len;
             vtrak->stsc_need_write_len = 0;
             // 回写对应的count值
@@ -1299,7 +1294,7 @@ uint32_t mp4_sync(mp4_key_msg *msg)
                 ret++;
             }
             mp4_seek(msg, vtrak->stsz_write_offset, SEEK_SET);
-            mp4_write(msg, vtrak->stsz_tmp_buf, 1, vtrak->stsz_need_write_len);
+            ret |= mp4_write(msg, vtrak->stsz_tmp_buf, 1, vtrak->stsz_need_write_len);
             vtrak->stsz_write_offset += vtrak->stsz_need_write_len;
             vtrak->stsz_need_write_len = 0;
 
@@ -1354,7 +1349,7 @@ uint32_t mp4_sync(mp4_key_msg *msg)
         max_duration = max_duration > vtrak->duration ? max_duration : vtrak->duration;
     }
 
-    os_printf(KERN_INFO "max_duration:%d\n", max_duration);
+    /* Duration is synced periodically; avoid routine UART noise. */
     sync_duration = max_duration;
     mp4_seek(msg, msg->mvhd_duration_offset, SEEK_SET);
     max_duration = BIG4_ENDIAN(max_duration);
@@ -1369,7 +1364,7 @@ uint32_t mp4_sync(mp4_key_msg *msg)
         ret |= mp4_write(msg, &mdat_size, 1, sizeof(mdat_size));
     }
 
-    mp4_file_syn(msg);
+    ret |= mp4_file_syn(msg);
     if (!ret)
     {
         msg->syn_time = sync_duration;
@@ -1781,8 +1776,8 @@ uint32_t mp4_deinit(mp4_key_msg *msg)
         msg->mdat_size = msg->mdat_nowoffset - msg->mdat_offset;
         uint32_t mdat_size = BIG4_ENDIAN(msg->mdat_size);
         mp4_seek(msg, msg->mdat_offset, SEEK_SET);
-        mp4_write(msg, &mdat_size, 1, sizeof(mdat_size));
-        mp4_file_syn(msg);
+        ret |= mp4_write(msg, &mdat_size, 1, sizeof(mdat_size));
+        ret |= mp4_file_syn(msg);
 #if MP4_TRUNCATE_REAL_EN
         mp4_seek(msg, msg->mdat_nowoffset, SEEK_SET);
         osal_ftruncate(msg->fp);                    // 裁掉后面没用空间
@@ -1790,6 +1785,13 @@ uint32_t mp4_deinit(mp4_key_msg *msg)
     }
 
     mp4_fast_seek_destroy(msg->fp, &msg->fast_seek_tbl);
+    /* mux_file_finish pads its DMA block. Trim that padding from our dynamic
+     * SD files only, after the final index/mdat writes have been flushed. */
+    if (!ret && msg->init && !msg->file_max_size && msg->mdat_nowoffset > msg->mdat_offset) {
+        if (osal_fseek(msg->fp, msg->mdat_nowoffset) != FR_OK ||
+            osal_ftruncate(msg->fp) != FR_OK || osal_fsync(msg->fp) != FR_OK)
+            ret = 1;
+    }
     STREAM_FREE(msg);
     return ret;
 }

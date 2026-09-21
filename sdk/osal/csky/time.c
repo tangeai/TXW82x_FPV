@@ -48,6 +48,7 @@ void os_systime(struct timespec *tm)
     tm->tv_nsec = (sys_time_real_ns + diff_ns) % NANOSECONDS_PER_SECOND;
 }
 
+extern long _tg_timezone_;
 #ifdef __NEWLIB__
 int gettimeofday(struct timeval *ptimeval, void *ptimezone)
 #else
@@ -58,7 +59,7 @@ int gettimeofday(struct timeval *ptimeval, struct timezone *ptimezone)
     ptimeval->tv_sec  = (sys_time_real_ns + diff_ns) / NANOSECONDS_PER_SECOND;
     ptimeval->tv_usec = ((sys_time_real_ns + diff_ns) % NANOSECONDS_PER_SECOND) / 1000;
     //加时区
-    //ptimeval->tv_sec += (8*3600); //东八区
+    ptimeval->tv_sec += _tg_timezone_; //(8*3600); //东八区
     return 0;
 }
 

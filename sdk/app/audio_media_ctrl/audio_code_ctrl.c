@@ -10,7 +10,7 @@
 struct msi *audio_encode_init(uint32_t coder, uint32_t samplerate, AUENC_INIT *auenc_init)
 {
     struct msi *msi = NULL;
-    if(auenc_init->channels != 1 || auenc_init->channels != 2) {
+    if(auenc_init->channels != 1 && auenc_init->channels != 2) {
         auenc_init->channels = 1;
         os_printf("audio encoder channels parm err!");
     }

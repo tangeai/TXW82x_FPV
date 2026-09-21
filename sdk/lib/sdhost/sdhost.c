@@ -16,6 +16,7 @@
 #include "osal/sleep.h"
 #include "osal/timer.h"
 #include "osal/work.h"
+#include "osal/time.h"
 #ifdef PIN_FROM_PARAM
 #include "pin_param.h"
 #endif
@@ -24,6 +25,22 @@
 extern uint8_t get_fat_isready();
 struct sdh_device *sdh_test;
 struct os_semaphore sem;
+
+/* 默认保持其它应用的旧行为；单 MP4 应用提供强符号接管恢复。 */
+__attribute__((weak)) int sd_storage_app_managed(void) { return 0; }
+__attribute__((weak)) int sd_storage_app_busy(void) { return 0; }
+__attribute__((weak)) void sd_storage_request_recovery(void) {}
+
+/* R1 中的错误位，不把 CURRENT_STATE、READY_FOR_DATA 当错误。 */
+#define SD_R1_ERROR_MASK 0xfff9a008U
+#define SD_R1_READY     (1U << 8)
+#define SD_STOP_WAIT_MS 2000U
+#define SD_IO_RETRY_MAX 6U
+#define SD_IO_RETRY_MS  3000U
+static uint32 sd_clock_ms(void)
+{
+    return (uint32)os_jiffies_to_msecs(os_jiffies());
+}
 
 #define SD_SAMPLE_VALUE_PRINT       (1)
 #define SD_DATA_RETRY_PER_POINT     (3)
@@ -551,18 +568,9 @@ int32 sd_get_card_status(struct sdh_device * host, uint32 *status){
 }
 
 uint32 send_card_status(struct sdh_device * host){
-    int ret = RET_OK;
-    uint32  status = 0;
-
-    sd_get_card_status(host, &status);
-    
-    status = (status >> 9) & 0xf;
-    if (status != MMCSD_CARD_STATUS_TRAN)
-    {
-        // SDHC_WARN_PRINTF("card status : %d\r\n", status);
-        return RET_ERR;
-    }
-    return ret;	
+    /* PRG 不是拔卡，统一交给有截止时间的就绪状态机处理。 */
+    extern uint32 sd_tran_stop(struct sdh_device *host);
+    return sd_tran_stop(host);
 }
 
 uint32 send_select_card(struct sdh_device * host)
@@ -735,50 +743,57 @@ int32 sd_cmd_stop(struct sdh_device * host)
     cmd.cmd_code = STOP_TRANSMISSION;
     cmd.arg = 0;
     cmd.flags = RESP_SPI_R1B | RESP_R1B | CMD_AC;
-    for (int i = 0; i < 2; i++) {
-        ret  = ((const struct sdhc_hal_ops *)host->dev.ops)->cmd (host, &cmd);
-        if ((ret == MMCSD_NO_ERR) || ret == MMCSD_CMD_SWITCH) { 
-            return RET_OK;
-        }
-    }
-    
-    return RET_ERR;
+    /* STOP 的响应或 busy 失败后必须先查状态，不能盲目再发一次 CMD12。 */
+    ret = ((const struct sdhc_hal_ops *)host->dev.ops)->cmd(host, &cmd);
+    if (ret == MMCSD_CMD_SWITCH) ret = MMCSD_NO_ERR;
+    if (!ret && (cmd.resp[0] & SD_R1_ERROR_MASK)) ret = RET_ERR;
+    return ret;
 }
 
 uint32 sd_tran_stop(struct sdh_device * host)
 {
-    int ret = RET_OK;	
-
-    // os_printf("%s %d addr : %d\r\n", __func__, __LINE__, __builtin_return_address(0));
-    if ((host->sd_stop)) {
-        sd_cmd_stop(host);
-    }
-
+    if (host->sd_opt == SD_OFF) return RET_ERR;
+    uint32 begin = sd_clock_ms();
     uint32 sd_status = 0;
-    for (int i = 0; i < 5; i++) {
-        ret = sd_get_card_status(host, &sd_status);
-        if (RET_OK == ret) {
-            if (sd_status & 0xFFFF0000) {
-                /* sd err */
-                os_printf(KERN_ERR"sd-sta:%x\r\n", sd_status);
+    int failed = 0, stop_sent = 0, selected = 0;
+    unsigned cmd_errors = 0;
+    do {
+        int ret = sd_get_card_status(host, &sd_status);
+        if (ret == RET_OK) {
+            cmd_errors = 0;
+            if (sd_status & SD_R1_ERROR_MASK) {
+                if (!failed) SDHC_ERR_PRINTF("sd-ready: R1=%08x\r\n", sd_status);
+                failed = 1;
             }
-            sd_status = (sd_status >> 9) & 0xF;
-            if (sd_status == MMCSD_CARD_STATUS_TRAN) {
+            uint32 state = (sd_status >> 9) & 0xf;
+            if (state == MMCSD_CARD_STATUS_TRAN && (sd_status & SD_R1_READY)) {
                 host->sd_opt  = SD_IDLE;
                 host->sd_stop = 0;
-                return RET_OK;
-            } else if ((sd_status == MMCSD_CARD_STATUS_STBY) || (sd_status == MMCSD_CARD_STATUS_DIS)) {
-                /* need app reselect card */
-                send_select_card(host);
-            } else if (sd_status > MMCSD_CARD_STATUS_TRAN) {
-                sd_cmd_stop(host);
+                /* 卡恢复就绪不等于本次 IO 成功，不能吞掉先前错误。 */
+                return failed ? RET_ERR : RET_OK;
+            } else if (state == MMCSD_CARD_STATUS_DATA || state == MMCSD_CARD_STATUS_RCV) {
+                if (!stop_sent) {
+                    stop_sent = 1;
+                    if (sd_cmd_stop(host) != RET_OK) failed = 1;
+                }
+            } else if (state == MMCSD_CARD_STATUS_STBY || state == MMCSD_CARD_STATUS_DIS) {
+                if (!selected) {
+                    selected = 1;
+                    if (send_select_card(host) != RET_OK) failed = 1;
+                }
+            } else if (state == MMCSD_CARD_STATUS_PRG || state == MMCSD_CARD_STATUS_TRAN) {
+                /* 卡内部编程或尚未就绪，只等待，禁止连续 STOP。 */
             } else {
-                /* card not init ok，kick SD_OFF */
                 break;
-            }  
+            }
+        } else {
+            failed = 1;
+            if (++cmd_errors >= 3) break;
         }
-    }
-
+        os_sleep_ms(10);
+    } while ((uint32)(sd_clock_ms() - begin) < SD_STOP_WAIT_MS);
+    SDHC_ERR_PRINTF("sd-ready: failed R1=%08x cost=%ums stop=%d\r\n",
+                    sd_status, sd_clock_ms() - begin, stop_sent);
     host->sd_opt = SD_OFF;
     return RET_ERR;
 }
@@ -796,10 +811,10 @@ uint32 fatfs_sd_tran_stop(struct sdh_device * host)
 
 int sd_multiple_write(struct sdh_device * host,uint32 lba,uint32 len,uint8 *buf)
 {
-    int ret;
+    int ret = RET_ERR;
     int send_cmd = 1;
     uint32 curr_lba   = lba;
-    uint32 backup_lba = host->new_lba;
+    uint32 backup_lba;
     uint32 block_num  = len/SECTOR_SIZE;
     struct rt_mmcsd_cmd  cmd;	
     uint16 retry_cnt  = 0;
@@ -808,9 +823,15 @@ int sd_multiple_write(struct sdh_device * host,uint32 lba,uint32 len,uint8 *buf)
     uint8  retry_sample_cnt = 0;
     uint8  sample_point_bak = 0;
     uint8  *kick_buf  = buf;
+    if (!host || !buf || !len || len % SECTOR_SIZE ||
+        lba >= host->card_max_blk_num || block_num > host->card_max_blk_num - lba)
+        return RET_ERR;
     os_mutex_lock(&host->lock,osWaitForever);
-   
+    backup_lba = host->new_lba;
+    uint32 retry_begin = sd_clock_ms();
+
 __retry:
+    if (host->sd_opt == SD_OFF) { ret = RET_ERR; goto __err; }
     if(((curr_lba != host->new_lba)||(host->sd_opt != SD_M_W))&& host->sd_stop)
     {
         ret = sd_tran_stop(host);	
@@ -849,7 +870,8 @@ __retry:
     }	
     cmd.flags = RESP_SPI_R1 | RESP_R1 | CMD_ADTC;
     if((((const struct sdhc_hal_ops *)host->dev.ops)) && send_cmd){	
-        ret = ((const struct sdhc_hal_ops *)host->dev.ops)->cmd(host,&cmd);  
+        ret = ((const struct sdhc_hal_ops *)host->dev.ops)->cmd(host,&cmd);
+        if (!ret && (cmd.resp[0] & SD_R1_ERROR_MASK)) ret = MMCSD_CMD_ERR;
         if(ret){
 			sd_tran_stop(host);
             ret = -1;
@@ -869,7 +891,7 @@ __retry:
     host->data.blksize = SECTOR_SIZE;
     host->data.blks    = block_num;
     host->data.err     = 0;	
-    if((!retry_cnt) && ((uint32)kick_buf >= PSRAM_BASE) ){
+    if((uint32)kick_buf >= PSRAM_BASE){
 		sys_dcache_clean_range_unaligned((void *)kick_buf, len); 
 	}
 
@@ -882,7 +904,8 @@ __retry:
 #if defined(TXW82X)
         if ((host->sd_write_retry_flag == 0) && (ret == MMCSD_CMP_DATERR) && (host->io_cfg.self_adaption_flag != MMCSD_SMP_EN))
         {
-            if (host->sd_write_retry == LL_SDHC_RETRY_SELECT_POINT) {
+            if (host->io_cfg.self_adaption_flag == MMCSD_SMP_SUCC &&
+                host->sd_write_retry == LL_SDHC_RETRY_SELECT_POINT) {
 				/* goto retry */
 				host->sd_write_retry = LL_SDHC_RETRY_DEFAULT;
                 /* find current pos & change sample point to next  */
@@ -920,12 +943,18 @@ __retry:
                     host->sd_write_retry = (host->sd_write_retry == LL_SDHC_RETRY_DEFAULT) ? LL_SDHC_RETRY_SELECT_POINT : LL_SDHC_RETRY_DEFAULT;
                 }
                 
-                uint32 retry_blocks = host->data.blks;
-                uint32 completed_blocks = (block_num > retry_blocks) ? (block_num - retry_blocks) : 0;
-
-                curr_lba  = host->new_lba - retry_blocks;
-                kick_buf  = kick_buf + completed_blocks * SECTOR_SIZE;
-                block_num = retry_blocks;
+                if (retry_cnt > SD_IO_RETRY_MAX ||
+                    (uint32)(sd_clock_ms() - retry_begin) >= SD_IO_RETRY_MS) {
+                    sd_tran_stop(host);
+                    goto __err;
+                }
+                /* HAL 的剩余块数语义不明确：停止旧传输后重写整个原请求。
+                 * 不能先覆盖 block_num 再计算偏移，那样偏移永远为零。 */
+                sd_tran_stop(host);
+                if (host->sd_opt == SD_OFF) goto __err;
+                curr_lba = lba;
+                block_num = len / SECTOR_SIZE;
+                kick_buf = buf;
                 goto __retry;
             } else if (retry_cnt >= retry_limit) {
                 host->sd_write_retry = LL_SDHC_RETRY_ERR;
@@ -939,11 +968,14 @@ __retry:
 #endif
     }
 
+    /* 单块写虽然不需要 CMD12，仍必须等待卡结束内部编程。 */
+    if (!ret && !host->sd_stop) ret = sd_tran_stop(host);
     if (ret) {
         sd_tran_stop(host);
-    }  
+    }
 __err:
     os_mutex_unlock(&host->lock);
+    if (ret && sd_storage_app_managed()) sd_storage_request_recovery();
     return ret;
 }
 
@@ -953,7 +985,7 @@ int sd_multiple_read(struct sdh_device * host,uint32 lba, uint32 len, uint8* buf
     int    ret         = 0;
     int    send_cmd    = 1;
     uint32 curr_lba    = lba;
-    uint32 backup_lba  = host->new_lba;
+    uint32 backup_lba;
     uint32 block_num   = len/SECTOR_SIZE;
     uint16 retry_cnt   = 0;
     uint16 retry_limit = ((uint16)host->sd_read_sample_num + 1U) * SD_DATA_RETRY_PER_POINT;
@@ -964,9 +996,15 @@ int sd_multiple_read(struct sdh_device * host,uint32 lba, uint32 len, uint8* buf
 //    uint8  data_rev = 0;
 //	uint8  *s = NULL;
 
+    if (!host || !buf || !len || len % SECTOR_SIZE ||
+        lba >= host->card_max_blk_num || block_num > host->card_max_blk_num - lba)
+        return RET_ERR;
     os_mutex_lock(&host->lock,osWaitForever);
+    backup_lba = host->new_lba;
+    uint32 retry_begin = sd_clock_ms();
 
 __retry:
+    if (host->sd_opt == SD_OFF) { ret = RET_ERR; goto __err; }
     if(((curr_lba != host->new_lba)||(host->sd_opt != SD_M_R)) && host->sd_stop)
     {
         ret = sd_tran_stop(host);	
@@ -1005,7 +1043,7 @@ __retry:
     } 
 #endif
 
-    if(!retry_cnt && ((uint32)kick_buf >= PSRAM_BASE) ) {
+    if((uint32)kick_buf >= PSRAM_BASE) {
 		sys_dcache_invalid_range_unaligned((void *)kick_buf, len); 
 	}
 
@@ -1025,6 +1063,7 @@ __retry:
     cmd.flags = RESP_SPI_R1 | RESP_R1 | CMD_ADTC;
     if((((const struct sdhc_hal_ops *)host->dev.ops)) && send_cmd){
         ret = ((const struct sdhc_hal_ops *)host->dev.ops)->cmd(host,&cmd);
+        if (!ret && (cmd.resp[0] & SD_R1_ERROR_MASK)) ret = MMCSD_CMD_ERR;
         if(ret){
 			sd_tran_stop(host);
             ret = MMCSD_CMD_ERR;
@@ -1037,7 +1076,9 @@ __retry:
 #if defined(TXW82X)
         if ((host->sd_read_retry_flag == 0) && (ret == MMCSD_CMP_DATERR) && (host->io_cfg.self_adaption_flag != MMCSD_SMP_EN))
         {
-            if (host->sd_read_retry == LL_SDHC_RETRY_SELECT_POINT) {
+            if (host->io_cfg.self_adaption_flag == MMCSD_SMP_SUCC &&
+                host->sd_read_retry == LL_SDHC_RETRY_SELECT_POINT) {
+                host->sd_read_retry = LL_SDHC_RETRY_DEFAULT;
                 /* find current pos & change sample point to next  */
                 for (curr_index = 0; curr_index < host->sd_read_sample_num; curr_index++) {
                     if ((host->sd_read_sample_value[curr_index] == host->sd_read_sample)) {
@@ -1073,12 +1114,17 @@ __retry:
                     host->sd_read_retry = (host->sd_read_retry == LL_SDHC_RETRY_DEFAULT) ? LL_SDHC_RETRY_SELECT_POINT : LL_SDHC_RETRY_DEFAULT;
                 }
                 
-                uint32 retry_blocks = host->data.blks;
-                uint32 completed_blocks = (block_num > retry_blocks) ? (block_num - retry_blocks) : 0;
-
-                curr_lba  = host->new_lba - retry_blocks;
-                kick_buf  = kick_buf + completed_blocks * SECTOR_SIZE;
-                block_num = retry_blocks;
+                if (retry_cnt > SD_IO_RETRY_MAX ||
+                    (uint32)(sd_clock_ms() - retry_begin) >= SD_IO_RETRY_MS) {
+                    sd_tran_stop(host);
+                    goto __err;
+                }
+                /* 重读整个请求，避免部分 DMA 完成后覆盖错缓冲位置。 */
+                sd_tran_stop(host);
+                if (host->sd_opt == SD_OFF) goto __err;
+                curr_lba = lba;
+                block_num = len / SECTOR_SIZE;
+                kick_buf = buf;
                 goto __retry;
             } else if (retry_cnt >= retry_limit) {
                 host->sd_read_retry = LL_SDHC_RETRY_ERR;
@@ -1099,6 +1145,7 @@ __retry:
 
 __err:
     os_mutex_unlock(&host->lock);
+    if (ret && sd_storage_app_managed()) sd_storage_request_recovery();
     return ret;
 }
 
@@ -1457,6 +1504,12 @@ uint32 sd_init(struct sdh_device * host, uint32 clk, uint32 flags)
     host->cmd12_timeout  = 5;
     host->single_support = flags & SDHC_INIT_FLAGS_SINGLE_BLK_RW_EN;
     host->busy_filter_cnt = (flags & SDHC_INIT_FLAGS_BUSY_FILTER_EN) ? 2 : 0;
+    host->sd_stop = 0;
+    host->sd_read_retry = host->sd_write_retry = LL_SDHC_RETRY_DEFAULT;
+    /* 每次重初始化都从普通采样开始，高速成功标志不能跨卡/跨初始化沿用。 */
+    host->io_cfg.self_adaption_flag = MMCSD_SMP_DIS;
+    sd_set_sample(host, LL_SDHC_ALL_SMP_CFG_DIS, 0, 0);
+    sd_delay_config(host, LL_SDHC_DLY_NONE, 0);
 
     sdhost_io_func_init(host->flags&MMCSD_BUSWIDTH_4);
     SDHC_WARN_PRINTF("host->flags:%x\r\n",host->flags);
@@ -1548,9 +1601,11 @@ uint32 sd_init(struct sdh_device * host, uint32 clk, uint32 flags)
             {
                 SDHC_ERR_PRINTF("set highspeed sampling point err\r\n");
                 host->io_cfg.self_adaption_flag = MMCSD_SMP_DIS;
+                sd_set_sample(host, LL_SDHC_ALL_SMP_CFG_DIS, 0, 0);
+                sd_delay_config(host, LL_SDHC_DLY_NONE, 0);
                 sd_set_clk(host, 24*1000*1000);
             }
-            host->io_cfg.self_adaption_flag = MMCSD_SMP_SUCC;
+            else host->io_cfg.self_adaption_flag = MMCSD_SMP_SUCC;
         }	
     }else{
         sd_set_clk(host, 24*1000*1000);
@@ -1609,8 +1664,27 @@ int32 sdh_loop(struct os_work *work)
     struct sdh_device *host = hdl->host;
     uint32 sleep_time = 500;
     uint32 ret;
+    if (sd_storage_app_managed()) {
+        /* 应用负责排空文件对象；本 work 不再越过它直接重挂载。 */
+        if (sd_storage_app_busy()) goto sdh_loop_end;
+        if (SD_OFF == host->sd_opt || !get_fat_isready()) {
+            sd_storage_request_recovery();
+            goto sdh_loop_end;
+        }
+        hdl->isregister = 1;
+    }
+    /* 无卡降噪: 没插卡时本 work 每 500ms 跑一轮, 反复打 "sdh no online2" + 调
+     * fatfs_register (触发 sd_init, 连带刷 open_width / clk / SEND_IF_COND cmd err
+     * / rece cmd no response / fatfs_register ret:3 一整套).
+     * 本平台无独立插卡检测中断, 探测不能停, 但可降低频率: 无卡时把探测间隔从
+     * 500ms 拉长到 2s, 整套日志频率降到原来的 1/4. 插卡成功 (get_fat_isready)
+     * 后恢复 500ms 正常轮询. */
     if(SD_OFF == host->sd_opt || !hdl->isregister)
     {
+        if (sd_storage_app_managed()) {
+            sd_storage_request_recovery();
+            goto sdh_loop_end;
+        }
         SDHC_ERR_PRINTF("sdh no online2\r\n");
         if(get_fat_isready())
         {
@@ -1622,7 +1696,11 @@ int32 sdh_loop(struct os_work *work)
         fatfs_register();
         if(get_fat_isready())
         {
-            hdl->isregister = 1;
+            hdl->isregister = 1;   /* 插卡成功, 下轮走在线分支, 恢复 500ms */
+        }
+        else
+        {
+            sleep_time = 2000;     /* 仍无卡: 探测间隔拉长到 2s, 日志降到 1/4 */
         }
     } else {
         ret = os_mutex_lock(&host->lock,0);
@@ -1630,6 +1708,12 @@ int32 sdh_loop(struct os_work *work)
         {
             sleep_time = 1;
             //获取锁失败
+            goto sdh_loop_end;
+        }
+
+        /* 准入检查和取锁之间可能刚进入恢复，再检查一次以免干扰重初始化。 */
+        if (sd_storage_app_managed() && sd_storage_app_busy()) {
+            os_mutex_unlock(&host->lock);
             goto sdh_loop_end;
         }
 
@@ -1658,6 +1742,8 @@ int32 sdh_loop(struct os_work *work)
         }
         
         os_mutex_unlock(&host->lock);
+        if (host->sd_opt == SD_OFF && sd_storage_app_managed())
+            sd_storage_request_recovery();
     }
 sdh_loop_end:
     os_run_work_delay(work, sleep_time);

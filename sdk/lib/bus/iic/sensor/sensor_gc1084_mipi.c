@@ -250,9 +250,9 @@ const _Sensor_AE gc1084_ae_init =
     .to_night_bv           = 369,                //not use
 
     .min_frame_vb          = 16,
-    .max_analog_gain       = (48<<8),
+    .max_analog_gain       = (25<<8),
     .min_analog_gain       = 1<<8,
-    .min_exposure_line     = 16,
+    .min_exposure_line     = 1,
     .row_time_us           = 30.87,
     .expo_frame_interval   = 3,    
     .dark_scene_target_lut = {50, 55},

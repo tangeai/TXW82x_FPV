@@ -51,6 +51,7 @@
 #include "takephoto_module/takephoto.h"
 #include "scale_msi/scale3_normal_msi.h"
 #include "mp4_encode_msi2.h"
+#include "rec_playback.h"
 
 void user_workqueue_init(uint16 pri, void *stack, uint16 stack_size);
 
@@ -73,8 +74,8 @@ __init static void app_init(void)
     cJSON_InitHooks(&hook);
 #endif
 
-    eloop_init();
-    os_task_create("eloop_run", user_eloop_run, NULL, OS_TASK_PRIORITY_NORMAL + 2, 0, NULL, 2048);
+    // eloop_init();
+    // os_task_create("eloop_run", user_eloop_run, NULL, OS_TASK_PRIORITY_NORMAL + 2, 0, NULL, 2048);
     // 独立的文件保存msi(独立线程,后续可以所有的fb需要保存都发到这个msi去执行)
     extern struct msi *file_msi_init(const char *msi_name);
     file_msi_init(R_FILE_MSI);
@@ -125,16 +126,23 @@ __init static void app_init(void)
 #endif
 
     //MP4的缩略图初始化
-    mp4_thumb_init();
+    // mp4_thumb_init(); // 探鸽裸抓拍使用 JPGID0，不启动原厂 MP4 缩略图。
 
 #if JPG_EN == 1
-    if (takephoto_from >= 0)
-    {
-        auto_jpg_msi_init(AUTO_JPG, JPGID0, takephoto_from);
-    }
+    extern void snapshot_init(void);
+    snapshot_init();
 #endif
 
-    app_user_protocol();
+    // app_user_protocol(); // 使用探鸽 P2P 音视频，不启动原厂演示协议。
+    
+    extern void avstream_send_demo(void);
+    avstream_send_demo();
+    
+#if SDH_EN && FS_EN
+    /* SD 卡和文件系统启用后，初始化卡录像及探鸽 P2P 回放。 */
+    if (rec_playback_init() != 0)
+        os_printf(KERN_ERR "SD recording/playback init failed\n");
+#endif
 }
 
 static uint8_t app_vcam_en(void)

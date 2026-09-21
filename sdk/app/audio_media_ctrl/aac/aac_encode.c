@@ -399,16 +399,17 @@ struct msi *aac_encode_init(char *filename, uint32_t samplerate, uint32_t channe
         goto aac_encode_init_err;
     }
     if(msi_isnew) {
+        msi_get(msi); /* Hold the worker reference before task creation. */
 #if AAC_ENC_CTRL == AUCODER_RUN_IN_CPU1
         aac_encode_s->task_hdl = os_task_create("aac_encode_thread", aac_encode_thread, (void*)aac_encode_s, OS_TASK_PRIORITY_ABOVE_NORMAL, 0, NULL, 1024);
 #else
         aac_encode_s->task_hdl = os_task_create("aac_encode_thread", aac_encode_thread, (void*)aac_encode_s, OS_TASK_PRIORITY_NORMAL, 0, NULL, 3072);
 #endif
         if(aac_encode_s->task_hdl == NULL)  {
+            msi_put(msi);
 			AAC_INFO("create aac encode task fail!\r\n");
 			goto aac_encode_init_err;
 		}
-		msi_get(msi);
 	}
 	return msi;
     

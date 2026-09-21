@@ -1354,7 +1354,7 @@ void vpp_frame_done(uint32 irq, uint32 dev, uint32 param)
 		photo_complex = compute_block_laplacian_mean(motion_detect_buf + 4 * ((vpp_msg.vpp_w + 31) / 32),(vpp_msg.vpp_h + 31) / 32,(vpp_msg.vpp_w + 31) / 32);
 	}
 	//_os_printf(KERN_DEBUG "F(%d)",photo_complex);
-    _os_printf("F");
+    // _os_printf("F");
 }
 volatile uint8 itp_done = 0;
 void           vpp_itp_done(uint32 irq, uint32 dev, uint32 param)

@@ -18,6 +18,10 @@
 #include "syscfg.h"
 #include "lib/bluetooth/uble/ble_demo.h"
 #include "sysevt_usb/sysevt_usb.h"
+#if BLE_SUPPORT
+#include "ble_tange_netcfg.h"
+#endif
+extern void SetNetworkState(int state);
 
 extern int32 sys_wifi_event_hdl_wifi_pair(uint8 ifidx, uint16 evt, uint32 param1, uint32 param2);
 extern int32 sys_wifi_event_hdl_pairled(uint8 ifidx, uint16 evt, uint32 param1, uint32 param2);
@@ -56,6 +60,11 @@ static void sys_event_hdl_dhcp(uint32 event_id, uint32 data, uint32 priv)
             sys_status.dhcpc_result.dns2    = (dns_getserver(1))->addr;
             os_printf(KERN_NOTICE"dhcp done, ip:"IPSTR", mask:"IPSTR", gw:"IPSTR"\r\n",
                       IP2STR_N(nif->ip_addr.addr), IP2STR_N(nif->netmask.addr), IP2STR_N(nif->gw.addr));
+            /* Keep the router DNS first, with an independent fallback. */
+            ip_addr_t backup_dns;
+            ipaddr_aton("114.114.114.114", &backup_dns);
+            dns_setserver(1, &backup_dns);
+            SetNetworkState(2);
         }
         break;
     }
@@ -104,7 +113,7 @@ sysevt_hdl_res sys_event_hdl(uint32 event_id, uint32 data, uint32 priv)
      * 使用 sys_event_take 注册，每次会消耗16byte heap memory
      */
 #if SYS_APP_BLENC
-    sys_event_ble_netconfig(event_id, data, priv);
+    // sys_event_ble_netconfig(event_id, data, priv); // 使用下方探鸽 BLE 事件处理。
 #endif
 
     sys_event_hdl_dhcp(event_id, data, priv);
@@ -112,6 +121,9 @@ sysevt_hdl_res sys_event_hdl(uint32 event_id, uint32 data, uint32 priv)
 
     system_event_usbh_video_hdl(event_id, data, priv);
 
+#if BLE_SUPPORT
+    tg_ble_netcfg_event(event_id, data, priv);
+#endif
     return SYSEVT_CONTINUE;
 }
 
