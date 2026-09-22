@@ -491,10 +491,15 @@ static FRESULT rec_idx_change(const char *src, const char *dest);
 static void rec_idx_empty_day(const char *date);
 
 /* 从 scan_item_t 重建文件名字符串 "HHMMSS_Eee_dd.MP4".
- * buf 至少 FILE_NAME_LEN+1 字节 */
+ * buf 至少 FILE_NAME_LEN+1 字节
+ * !!! 时长必须 %02u 补零, 和所有落盘路径的命名格式一致 (rec_recover_file /
+ *     rec_unsync_migrate / 建临时文件都是 %02u). 用 %u 时 <10s 的短片段会重建出
+ *     "..._E00_7.MP4", 而卡上是 "..._E00_07.MP4" (17 字符), 于是删除/回放定位
+ *     全部找不到文件: f_unlink 返回 FR_NO_FILE, 而 parse_filename 又因为
+ *     os_strlen<17 只认补零那种写法, 结果最旧文件永远删不掉, 卡满即死锁. */
 static void build_fname_from_item(const scan_item_t *it, char *buf, int buf_sz)
 {
-    os_snprintf(buf, buf_sz, "%02u%02u%02u_E%02u_%u%s",
+    os_snprintf(buf, buf_sz, "%02u%02u%02u_E%02u_%02u%s",
                 it->hh, it->mm, it->ss, it->event,
                 it->duration, REC_EXT_NAME);
 }
@@ -963,6 +968,121 @@ static int sd_get_capacity_raw(uint32_t *total, uint32_t *free)
     return 0;
 }
 
+/* =========================================================================
+ * 删不掉的候选名单 (防止单个异常文件锁死整机回收)
+ * =========================================================================
+ * 候选是按"最旧优先"排序的. 一旦最旧那个在卡上其实不存在 (文件名重建不出来,
+ * 见 build_fname_from_item 注释) 或是只读/同名目录项, f_unlink 会一直失败,
+ * 而下一轮又会重新挑中同一个 —— 回收彻底停摆, 卡满后录像再也起不来.
+ * 这里记下最近删除失败的候选, 在退避窗口内跳过它、继续删次旧的, 保证回收始终
+ * 有进展; 窗口过后自动放行重试一次, 避免一次偶发 IO 错误把文件永久拉黑.
+ * 换卡/格式化 (g_sd_generation 变化) 时整表作废, 记录不跨卡沿用.
+ * 4+4 槽都放 bss, 不占 PSRAM.
+ * 两级退避: 文件级 (rec_badfile_*) 跳过单个候选; 目录级 (rec_baddir_*) 用于
+ * "某天目录里所有候选都删不掉" —— 此时连该目录一起跳过, 先去删次旧的目录,
+ * 否则异常文件恰好是某天唯一剩下的那段时, 回收又会整体停摆. */
+#define REC_BADFILE_SLOTS     4U
+#define REC_BADFILE_RETRY_MS  (5U * 60U * 1000U)   /* 5 分钟后放行重试一次 */
+typedef struct {
+    char     date[9];       /* YYYYMMDD */
+    uint8_t  hh, mm, ss, event;
+    uint16_t duration;      /* 五个字段与文件名一一对应, 不必再存一份字符串 */
+    uint32_t at_ms;         /* 上次删失败的时刻 */
+} rec_badfile_t;
+static rec_badfile_t g_badfile[REC_BADFILE_SLOTS];
+static uint32_t      g_badfile_gen = 0xffffffffU;
+
+static void rec_badfile_reset(void)
+{
+    os_memset(g_badfile, 0, sizeof(g_badfile));
+    g_badfile_gen = g_sd_generation;
+}
+/* 槽位 i 是否就是 (date, it) 这个候选. 逐字段比较, 不能用 memcmp:
+ * scan_item_t 尾部有未初始化的填充字节, 逐字节比会漏判. */
+static int rec_badfile_is(unsigned i, const char *date, const scan_item_t *it)
+{
+    const rec_badfile_t *b = &g_badfile[i];
+    return b->date[0] && !os_strcmp(b->date, date) &&
+           b->hh == it->hh && b->mm == it->mm && b->ss == it->ss &&
+           b->event == it->event && b->duration == it->duration;
+}
+/* 该候选是否处于"刚删失败"的退避窗口内; 窗口到期就放行并清掉记录 */
+static int rec_badfile_skip(const char *date, const scan_item_t *it)
+{
+    if (g_badfile_gen != g_sd_generation) return 0;   /* 换卡/格式化: 记录已作废 */
+    uint32_t now = (uint32_t)os_jiffies_to_msecs(os_jiffies());
+    for (unsigned i = 0; i < REC_BADFILE_SLOTS; ++i) {
+        if (!rec_badfile_is(i, date, it)) continue;
+        if (now - g_badfile[i].at_ms < REC_BADFILE_RETRY_MS) return 1;
+        g_badfile[i].date[0] = '\0';
+        return 0;
+    }
+    return 0;
+}
+static void rec_badfile_mark(const char *date, const scan_item_t *it)
+{
+    if (g_badfile_gen != g_sd_generation) rec_badfile_reset();
+    unsigned slot = REC_BADFILE_SLOTS;
+    uint32_t oldest = 0xffffffffU;
+    for (unsigned i = 0; i < REC_BADFILE_SLOTS; ++i) {
+        if (rec_badfile_is(i, date, it)) { slot = i; break; }  /* 已有记录: 只刷新时刻 */
+        if (!g_badfile[i].date[0]) { slot = i; break; }        /* 空槽优先 */
+        if (g_badfile[i].at_ms < oldest) { oldest = g_badfile[i].at_ms; slot = i; }
+    }
+    if (slot >= REC_BADFILE_SLOTS) return;                     /* 防御: 到不了 */
+    rec_badfile_t *b = &g_badfile[slot];
+    os_strncpy(b->date, date, sizeof(b->date) - 1);
+    b->date[sizeof(b->date) - 1] = '\0';
+    b->hh = it->hh; b->mm = it->mm; b->ss = it->ss;
+    b->event = it->event; b->duration = it->duration;
+    b->at_ms = (uint32_t)os_jiffies_to_msecs(os_jiffies());
+}
+/* 删成功/不需要再跳过时清记录, 让该名字回到正常候选池 */
+static void rec_badfile_forget(const char *date, const scan_item_t *it)
+{
+    if (g_badfile_gen != g_sd_generation) return;
+    for (unsigned i = 0; i < REC_BADFILE_SLOTS; ++i)
+        if (rec_badfile_is(i, date, it)) g_badfile[i].date[0] = '\0';
+}
+
+/* 目录级退避: 某天所有候选都在文件级窗口内时, 连这个目录一起跳过一段
+ * 时间, 让回收先去处理次旧的日期目录. 窗口过后自动放行重试. */
+static char     g_baddir[REC_BADFILE_SLOTS][9];
+static uint32_t g_baddir_at[REC_BADFILE_SLOTS];
+static uint32_t g_baddir_gen = 0xffffffffU;
+
+static int rec_baddir_skip(const char *date)
+{
+    if (g_baddir_gen != g_sd_generation) return 0;
+    uint32_t now = (uint32_t)os_jiffies_to_msecs(os_jiffies());
+    for (unsigned i = 0; i < REC_BADFILE_SLOTS; ++i) {
+        if (!g_baddir[i][0] || os_strcmp(g_baddir[i], date)) continue;
+        if (now - g_baddir_at[i] < REC_BADFILE_RETRY_MS) return 1;
+        g_baddir[i][0] = '\0';
+        return 0;
+    }
+    return 0;
+}
+static void rec_baddir_mark(const char *date)
+{
+    if (g_baddir_gen != g_sd_generation) {
+        os_memset(g_baddir, 0, sizeof(g_baddir));
+        os_memset(g_baddir_at, 0, sizeof(g_baddir_at));
+        g_baddir_gen = g_sd_generation;
+    }
+    unsigned slot = REC_BADFILE_SLOTS;
+    uint32_t oldest = 0xffffffffU;
+    for (unsigned i = 0; i < REC_BADFILE_SLOTS; ++i) {
+        if (!g_baddir[i][0]) { slot = i; break; }              /* 空槽优先 */
+        if (!os_strcmp(g_baddir[i], date)) { slot = i; break; } /* 已有记录: 刷新时刻 */
+        if (g_baddir_at[i] < oldest) { oldest = g_baddir_at[i]; slot = i; }
+    }
+    if (slot >= REC_BADFILE_SLOTS) return;                     /* 防御: 到不了 */
+    os_strncpy(g_baddir[slot], date, sizeof(g_baddir[slot]) - 1);
+    g_baddir[slot][sizeof(g_baddir[slot]) - 1] = '\0';
+    g_baddir_at[slot] = (uint32_t)os_jiffies_to_msecs(os_jiffies());
+}
+
 /* 循环录像: 找 REC 目录下最早的日期, 再删其最早文件 */
 /* 真正的回收逻辑, 必须在 g_recycle_lock 持锁状态下调用. */
 static int rec_recycle_oldest_locked(void)
@@ -976,7 +1096,7 @@ static int rec_recycle_oldest_locked(void)
 
     char oldest_dir[16] = {0};
     void *fno;
-    uint32_t total_dirs = 0, valid_date_dirs = 0;
+    uint32_t total_dirs = 0, valid_date_dirs = 0, skipped_dirs = 0;
     while ((fno = rec_dir_read(root)) != NULL) {
         char *name = osal_dirent_name(fno);
         if (!name || !osal_dirent_isdir(fno)) continue;
@@ -987,6 +1107,9 @@ static int rec_recycle_oldest_locked(void)
             continue;
         }
         valid_date_dirs++;
+        /* 该天刚被判定"整体删不动" (见 rec_baddir_* 注释): 先跳过它,
+         * 去处理次旧的日期目录, 免得一个删不掉的段把回收整体卡住. */
+        if (rec_baddir_skip(name)) { skipped_dirs++; continue; }
         int has = day_dir_has_mp4(name);
         if (has < 0) { rec_dir_close(root); return -1; }
         if (!has) continue; /* 只探测是否存在，避免每删一段就排序所有日期的录像。 */
@@ -1000,6 +1123,12 @@ static int rec_recycle_oldest_locked(void)
     if (root_failed) return -1;
 
     if (oldest_dir[0] == '\0') {
+        if (skipped_dirs) {
+            os_printf(KERN_WARNING "rec_recycle: all %u date dir(s) with record "
+                      "are in unlink-failed backoff, retry later\n",
+                      (unsigned)skipped_dirs);
+            return -1;
+        }
         os_printf(KERN_ERR "rec_recycle: no YYYYMMDD dir under %s "
                   "(total dirs=%u, valid=%u). SD may be filled by other files.\n",
                   REC_ROOT_PATH, total_dirs, valid_date_dirs);
@@ -1009,10 +1138,25 @@ static int rec_recycle_oldest_locked(void)
     /* 每次只删除最旧的一段已发布 MP4，临时文件交由恢复任务处理。 */
     scan_item_t *arr = NULL; uint32_t cnt = 0;
     if (scan_day_dir(oldest_dir, &arr, &cnt) == 0 && cnt > 0) {
-        /* === 路径 1: 删除最旧的一个 MP4 === */
+        /* === 路径 1: 删除最旧的一个"可删"MP4 ===
+         * 先跳过退避窗口内刚删失败的候选 (见 rec_badfile_* 注释), 免得同一个
+         * 永远删不掉的文件把回收卡死; 若全在窗口内则本轮不删, 交给上层退避. */
+        uint32_t pick = cnt;
+        for (uint32_t i = 0; i < cnt; ++i) {
+            if (!rec_badfile_skip(oldest_dir, &arr[i])) { pick = i; break; }
+        }
+        if (pick >= cnt) {
+            os_printf(KERN_WARNING "rec_recycle: %u candidate(s) in %s all "
+                      "unlink-failed, retry later\n", (unsigned)cnt, oldest_dir);
+            /* 连目录一起退避, 下一轮改删次旧的日期目录. */
+            rec_baddir_mark(oldest_dir);
+            RP_FREE(arr);
+            return -1;
+        }
+
         char full_path[96];
         char fn0[FILE_NAME_LEN + 1];
-        build_fname_from_item(&arr[0], fn0, sizeof(fn0));
+        build_fname_from_item(&arr[pick], fn0, sizeof(fn0));
         os_snprintf(full_path, sizeof(full_path), "%s/%s/%s",
                     REC_ROOT_PATH, oldest_dir, fn0);
 
@@ -1026,8 +1170,15 @@ static int rec_recycle_oldest_locked(void)
         FRESULT res = rec_idx_change(full_path, NULL);
         if (res == FR_OK) {
             os_printf(KERN_INFO "rec_recycle: deleted %s\n", full_path);
+            rec_badfile_forget(oldest_dir, &arr[pick]);
         } else {
             os_printf(KERN_ERR "rec_recycle: unlink %s fail res=%d\n", full_path, res);
+            /* FR_NO_FILE: 该名字在卡上不存在; FR_DENIED: 只读属性或同名目录项.
+             * 这两类按名字重试永远失败, 记入名单让回收继续往下删, 同时避免
+             * rec_idx_change 每次失败都排队重建当天索引. FR_TIMEOUT/FR_DISK_ERR
+             * 等属于瞬时故障, 不拉黑, 下一轮照常重试. */
+            if (res == FR_NO_FILE || res == FR_DENIED)
+                rec_badfile_mark(oldest_dir, &arr[pick]);
         }
         /* 清空"正在删除"快照, 让 scan_day_dir 立即恢复正常 */
         g_recycling_fname[0]    = '\0';
@@ -1604,7 +1755,10 @@ rec_bootstrap_background:
         }
         /* === 30s 间隔的预删除 (累加 tick 实现) === */
         cleanup_acc_ms += REC_TICK_MS;
-        if (cleanup_acc_ms < REC_CLEANUP_CHECK_MS) {
+        /* REC_CLEANUP_CHECK_MS 是 30000U: 不转成 int32_t 比较的话, 下面退避用的
+         * 负值 acc (-90000) 会被转成无符号数恒大于阈值, 退避失效, 删除失败时
+         * 反而每个 tick (3s) 都跑一次并刷日志. */
+        if (cleanup_acc_ms < (int32_t)REC_CLEANUP_CHECK_MS) {
             continue;
         }
         cleanup_acc_ms = 0;
