@@ -1,7 +1,8 @@
 /*******************************************************************************
  * 裸调 JPG 抓拍，输出单张 JPEG，不启动常驻 MSI 编码链路。
- * 双目使用 VPP_DATA0 的完整纵向拼接帧（当前 1280x1440）。
- * 参照原厂 jpg_v3_msi：在第二颗摄像头 VPP done 边界启动，
+ * CUSTOMER_ID=3：VPP_DATA0 单目 1280x720；4：VPP_DATA1 单目 640x360；
+ * CUSTOMER_ID=12：VPP_DATA0 双目纵向拼接 1280x1440。
+ * 双目参照原厂 jpg_v3_msi：在第二颗摄像头 VPP done 边界启动，
  * 从下一组摄像头 0/1 的连续数据编码，避免从半帧或摄像头 1 开始。
  *
  * snapshot_init() 分配常驻输出节点；snapshot_capture() 获取 JPG 锁，
@@ -25,7 +26,7 @@
 #include "lib/video/dvp/jpeg/jpg_common.h"
 #include "stream_define.h"
 
-/* 双目图像尺寸必须与 VPP 返回的完整拼接尺寸一致，不能只把 JPEG 头改高。 */
+/* 抓拍尺寸必须与所选 VPP 通道实际输出一致。 */
 #define SNAP_JPG_ID        JPGID0
 
 #if defined(SYS_DOUBLE_SENSOR_SPICE_DEMO)
@@ -153,17 +154,24 @@ static int32 snap_err_isr(uint32 irq_flag, uint32 irq_data, uint32 param1, uint3
     return 0;
 }
 
-#if defined(SYS_DOUBLE_SENSOR_SPICE_DEMO)
-/* 返回 0 继续等下一颗镜头，返回 1 由 VPP 自动撤销这次回调。 */
+#if defined(SYS_DOUBLE_SENSOR_SPICE_DEMO) || (CUSTOMER_ID == 3) || (CUSTOMER_ID == 4)
+/* 双目等待摄像头 1 结束；单目在当前帧结束后启动，避免半帧抓拍。 */
 static int32_t snap_vpp_start(uint32_t arg)
 {
     struct snap_ctx *ctx = (struct snap_ctx *)arg;
     if (ctx->finished) return 1;
+#if defined(SYS_DOUBLE_SENSOR_SPICE_DEMO)
     if (video_msg.camera_mode != CAM_DUAL_SPLICE_SLAVE_MODE || video_msg.video_num != 2) {
         snap_complete(ctx, EV_ERROR);
         return 1;
     }
     if (video_msg.video_type_cur != ISP_VIDEO_1) return 0;
+#else
+    if (video_msg.camera_mode != CAM_SINGLE_MASTER_MODE || video_msg.video_num != 1) {
+        snap_complete(ctx, EV_ERROR);
+        return 1;
+    }
+#endif
     jpg_set_size(ctx->jpg, ctx->img_h, ctx->img_w);
     jpg_set_ready(ctx->jpg);
     ctx->hw_opened = 1;
@@ -212,7 +220,7 @@ void snapshot_init(void)
  *   -9 = 帧长度、节点计数或 JPEG 文件头异常
  *   -10 = 输出 buf malloc 失败
  *   -11 = snapshot_init 未调用 (node 池未就绪)
- *   -12 = 双目 VPP 未就绪或拼接尺寸不匹配 */
+ *   -12 = VPP 未就绪或摄像头模式/抓拍尺寸不匹配 */
 static int _snapshot_capture_once(uint8_t **out_data, uint32_t *out_len, uint32_t timeout_ms)
 {
     *out_data = NULL;
@@ -249,6 +257,19 @@ static int _snapshot_capture_once(uint8_t **out_data, uint32_t *out_len, uint32_
         video_msg.camera_mode != CAM_DUAL_SPLICE_SLAVE_MODE || video_msg.video_num != 2 ||
         ctx->img_w != SNAP_IMG_W || ctx->img_h != SNAP_IMG_H) {
         os_printf(KERN_ERR "snapshot: dual VPP not ready, mode=%u cameras=%u size=%ux%u\n",
+                  video_msg.camera_mode, video_msg.video_num, ctx->img_w, ctx->img_h);
+        ret = -12; goto out;
+    }
+#elif (CUSTOMER_ID == 3) || (CUSTOMER_ID == 4)
+    uint8_t size_ret;
+#if CUSTOMER_ID == 4
+    size_ret = get_vpp1_w_h(&ctx->img_w, &ctx->img_h);
+#else
+    size_ret = get_vpp_w_h(&ctx->img_w, &ctx->img_h);
+#endif
+    if (size_ret || video_msg.camera_mode != CAM_SINGLE_MASTER_MODE ||
+        video_msg.video_num != 1 || ctx->img_w != SNAP_IMG_W || ctx->img_h != SNAP_IMG_H) {
+        os_printf(KERN_ERR "snapshot: single VPP not ready, mode=%u cameras=%u size=%ux%u\n",
                   video_msg.camera_mode, video_msg.video_num, ctx->img_w, ctx->img_h);
         ret = -12; goto out;
     }
@@ -300,8 +321,8 @@ static int _snapshot_capture_once(uint8_t **out_data, uint32_t *out_len, uint32_
     jpg_set_addr(ctx->jpg, (uint32)ctx->nodes[0], SNAP_NODE_LEN);
     jpg_set_addr(ctx->jpg, (uint32)ctx->nodes[1], SNAP_NODE_LEN);
 
-    /* 7. 双目必须在整组帧边界启动，避免上半图来自摄像头 1。 */
-#if defined(SYS_DOUBLE_SENSOR_SPICE_DEMO)
+    /* 7. 在所选摄像头模式的完整帧边界启动。 */
+#if defined(SYS_DOUBLE_SENSOR_SPICE_DEMO) || (CUSTOMER_ID == 3) || (CUSTOMER_ID == 4)
     vpp_registered = 1;
     vppdone_func_register(VPP_JPEG0_START + SNAP_JPG_ID, snap_vpp_start, (uint32_t)ctx);
 #else

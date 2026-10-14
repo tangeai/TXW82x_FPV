@@ -46,15 +46,19 @@
 #include "rec_playback.h"
 #include "g711.h"                /* linear2alaw: 回放 PCM 转 G.711A 用 */
 
-/* 45229 dual-camera pipeline: main VPP_DATA0=1280x1440,
- * sub GEN420=640x720. Both streams contain the stitched two-camera image. */
+/* 主码流均为 VPP_DATA0。CUSTOMER_ID=4 的单目辅码流为 VPP_DATA1；
+ * CUSTOMER_ID=3/12 使用 GEN420，与 app_fpv/app_double_sensor_splice 和实时发流一致。 */
 #ifndef REC_STREAM_TYPE
 #define REC_STREAM_TYPE 0
 #endif
 #if REC_STREAM_TYPE == 0
 #define REC_STREAM_STYPE FSTYPE_H264_VPP_DATA0
 #elif REC_STREAM_TYPE == 1
+#if CUSTOMER_ID == 4
+#define REC_STREAM_STYPE FSTYPE_H264_VPP_DATA1
+#else
 #define REC_STREAM_STYPE FSTYPE_H264_GEN420_DATA
+#endif
 #else
 #error "REC_STREAM_TYPE must be 0 (main) or 1 (sub)"
 #endif
@@ -2143,8 +2147,8 @@ static int rec_start_raw(uint8_t event_type)
     fp_cfg.end_encode  = rec_end_encode_cb;
 
     /* 录像 filter_type = REC_STREAM_STYPE, 由 project_config.h 的 REC_STREAM_TYPE 选:
-     *   REC_STREAM_TYPE=0 → 双目主码流 VPP_DATA0, 1280x1440
-     *   REC_STREAM_TYPE=1 → 双目子码流 GEN420, 640x720
+     *   REC_STREAM_TYPE=0 → 主码流 VPP_DATA0，尺寸由当前产品及编码帧提供
+     *   REC_STREAM_TYPE=1 → 单目 1080P 用 VPP_DATA1，单目 720P/双目用 GEN420
      * rec_time 单位 分钟 */
     uint8_t rec_min = 1;
     g_rec_msi = mp4_encode_msi2_init("sd_rec_mp4",

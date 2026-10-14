@@ -122,12 +122,7 @@ int get_device_state(const char* key, char* buf, int bytes)
     {
         //"stream:channel"
         //stream: 0-main, 1-sub
-        
-#if defined (__TXW826__)      //826 内存不够，云存储上传子码流
-        strcpy(buf, "1:0");
-#elif defined(__TXW828__)
         strcpy(buf, "0:0");
-#endif
     }
     //default p2p channel and stream
     else if(strcasecmp(key, "streamquality") == 0)
@@ -1422,7 +1417,7 @@ void event_report_demo(void*arg)
 
 extern int psram_heap_size;
 
-//#define TG_DEBUG_MODE  0
+//#define TG_DEBUG_MODE  1
 
 int IpcStep1(void)
 {
@@ -1542,20 +1537,22 @@ void IpcStep2(void*arg)
 
 	_info("TciStart......\n");
 
-    unsigned cloud_cache_szie = 200*1024; //置0则不开启云存储
+    unsigned cloud_cache_szie = 0; //置0则不开启云存储
+    
+#if (CUSTOMER_ID == 3)
+    cloud_cache_szie = 150*1024;
+#elif (CUSTOMER_ID == 4) || (CUSTOMER_ID == 12)
+    cloud_cache_szie = 200*1024;
+#endif
     int ret = TciStart(registered, cloud_cache_szie);
     if(ret) {
         LogE("TciStart return %d\n", ret);
         return;
     }
 
-//#define MUFBRFF_TEST
-#ifdef MUFBRFF_TEST
-    extern void mufbuff_test(void);
-    mufbuff_test();
-#endif
 
-	_info("Ipc Started end\n");
     ipc_inited = 1;
+    
+	_info("Ipc Started end\n");
 }
 

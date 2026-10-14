@@ -56,6 +56,9 @@
 #include "scale_msi/scale3_normal_msi.h"
 #include "mp4_encode_msi2.h"
 #include "yuv_from_cmd_msi.h"
+#if (CUSTOMER_ID == 3) || (CUSTOMER_ID == 4)
+#include "rec_playback.h"
+#endif
 
 int32 atcmd_recv(uint8 *data, int32 len);
 void  user_workqueue_init(uint16 pri, void *stack, uint16 stack_size);
@@ -163,7 +166,7 @@ __weak void user_protocol()
 // 应用程序初始化
 __init static void fpv_app_init(void)
 {
-#if TAKEPHOTO_EN || JPG_EN
+#if (TAKEPHOTO_EN || JPG_EN) && (CUSTOMER_ID != 3) && (CUSTOMER_ID != 4)
     int8_t takephoto_from  = 0;
     int8_t takephoto1_from = -1;
 #endif
@@ -174,10 +177,12 @@ __init static void fpv_app_init(void)
     cJSON_InitHooks(&hook);
 #endif
 
+#if (CUSTOMER_ID != 3) && (CUSTOMER_ID != 4)
     eloop_init();
     os_task_create("eloop_run", user_eloop_run, NULL, OS_TASK_PRIORITY_NORMAL + 2, 0, NULL, 2048);
     os_sleep_ms(1);
     ota_Tcp_Server();
+#endif
 
     // 独立的文件保存msi(独立线程,后续可以所有的fb需要保存都发到这个msi去执行)
     extern struct msi *file_msi_init(const char *msi_name);
@@ -191,7 +196,12 @@ __init static void fpv_app_init(void)
         uint8_t  h264_ret = get_vpp1_w_h(&h264_w, &h264_h);
         if (!h264_ret)
         {
+#if CUSTOMER_ID == 4
+            /* TXW828 单目直接使用 VPP_DATA1；720P 和双目仍使用 GEN420。 */
+            auto_h264_msi_init(AUTO_H264, VPP_DATA0, 0, 0, VPP_DATA1, h264_w, h264_h);
+#else
             auto_h264_msi_init(AUTO_H264, VPP_DATA0, 0, 0, GEN420_DATA, h264_w, h264_h);
+#endif
         }
         else
         {
@@ -233,6 +243,13 @@ __init static void fpv_app_init(void)
 
 #endif
 
+#if (CUSTOMER_ID == 3) || (CUSTOMER_ID == 4)
+    /* 探鸽事件抓拍独占 JPGID0，不启动原厂常驻 JPEG/缩略图链路。 */
+#if JPG_EN == 1
+    extern void snapshot_init(void);
+    snapshot_init();
+#endif
+#else
 #ifndef LCD_EN
     // 启动无屏的scale3
     scale3_msi_no_lcd(S_PREVIEW_SCALE3, 0, FSTYPE_YUV_P0, 320, 180);
@@ -283,6 +300,8 @@ __init static void fpv_app_init(void)
     }
 #endif
 
+#endif
+
 #if USB_JPG_ADD_WATERMARK
     usb_to_recode_init(JPGID1);
 #endif
@@ -295,7 +314,22 @@ __init static void fpv_app_init(void)
     void isp_tunning_init(uint32 img_w, uint32 img_h);
     isp_tunning_init(1920, 1080);
 #endif
+
+
+#if (CUSTOMER_ID == 3) || (CUSTOMER_ID == 4)
+    /* 探鸽音视频发送 */
+    extern void avstream_send_demo(void);
+    avstream_send_demo();
+    
+#if SDH_EN && FS_EN
+    /* SD 卡录像 + 探鸽 P2P 回放模块 */
+    if (rec_playback_init() != 0)
+        os_printf(KERN_ERR "SD recording/playback init failed\n");
+#endif
+
+#else
     user_protocol();
+#endif
 }
 
 __weak void user_hardware_config()
@@ -336,8 +370,10 @@ void        hardware_init(uint8_t vcam)
     jpg_mutex_init();
     jpg_mem_init(32);
 #endif
-    // 默认打开gen420的模块
+#if CUSTOMER_ID != 4
+    /* TXW828 单目辅码流直接读取 VPP_DATA1，无需常驻 GEN420。 */
     gen420_hardware_msi_init();
+#endif
 
 #if SDH_EN && FS_EN
     extern bool fatfs_register();

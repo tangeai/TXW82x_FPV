@@ -353,10 +353,10 @@ enum video_app_h264_enum
 #else
 /* 826: 720P 主码流, 实测 91.9% P 帧 < 8K */
 #define H264_SMALL_BUF_SIZE     (8  * 1024)
-#define H264_SMALL_BUF_COUNT    23
+#define H264_SMALL_BUF_COUNT    20
 #define H264_MID_BUF_SIZE       (16 * 1024)
-#define H264_MID_BUF_COUNT      6
-#define H264_BIG_BUF_SIZE       (60 * 1024)
+#define H264_MID_BUF_COUNT      5
+#define H264_BIG_BUF_SIZE       (80 * 1024)
 #define H264_BIG_BUF_COUNT      2
 #endif
 
@@ -367,6 +367,7 @@ static volatile uint8_t  h264_mid_buf_busy[H264_MID_BUF_COUNT] = {0};
 static uint8_t          *h264_big_buf[H264_BIG_BUF_COUNT] = {NULL};
 static volatile uint8_t  h264_big_buf_busy[H264_BIG_BUF_COUNT] = {0};
 static volatile uint8_t  h264_static_buf_inited = 0;
+
 
 static int h264_static_buf_init(void)
 {
@@ -409,13 +410,6 @@ static int h264_static_buf_init(void)
         sys_dcache_invalid_range((uint32_t *) h264_big_buf[i], H264_BIG_BUF_SIZE);
     }
     h264_static_buf_inited = 1;
-    os_printf(KERN_INFO "h264_static_buf: init ok, small=%dx%d mid=%dx%d big=%dx%d (total %dKB)\r\n",
-              H264_SMALL_BUF_COUNT, H264_SMALL_BUF_SIZE,
-              H264_MID_BUF_COUNT,   H264_MID_BUF_SIZE,
-              H264_BIG_BUF_COUNT,   H264_BIG_BUF_SIZE,
-              (H264_SMALL_BUF_COUNT * H264_SMALL_BUF_SIZE +
-               H264_MID_BUF_COUNT   * H264_MID_BUF_SIZE +
-               H264_BIG_BUF_COUNT   * H264_BIG_BUF_SIZE) / 1024);
     return 0;
 }
 
@@ -433,8 +427,6 @@ static uint8_t *h264_static_buf_alloc(uint32_t size)
             return NULL;
     }
     if (size > H264_BIG_BUF_SIZE) {
-        os_printf(KERN_INFO "h264 frame size %u > big buf %d, fallback\r\n",
-                  size, H264_BIG_BUF_SIZE);
         return NULL;
     }
 
@@ -469,17 +461,7 @@ static uint8_t *h264_static_buf_alloc(uint32_t size)
     }
     enable_irq(ie);
 
-    /* 三层都满, 节流报告 miss. 持续 miss 说明池上限设置不够, 需调大. */
-    static uint32_t s_miss_cnt  = 0;
-    static uint32_t s_miss_last = 0;
-    uint32_t now = os_jiffies_to_msecs(os_jiffies());
-    s_miss_cnt++;
-    if ((uint32_t)(now - s_miss_last) >= 1000) {
-        s_miss_last = now;
-        os_printf(KERN_INFO "[h264-pool] miss=%u/s size=%u (all 3 pools exhausted)\r\n",
-                  (unsigned)s_miss_cnt, (unsigned)size);
-        s_miss_cnt = 0;
-    }
+
     return NULL;
 }
 
@@ -734,7 +716,6 @@ static int8_t h264_output_msi(struct list_head *get_f, struct video_h264_msi_s *
         h264_buf = h264_static_buf_alloc(alloc_size);
         if (!h264_buf){
             if(os_jiffies() > 5000){
-                os_printf(KERN_INFO "fallback STREAM_MALLOC %u\r\n", alloc_size);
                 h264_buf = (uint8_t *) STREAM_MALLOC(alloc_size);
             }
         }

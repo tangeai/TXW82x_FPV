@@ -88,6 +88,7 @@ volatile struct list_head* h264_f_p;			//当前264所使用的frame
 volatile h264_node h264_node_src[H264_NODE_NUM];
 volatile struct list_head h264_free_tab;			//空闲列表，存放空间节点
 volatile struct list_head h264_ready_tab;
+
 volatile uint8 h264_error = 0;
 volatile uint8 frame_done = 0;
 
