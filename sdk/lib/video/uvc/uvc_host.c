@@ -1539,7 +1539,7 @@ void uvc_user4(void *d)
                         //printf("loop:%d\t%X\n",uvc_b->blank_loop,get_f);
                     }
                     #endif
-                    hw_memcpy0(buf,uvc_b->buf_ptr,uvc_b->blank_len);
+                    hw_memcpy(buf,uvc_b->buf_ptr,uvc_b->blank_len);
                     buf += uvc_b->blank_len;
                 }
                 else

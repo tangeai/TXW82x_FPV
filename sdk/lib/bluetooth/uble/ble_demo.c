@@ -18,8 +18,6 @@
 #include "lib/umac/ieee80211.h"
 #include "syscfg.h"
  
-#if BLE_SUPPORT
-
 /**
  * @brief   This function is a response callback function that handles ATT requests.
  *
@@ -261,8 +259,6 @@ int32 ble_set_coexist_en(uint8 coexist, uint8 dec_duty)
 {
     return bt_hci_set_coexist_en(coexist, dec_duty);
 }
-
-#endif
 
 /*************************** (C) COPYRIGHT 2023 TAIXIN-SEMI ***** END OF FILE *****/
 

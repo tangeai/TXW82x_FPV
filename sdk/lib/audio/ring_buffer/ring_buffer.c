@@ -1,10 +1,9 @@
 #include "basic_include.h"
 #include "lib/audio/ring_buffer/ring_buffer.h"
-#include "lib/heap/av_psram_heap.h"
 
 RINGBUF *ringbuf_Init(uint8_t elementsize, uint32_t elementcount)
 {
-    RINGBUF *ringbuf = (RINGBUF*)av_psram_zalloc(sizeof(RINGBUF));
+    RINGBUF *ringbuf = (RINGBUF*)os_zalloc_psram(sizeof(RINGBUF));
     if(ringbuf == NULL) {
         return NULL;
 	}
@@ -12,9 +11,9 @@ RINGBUF *ringbuf_Init(uint8_t elementsize, uint32_t elementcount)
     ringbuf->rear = 0;
     ringbuf->elementsize = elementsize;
     ringbuf->elementcount = elementcount + 1;
-    ringbuf->data = av_psram_malloc(elementsize * (elementcount + 1) * sizeof(uint8_t));
+    ringbuf->data = os_malloc_psram(elementsize * (elementcount + 1) * sizeof(uint8_t));
     if(ringbuf->data == NULL) {
-        av_psram_free(ringbuf);
+        os_free_psram(ringbuf);
         ringbuf = NULL;
     }
     return ringbuf;
@@ -91,14 +90,26 @@ int32_t ringbuf_write(RINGBUF *ringbuf, void *data, uint32_t elementcount)
     return writecount; 
 }
 
-int32_t ringbuf_move_readptr(RINGBUF *ringbuf, int32_t elementcount)
+int32_t ringbuf_move_readptr(RINGBUF *ringbuf, int32_t elementcount, uint32 *lookback)
 {
     uint32_t read_avable = ringbuf_read_available(ringbuf);
     if(read_avable < elementcount) {
+        if(ringbuf->front + read_avable > ringbuf->elementcount) {
+            *lookback = 1;
+        }
+        else {
+            *lookback = 0;
+        }
         ringbuf->front = (ringbuf->front + read_avable) % (ringbuf->elementcount);
         return read_avable;
     }
     else {
+        if(ringbuf->front + elementcount > ringbuf->elementcount) {
+            *lookback = 1;
+        }
+        else {
+            *lookback = 0;
+        }
         ringbuf->front = (ringbuf->front + elementcount) % (ringbuf->elementcount);
         return elementcount;
     }
@@ -132,6 +143,14 @@ int32_t ringbuf_read_nomove(RINGBUF *ringbuf, void *data, uint32_t elementcount)
     return readcount;    
 }
 
+uint32_t ringbuf_cur_front(RINGBUF *ringbuf)
+{
+    if(ringbuf == NULL) {
+        return 0;
+    } 
+    return ringbuf->front;
+}
+
 void ringbuf_clean(RINGBUF *ringbuf)
 {
     ringbuf->front = 0;
@@ -143,6 +162,6 @@ void ringbuf_del(RINGBUF *ringbuf)
     if(ringbuf == NULL) {
         return;
     } 
-    av_psram_free(ringbuf->data);
-    av_psram_free(ringbuf);
+    os_free_psram(ringbuf->data);
+    os_free_psram(ringbuf);
 }

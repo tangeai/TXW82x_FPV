@@ -22,7 +22,8 @@
 #include "lib/heap/av_heap.h"
 #include "lib/video/vpp/vpp_dev.h"
 #include "lib/video/dvp/cmos_sensor/csi.h"
-
+#include "dev.h"
+#include "osal/string.h"
 #ifndef ISP_HARDWARE_CLK
 #define ISP_HARDWARE_CLK        ISP_MODULE_CLK_320M
 #endif
@@ -40,6 +41,7 @@ volatile struct os_msgqueue isp_msg;
 void   *set_fps_task_hdl = NULL;
 volatile struct os_msgqueue set_fps_msg;
 volatile struct os_event    set_fps_event;
+
 
 static uint32_t fsync_cnt       = 0;
 static uint8_t  fsync_pending   = 0;
@@ -66,6 +68,10 @@ void sensor_info_init()
     INIT_LIST_HEAD((struct list_head *)&sensor_info_head);
 }
 
+void sensor_hotplug_release(struct dev_hotplug_info *info)
+{
+    os_free(info);
+}
 void sensor_info_add(enum sensor_type type, enum isp_input_dat_src sensor_src, uint32 sensor_config, uint32 iic_id, uint32 opt_cmd)
 {
     SENSOR_BASIC_INFO *info = os_malloc(sizeof(SENSOR_BASIC_INFO));
@@ -79,6 +85,20 @@ void sensor_info_add(enum sensor_type type, enum isp_input_dat_src sensor_src, u
         info->sensor_config  = sensor_config;
         INIT_LIST_HEAD(&info->list);
 	    list_add_tail(&info->list,(struct list_head*)&sensor_info_head); 
+        _Sensor_Adpt_ *cfg = (_Sensor_Adpt_*)sensor_config;
+        
+        //注册镜头的信息
+        struct dev_hotplug_info *hotplug_info = (struct dev_hotplug_info *)os_malloc(sizeof(struct dev_hotplug_info) + sizeof(SENSOR_DEV_INFO));
+        if(hotplug_info)
+        {
+            hotplug_info->priv = (hotplug_info+1);
+            SENSOR_DEV_INFO *dev_info = (SENSOR_DEV_INFO *)hotplug_info->priv;
+            dev_info->w = cfg->pixelw;
+            dev_info->h = cfg->pixelh;
+            hotplug_info->release = sensor_hotplug_release;
+        }
+        dev_hotplug_in(HG_CAM0_DEVID+type, DEV_TYPE_CAM, hotplug_info);
+        
     }
 }
 
@@ -101,10 +121,11 @@ void sensor_info_destory()
 void hgisp_frame_start_handle(uint32 irq, uint32 irq_data, uint32 param1, uint32 param2) {
     //os_printf("s");
     // os_printf("%s %d\r\n",__func__,__LINE__);
-    if(video_msg.camera_mode == CAM_DUAL_SPLICE_SLAVE_MODE){
-        video_msg.video_type_last = video_msg.video_type_cur;
-        video_msg.video_type_cur  = ISP_VIDEO_0 + param1;
-    }
+
+    video_msg.video_type_last = video_msg.video_type_cur;
+    video_msg.video_type_cur  = param1;
+    video_msg.video_type_next = param2;
+
 }
 
 
@@ -305,7 +326,8 @@ uint32_t sensor_read_frame_length(_Sensor_Adpt_ *sensor_cmd, uint8 addr_num , ui
 extern const uint16_t isp_param[];
 
 void isp_cfg_dev(){
-	uint8_t ret;
+	uint8_t  ret;
+    uint8_t  last_sensor_type = 0;
     struct hgisp_sensor_init   *sensor_init   = NULL;
 	struct isp_device          *isp_dev       = NULL;
     _Sensor_Adpt_              *p_sensor_cmd  = NULL;
@@ -334,14 +356,18 @@ void isp_cfg_dev(){
             isp_rgb_gamma_init(isp_dev, (uint32)gamma_table_addr[1]);
             isp_awb_mannul_mode_map(isp_dev, (uint32)isp_awb_mode_map);
             isp_ae_ev_offset_lut(isp_dev, (uint32)ev_offset_lut);
-            isp_awb_gain_type(isp_dev, AWB_GAIN_TYPE_AWB, SENSOR_TYPE_MASTER);
-            isp_awb_gain_type(isp_dev, AWB_GAIN_TYPE_AWB, SENSOR_TYPE_SLAVE0);
-			isp_awb_gain_type(isp_dev, AWB_GAIN_TYPE_AWB, SENSOR_TYPE_SLAVE1);
             list_for_each_entry(info, (struct list_head*)&sensor_info_head, list)
             {
+                // 要按 master,slave0,slave1 依次初始化
+               if (info->sensor_type != last_sensor_type) {
+                   os_printf(KERN_ERR"sensor type sequence error! \r\n");
+                   isp_close(isp_dev);
+                   goto end;
+               }
+               last_sensor_type = info->sensor_type + 1;
+
                 p_sensor_cmd = ( _Sensor_Adpt_ *)info->sensor_config;
                 sensor_ident = ( _Sensor_Ident_ *)info->sensor_opt_cmd;
-
                 ret = isp_sensor_init(isp_dev, info->sensor_type, info->sensor_src, (uint32)p_sensor_cmd);
                 if (ret)
                 {
@@ -349,6 +375,7 @@ void isp_cfg_dev(){
                     isp_close(isp_dev);
                     goto end;
                 } else {
+                    isp_awb_gain_type(isp_dev, AWB_GAIN_TYPE_AWB, info->sensor_type);
                     isp_sensor_iic_devid_init(isp_dev, info->sensor_dev_id, info->sensor_type);
                     isp_sensor_iic_cmd_init(isp_dev, sensor_ident->w_cmd, sensor_ident->addr_num, sensor_ident->data_num, info->sensor_type);
                     uint32_t frame_len = sensor_read_frame_length(p_sensor_cmd,sensor_ident->addr_num,sensor_ident->data_num,info->sensor_dev_id);

@@ -7,6 +7,7 @@
 #include "lib/video/mipi_csi/mipi_csi.h"
 #include "lib/video/h264/h264_drv.h"
 #include "lib/video/vpp/vpp_dev.h"
+#include "lib/video/dual/dual_org_dev.h"
 #include "lib/video/para_in/para_in_dev.h"
 #include "lib/multimedia/msi.h"
 #include "stream_define.h"
@@ -21,6 +22,7 @@
 #include "lib/audio/audio_code/audio_code.h"
 #include "lib/audio/audio_proc/audio_proc.h"
 #include "lib/audio/wsola/wsola_process.h"
+#include "lib/audio/resample/resample.h"
 
 #if RTT_USB_EN
 #include "rtthread.h"
@@ -190,22 +192,22 @@ static void hardware_init(uint8_t vcam)
 #endif
 
 #if TOUCH_PAD_EN
-    touch_pad_hareware_init();
+    touch_pad_hardware_init();
 #endif
 
 #if DUAL_EN
 {
 	uint16_t w = 0,h = 0;
     get_single_mipi(HG_MIPI_CSI_DEVID,&w,&h);
-	void dorg_double_sensor(uint32 src0_w,uint32 src0_h,uint32 src1_w,uint32 src1_h,uint32 src0_raw_num,uint32 src1_raw_num,uint8_t dvp_type,uint8_t csi0_type,uint8_t csi1_type);
     dorg_double_sensor(w, h, 0, 0, INPUT_MODE, 0,0,1,0);
 }
 #endif
 
 #if AUDIO_EN
-	reg_auproc_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-	reg_wsola_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-    reg_aucoder_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
+	reg_auproc_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+	reg_wsola_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+	reg_aures_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+    reg_aucoder_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
     aucode_mutex_init();
     audio_adc_init(AUSYS_AUAD, 8000, 1, 4, 0);
     audio_dac_init();
@@ -264,6 +266,9 @@ static int32 sys_fpv_loop(struct os_work *work)
 #if defined(MPOOL_ALLOC) && defined(AV_HEAP)
     sysheap_status(&av_heap, s_buf, sizeof(s_buf) / 4, 0);
 #endif
+
+	void image_isp_status();
+	image_isp_status();
 
     os_run_work_delay(work, 1000);
     return 0;

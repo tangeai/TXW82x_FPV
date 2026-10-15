@@ -43,7 +43,6 @@
 #include "mp4_encode_msi2.h"
 
 void  user_workqueue_init(uint16 pri, void *stack, uint16 stack_size);
-extern void dorg_double_sensor(uint32 src0_w,uint32 src0_h,uint32 src1_w,uint32 src1_h,uint32 src0_raw_num,uint32 src1_raw_num,uint8_t dvp_type,uint8_t csi0_type,uint8_t csi1_type);
 extern struct msi *file_msi_init(const char *msi_name);
 extern void scale2_mutex_init();
 extern int32 jpg_mutex_init();

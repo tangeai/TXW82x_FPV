@@ -10,6 +10,7 @@
 #include "hal/spi_nor.h"
 
 #include "lib/ota/fw.h"
+#include "ApplicationLoader_ota_api.h"
 #include "lib/rpc/cpurpc.h"
 
 #include "dev/uart/hguart_v2.h"
@@ -62,6 +63,7 @@
 #include "lib/net/ethphy/eth_phy.h"
 #include "lib/net/ethphy/phy/ip101g.h"
 #include "dev/emac/hg_gmac_eva_v2.h"
+#include "dev/pdm/hgpdm_v0.h"
 
 
 #define DEV_SENSOR_MASTER_IIC_DEVID     (ISP_CSI0_ID)
@@ -306,6 +308,10 @@ struct hgtimer_v4 timer3 = {
     .irq_num = TIM3_IRQn,
 };
 
+struct hgtimer_v7 simple_timer4 = {
+    .hw      = SIMPLE_TIMER4_BASE,
+    .irq_num = STMR4_IRQn,
+};
 
 struct hgtimer_v7 simple_timer5 = {
     .hw      = SIMPLE_TIMER5_BASE,
@@ -456,6 +462,12 @@ struct hg_gmac_eva_v2 gmac = {
     .rgmii_en      = 0,
 };
 
+
+struct hgpdm_v0 pdm = {
+    .hw      = PDM_BASE,
+    .irq_num = PDM_IRQn,
+};
+
 static void core_vdd_voltage()
 {
     uint32 core_vdd_voltage = 0;
@@ -470,12 +482,6 @@ static void cpu1_ctl1_run_pwm_in_debug(void)
 
 void device_init(void)
 {
-    extern uint32_t get_flash_cap();
-    uint32_t flash_size = get_flash_cap();
-    if (flash_size > 0) {
-        flash0.size = flash_size;
-    }
-
     hg_crc_attach(HG_CRC_DEVID, &crc32_module);
     hg_sysaes_v3_attach(HG_HWAES0_DEVID, &sysaes);
     hggpio_v4_attach(HG_GPIOA_DEVID, &gpioa);
@@ -492,6 +498,7 @@ void device_init(void)
     hgtimer_v4_attach(HG_TIMER1_DEVID, &timer1);
     hgtimer_v4_attach(HG_TIMER2_DEVID, &timer2);
     hgtimer_v4_attach(HG_TIMER3_DEVID, &timer3);
+    hgtimer_v7_attach(HG_SIMTMR4_DEVID, &simple_timer4); // use for scale1 soft
     hgtimer_v7_attach(HG_SIMTMR5_DEVID, &simple_timer5);
     cpu1_ctl1_run_pwm_in_debug();
 
@@ -519,7 +526,7 @@ void device_init(void)
     hgusb11_v0_host_attch(HG_USB11HOST_DEVID, &usb11_host);
 #endif
 
-#if LCD_EN
+#if LCD_EN || LCDC_ROTATE_EN
     hglcdc_attach(HG_LCDC_DEVID,&lcdc);
     hgdsi_attach(HG_DSI_DEVID,&dsic);
 #endif
@@ -619,7 +626,7 @@ hgpara_in_attach(HG_PARA_IN_DEVID, &para_in);
     hgjpg_attach(HG_JPG0_DEVID, &jpg0);
     hgjpg_attach(HG_JPG1_DEVID, &jpg1);
 #endif
-
+    hgpdm_v0_attach(HG_PDM0_DEVID, &pdm);
     extern struct hg_xspi ospi;
     hg_xspi_attach(HG_XSPI_DEVID, &ospi);
 
@@ -734,5 +741,23 @@ int32 ota_fwinfo_get(struct ota_fwinfo *pinfo)
     pinfo->flash1 = &flash0;
     pinfo->addr0  = 0 + loader_bytes;
     pinfo->addr1  = (flash0.size / 2) + loader_bytes;
+    return 0;
+}
+
+int32 ApplicationLoader_ota_fwinfo_get(struct ApplicationLoader_ota_fwinfo *pinfo)
+{
+    if (pinfo == NULL) {
+        return -1;
+    }
+
+    pinfo->flash0 = &flash0;
+    pinfo->addr0 = 0;           /* 用户自定义第一份loader的分区地址 */
+    pinfo->size0 = 64*1024;     /* 用户自定义第一份loader的分区容量 */
+    pinfo->flash1 = &flash0;
+    pinfo->addr1 = 0x400000;    /* 用户自定义第二份loader的分区地址 */
+    pinfo->size1 = 64*1024;     /* 用户自定义第二份loader的分区容量 */
+
+    os_printf(KERN_WARNING "ApplicationLoader OTA partition is not configured\r\n");
+    
     return 0;
 }

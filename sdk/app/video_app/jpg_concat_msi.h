@@ -4,35 +4,41 @@
 
 #include "lib/multimedia/msi.h"
 #include "lib/video/dvp/jpeg/jpg.h"
+#include "mem_cache/mem_cache.h"
 #ifndef FAST_JPG
 struct jpg_V3_msi_s
 {
-    struct os_work     work;
-    char               msi_name[16];
-    struct msi        *msi;
-    struct jpg_device *jpg;
+    struct os_work       work;
+    char                 msi_name[16];
+    struct msi          *msi;
+    struct msi          *output_msi; // 如果是gen420或者scale1手动编码,则需要转发到output_msi
+    struct jpg_device   *jpg;
     struct scale_device *scale_dev;
-    struct os_msgqueue msgq;
-    struct os_event    evt;
-    struct fbpool      pool;
-    struct framebuff  *now_fb;       // 当前中断使用的fb的头(需要释放)
-    struct framebuff  *use_last_fb;  // 最后配置的fb(不需要释放,这个是记录使用)
-    struct framebuff  *last_fb;      // 最后配置fb的地址,没有放到链表的,(需要释放)
-    uint32_t          *jpg_node_buf; // 节点buf数组空间,不再一次申请(一次申请会导致可能申请不到,这样申请则有可能导致碎片化)
-    uint32_t           err;
-    uint32_t           set_time;
-    uint16_t           w, h;
-    uint16_t           jpg_node_len;
-    uint8_t            jpg_node_count;
-    uint8_t            qt;
-    uint8_t            which : 1, running : 1, src_from : 3, scale1_flag : 1, vpp_close_flag : 1, end_flag : 1;
-    uint8_t            datatag;
-    uint8_t            gen420_type; // 如果是gen420的编码,这里需要配置一下类型,因为gen420来源很多地方,也因为是手动kick的,所以这里可以gen420配置了类型再kick,done的时候配置对应类型
-    uint8_t            scale1_type;
-    int32_t            dqtable_index;
-    int32_t            diff_prev;
-    int32_t            diff_sum;
-    int32_t            target_len;
+    // 申请一个内存池块,用于保存scale3的数据,支持超时释放,
+    struct mem_info    **mem_info;
+    uint32_t             mem_info_size;
+    struct os_msgqueue   msgq;
+    struct os_event      evt;
+    struct fbpool        pool;
+    struct framebuff    *now_fb;       // 当前中断使用的fb的头(需要释放)
+    struct framebuff    *use_last_fb;  // 最后配置的fb(不需要释放,这个是记录使用)
+    struct framebuff    *last_fb;      // 最后配置fb的地址,没有放到链表的,(需要释放)
+    uint32_t            *jpg_node_buf; // 节点buf数组空间,不再一次申请(一次申请会导致可能申请不到,这样申请则有可能导致碎片化)
+    uint32_t             err;
+    uint32_t             set_time;
+    uint16_t             w, h;
+    uint16_t             jpg_node_len;
+    uint32_t             need_size;
+    uint8_t              jpg_node_count;
+    uint8_t              qt;
+    uint8_t              which : 1, running : 1, src_from : 3, scale1_flag : 1, vpp_close_flag : 1, end_flag : 1;
+    uint8_t              datatag;
+    uint8_t              gen420_type; // 如果是gen420的编码,这里需要配置一下类型,因为gen420来源很多地方,也因为是手动kick的,所以这里可以gen420配置了类型再kick,done的时候配置对应类型
+    uint8_t              scale1_type;
+    int32_t              dqtable_index;
+    int32_t              diff_prev;
+    int32_t              diff_sum;
+    int32_t              target_len;
 };
 #else
 // 不考虑不带psram的情况
@@ -73,6 +79,7 @@ struct jpg_concat_msi_s
     struct os_work work;
     struct msi    *msi;
     struct msi    *jpg_msi; // 硬件jpg0的msi
+    struct msi    *output_msi;
     struct fbpool  tx_pool;
     uint16_t      *filter_type;
     uint32_t       set_time;

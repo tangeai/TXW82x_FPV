@@ -12,6 +12,7 @@ int32 atcmd_play_audio(const char *cmd, char *argv[], uint32 argc)
 	char audio_filePath[20];
 	uint8_t play_mode = 0;
 	AUDEC_INIT audec_init;
+	uint32 samplerate = 0;
 
 	if(argc < 2) {
         os_printf("%s argc err:%d,enter the path and mode\n",__FUNCTION__,argc);
@@ -32,7 +33,10 @@ int32 atcmd_play_audio(const char *cmd, char *argv[], uint32 argc)
 			audec_init.use_tpc = 0;
 			audec_init.destroy_self = 0;
 			audec_init.src_msi = NULL;
-			audio_play_msi = audio_file_play_init(audio_filePath,play_mode,&audec_init);
+			if(argc >= 3) {
+				samplerate = os_atoi(argv[2]);
+			}
+			audio_play_msi = audio_file_play_init(audio_filePath,play_mode,&audec_init,samplerate);
 		}
 		else {
 			if(audio_play_msi == NULL) {

@@ -5,6 +5,7 @@
 #include "osal_file.h"
 #include "osal/string.h"
 #include "osal/task.h"
+#include "osal/time.h"            /* os_jiffies / os_jiffies_to_msecs for fwrite 诊断节流 */
 #include "lib/common/common.h"
 
 // 结构体申请空间函数
@@ -104,14 +105,49 @@ uint32_t osal_fwrite(void *ptr, uint32_t size, uint32_t nmemb, F_FILE *fp)
 #ifdef WIN32
     return fwrite(ptr, size, nmemb, fp);
 #else
-    uint32_t writeLen;
+    uint32_t writeLen = 0;
     uint32_t res = f_write(fp, ptr, size * nmemb, &writeLen);
     if (res == FR_OK)
     {
+        /* 部分写: 实际只写了一部分 (writeLen < size*nmemb), FatFS 算成功
+         * 但调用者 (mp4_write) 期望全写完, 这里也算潜在异常, 打印告警. */
+        if (writeLen < size * nmemb) {
+            static uint32_t s_partial_last_ms = 0;
+            uint32_t now = (uint32_t)os_jiffies_to_msecs(os_jiffies());
+            if ((uint32_t)(now - s_partial_last_ms) >= 1000) {
+                s_partial_last_ms = now;
+                os_printf(KERN_WARNING "osal_fwrite partial: req=%u got=%u (SD nearly full?)\n",
+                          (unsigned)(size * nmemb), (unsigned)writeLen);
+            }
+        }
         return writeLen;
     }
     else
     {
+        /* 节流诊断: 累计失败计数, 每秒报一次, 避免帧级失败刷爆日志.
+         * FRESULT 速查 (见 ff.h):
+         *   1=FR_DISK_ERR     SD 硬件 I/O 错 (CMD13 timeout/坏块)
+         *   2=FR_INT_ERR      FatFS 内部断言失败
+         *   3=FR_NOT_READY    媒体不可用
+         *   7=FR_DENIED       权限/空间不足 (典型: SD 满, 预分配失败)
+         *   9=FR_INVALID_OBJECT fp 失效
+         *  15=FR_TIMEOUT      锁等待超时
+         *  18=FR_NO_FILESYSTEM 卷未挂载
+         * 这里把 res / size / writeLen 都打出来便于一眼定位. */
+        static uint32_t s_fwrite_fail_cnt  = 0;
+        static uint32_t s_fwrite_last_ms   = 0;
+        static uint32_t s_fwrite_last_res  = 0;
+        s_fwrite_fail_cnt++;
+        s_fwrite_last_res = res;
+        uint32_t now = (uint32_t)os_jiffies_to_msecs(os_jiffies());
+        if ((uint32_t)(now - s_fwrite_last_ms) >= 1000) {
+            s_fwrite_last_ms = now;
+            os_printf(KERN_ERR "osal_fwrite FAIL res=%u (1s cnt=%u, req=%u writeLen=%u fp=%p)\n",
+                      (unsigned)s_fwrite_last_res,
+                      (unsigned)s_fwrite_fail_cnt,
+                      (unsigned)(size * nmemb), (unsigned)writeLen, fp);
+            s_fwrite_fail_cnt = 0;
+        }
         set_errno(res);
         return 0;
     }
@@ -126,8 +162,12 @@ int osal_fclose(F_FILE *fp)
 #else
     int res = f_close(fp);
     FILE_FREE(fp);
-    if (!res)
+    /* 失败时打 KERN_ERR. f_close 失败意味着文件元数据 (FAT 表条目) 没刷盘,
+     * 关闭后文件在 SD 卡上不可见. FRESULT 速查见 osal_fwrite 注释. */
+    if (res != FR_OK)
     {
+        os_printf(KERN_ERR "osal_fclose FAIL res=%d fp=%p (FAT not flushed, file likely lost)\n",
+                  res, fp);
         set_errno(res);
     }
     return res;

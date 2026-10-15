@@ -18,18 +18,20 @@ typedef struct {
 typedef struct {
     uint16_t nsamples;
     uint16_t time_interval;
-    uint32_t samplerate;
+    uint16_t samplerate;
+    uint16_t channels;
 } AUDIO_INFO;
 
 typedef struct {
     uint8_t track_type;
     uint8_t priority;
-    uint32_t samplerate;
+    uint16_t samplerate;
 } AUDIO_TRACK;
 
 typedef struct {
     struct msi *src_msi;
-	uint8_t destroy_self;
+	uint16_t destroy_self;
+    uint16_t channels;
 } AUENC_INIT;
 
 typedef struct {

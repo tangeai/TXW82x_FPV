@@ -1,6 +1,10 @@
+#include "project_config.h"
 #include "record/mux_file.h"
 #include "lib/heap/av_psram_heap.h"
 #include "osal/string.h"
+#if CUSTOMER_ID == 3
+#include <stdint.h>
+#endif
 
 // data 申请空间函数
 #define STREAM_MALLOC av_psram_malloc
@@ -18,6 +22,10 @@ typedef struct
     uint8_t  align_en;
 
     uint8_t *buf;
+#if CUSTOMER_ID == 3
+    /* SRAM 原始分配地址；buf 另外向上对齐到 32 字节供 SD DMA 使用。 */
+    void    *buf_sram_base;
+#endif
     uint32_t buf_size;
     uint32_t buf_len;
 
@@ -148,7 +156,18 @@ void *mux_file_open(F_FILE *fp, uint32_t prealloc_size, uint8_t align_en)
 
     if (mf->align_en)
     {
+#if CUSTOMER_ID == 3
+        /* 4MB 单目：只把常驻写缓存移到普通 SRAM。
+         * mux_file_tail 的临时副本仍由 AV PSRAM 承担，避免 SRAM 峰值翻倍。
+         * 保持原 AV PSRAM 分配器提供的 32 字节对齐，并保存原指针用于释放。 */
+        mf->buf_sram_base = os_malloc(MUX_FILE_ALIGN_SIZE + 31U);
+        if (mf->buf_sram_base)
+        {
+            mf->buf = (uint8_t *) (((uintptr_t) mf->buf_sram_base + 31U) & ~(uintptr_t) 31U);
+        }
+#else
         mf->buf = (uint8_t *) STREAM_MALLOC(MUX_FILE_ALIGN_SIZE);
+#endif
         if (!mf->buf)
         {
             STREAM_LIBC_FREE(mf);
@@ -182,7 +201,11 @@ int mux_file_close(void *file)
 
     if (mf->buf)
     {
+#if CUSTOMER_ID == 3
+        os_free(mf->buf_sram_base);
+#else
         STREAM_FREE(mf->buf);
+#endif
         mf->buf = NULL;
     }
     STREAM_LIBC_FREE(mf);

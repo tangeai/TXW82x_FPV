@@ -143,11 +143,13 @@ static int walkie_talkie_ui_event_handler(wt_msi_event_t event, uint32_t param1,
                 os_memcpy(walkie_talkie_jpg_decode_cache, ui_logo, size);    // cpu copy
                 sys_dcache_clean_range((uint32_t*)walkie_talkie_jpg_decode_cache, size); 
             }
-
+            scale2_recfg_lock(1);
+            scale2_recfg_input_size(320, 240, 0);
             int _ret = scale2_cfg_run(MJPEG_DEC, 0);
             if(_ret == 0) {
                 jpg_decode_run((uint32)walkie_talkie_jpg_decode_cache, 0);
             }
+            scale2_recfg_lock(0);
         }
         break;
 
@@ -171,12 +173,15 @@ static int walkie_talkie_ui_event_handler(wt_msi_event_t event, uint32_t param1,
                 sys_dcache_clean_range((uint32_t*)walkie_talkie_jpg_decode_cache, size); 
             }
             os_sleep_ms(10);
+            scale2_recfg_lock(1);
+            scale2_recfg_input_size(320, 240, 0);
             for(uint32_t i=0; i<3; i++) {
                 int _ret = scale2_cfg_run(MJPEG_DEC, 0);
                 if(_ret == 0) {
                     jpg_decode_run((uint32)walkie_talkie_jpg_decode_cache, 0);
                 }
             }
+            scale2_recfg_lock(0);
         }
         break;
 
@@ -304,7 +309,7 @@ static int walkie_talkie_ui_event_handler(wt_msi_event_t event, uint32_t param1,
             audec_init.use_tpc = 0;
             audec_init.destroy_self = 1;
             audec_init.src_msi = NULL;
-            prompt_play_msi = audio_file_play_init(filepath,play_mode,&audec_init);
+            prompt_play_msi = audio_file_play_init(filepath,play_mode,&audec_init,0);
         }
         break;
 

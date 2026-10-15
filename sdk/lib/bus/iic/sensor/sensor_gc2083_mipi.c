@@ -468,7 +468,7 @@ const _Sensor_LSC          gc2083_lsc_init = {
     .p_lsc_tbl = (uint32 *)gc2083_lsc_tbl,
 };
 
-const _Sensor_LHS gc2083_lhs_map[] = {
+const _Sensor_LHS gc2083_lhs_map[9] = {
     // region defination: lower -> center -> upper(direction: anticlockwise)
     // region_lower, region_center, region_upper, hue adjust value, saturation adjust value
     //   (9 bits)      (9 bits)       (9 bits)          (9 bits)           (8 bits)
@@ -693,6 +693,35 @@ void GC2083_ae_adjust(struct isp_exposure_opt *p_cfg)
     p_cfg->cmd_len   = 2+1;
 }
 
+void gc2083_img_opt(struct isp_sensor_opt *p_opt)
+{
+    uint8  *addr = (uint8 *)p_opt->data.addr;
+    uint8  index = 0;
+    addr[index++] = 0x00;
+    addr[index++] = 0x15;
+    addr[index++] = p_opt->reverse_en*2 + p_opt->mirror_en;
+
+    addr[index++] = 0x0d;
+    addr[index++] = 0x15;
+    addr[index++] = p_opt->reverse_en*2 + p_opt->mirror_en;
+    p_opt->data.size = index;
+    p_opt->cmd_len   = 2+1;
+}
+
+void gc2083_fps_opt(struct isp_sensor_opt *p_opt)
+{
+    uint8  *addr        = (uint8 *)p_opt->data.addr;
+    uint8  index        = 0;
+    addr[index++]       = 0x0d;
+    addr[index++]       = 0x41;
+    addr[index++]       = p_opt->curr_length >> 8;
+    addr[index++]       = 0x0d;
+    addr[index++]       = 0x42;
+    addr[index++]       = p_opt->curr_length & 0xff;
+    p_opt->data.size    = index;
+    p_opt->cmd_len      = 2+1;
+}
+
 const _Sensor_ISP_Init gc2083_isp_init = 
 {
     .type         = ISP_INPUT_DAT_SRC_MIPI0,
@@ -717,29 +746,20 @@ const _Sensor_ISP_Init gc2083_isp_init =
     .p_lhs        = (_Sensor_LHS    *)gc2083_lhs_map,
     .p_ygamma     = (_Sensor_YGAMMA *)gc2083_ygamma_tbl,
     .p_wdr        = (_Sensor_WDR    *)&gc2083_wdr_init,
+	.img_opt      = (sensor_img_opt  )gc2083_img_opt,
+    .fps_opt      = (sensor_fps_opt  )gc2083_fps_opt,
 
 
 };
 
 SENSOR_OP_SECTION const _Sensor_Adpt_ gc2083_cmd = 
 {
-	.typ = 1, //YUV
 	.pixelw = 1920,
 	.pixelh= 1080,
-	.hsyn = 1,
-	.vsyn = 1,
-	.rduline = 0,//
-	.rawwide = 1,//10bit
-	.colrarray = 0,//0:_RGRG_ 1:_GRGR_,2:_BGBG_,3:_GBGB_
 	.init = (uint8 *)GC2083InitTable,
-    .init_len = sizeof(GC2083InitTable),
     .vts_reg = {0x0d41,0x0d42},
     .vts_reg_num = 2,
     .mipi_lane_num = 2,
-	.rotate_adapt = {0},
-	//.hvb_adapt = {0x6a,0x12,0x6a,0x12},
-	. mclk = 24000000,
-	.p_fun_adapt = {NULL,NULL,NULL},
     .sensor_isp = (_Sensor_ISP_Init *)&gc2083_isp_init,
 };
 

@@ -36,7 +36,7 @@ uint32_t touch_pad_free_multipoint_xy(touch_multipoint_pos_t *data)
 }
 
 
-void touch_pad_hareware_init()
+void touch_pad_hardware_init()
 {
     // Initialize the touch pad hardware
     // This function can be used to set up the necessary hardware configurations

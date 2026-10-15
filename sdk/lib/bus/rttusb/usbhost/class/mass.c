@@ -99,16 +99,13 @@ static rt_err_t _pipe_check(struct uhintf* intf, upipe_t pipe)
  *
  * @return the error code, RT_EOK on successfully.
  */
-
-static rt_uint8_t csw_buff[SIZEOF_CSW + USB_RX_BUFF_RESERVE_SIZE];
-
 static rt_err_t rt_usb_bulk_only_xfer(struct uhintf* intf,
     ustorage_cbw_t cmd, rt_uint8_t* buffer, int timeout)
 {
     rt_size_t size;
     rt_err_t ret;
     upipe_t pipe;
-    ustorage_csw_t csw = (ustorage_csw_t)csw_buff;
+    ustorage_csw_t csw;
     ustor_t stor;
 
     RT_ASSERT(cmd != RT_NULL);
@@ -121,10 +118,17 @@ static rt_err_t rt_usb_bulk_only_xfer(struct uhintf* intf,
 
     /* get storage instance from the interface instance */
     stor = (ustor_t)intf->user_data;
+    csw = (ustorage_csw_t)stor->csw_buff;
 
     if(stor == RT_NULL)
     {
         rt_kprintf("stor is not available\n");
+        return -RT_EIO;
+    }
+
+    if(csw == RT_NULL)
+    {
+        rt_kprintf("csw is not available\n");
         return -RT_EIO;
     }
 
@@ -156,7 +160,7 @@ static rt_err_t rt_usb_bulk_only_xfer(struct uhintf* intf,
 
         /* receive the csw */
         size = rt_usb_hcd_pipe_xfer(stor->pipe_in->inst->hcd, stor->pipe_in,
-            csw_buff, SIZEOF_CSW, timeout);
+            csw, SIZEOF_CSW, timeout);
 
         if(size != SIZEOF_CSW)
         {
@@ -575,6 +579,9 @@ static rt_err_t rt_usbh_storage_enable(void* arg)
     rt_memset(stor, 0, sizeof(struct ustor));
     intf->user_data = (void*)stor;
 
+    stor->csw_buff = (void *)rt_malloc(SIZEOF_CSW + USB_RX_BUFF_RESERVE_SIZE);
+    RT_ASSERT(stor->csw_buff != RT_NULL);
+
     for(i=0; i<intf->intf_desc->bNumEndpoints; i++)
     {
         uep_desc_t ep_desc;
@@ -662,7 +669,14 @@ static rt_err_t rt_usbh_storage_disable(void* arg)
         {
             flags = disable_irq();
             /* free storage instance */
-            if(stor != RT_NULL) rt_free(stor);
+            if(stor != RT_NULL) 
+            {
+                if(stor->csw_buff != RT_NULL)
+                {
+                    rt_free(stor->csw_buff);
+                }
+                rt_free(stor);
+            }
             enable_irq(flags);
             break;
         }

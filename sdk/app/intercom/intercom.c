@@ -53,22 +53,7 @@
 #endif
 #ifndef LOW_BITRATE_MODE        
 #define LOW_BITRATE_MODE        0
-#endif
-
-static uint16_t g_play_sort = 0;
-static uint16_t g_current_sort = 1;
-static uint32_t g_numofcached = 0;
-static uint32_t g_s_identify_num = 0;
-static uint32_t g_r_identify_num = 0;
-static uint32_t cur_r_identify_num = 0;
-static uint32_t g_send_enable = 1;
-
-static uint32_t play_start_wait = 10;
-
-static uint8_t send_start_flag = 1;
-static uint8_t play_start_flag = 2;   //BIT(0)是否播放，BIT(1)是否接收          
-
-static AUDIO_TRACK *audac_fiter_track = NULL;
+#endif         
 
 static uint32_t last_statistical_time = 0;
 static uint32_t lose_total = 0;
@@ -77,6 +62,8 @@ static uint32_t slow_speed_cnt = 0;
 static uint32_t fast_speed_cnt = 0;
 
 static struct msi *global_intercom_msi = NULL;
+static uint8_t send_start_flag = 1;
+static uint8_t play_start_flag = BIT(1);   //BIT(0)是否播放，BIT(1)是否接收
 
 enum {
     clear_useList_event = BIT(0),
@@ -103,6 +90,15 @@ static void intercom_task_decrease(INTERCOM_STRUCT *intercom_s)
 	os_mutex_lock(&intercom_s->state_mutex, osWaitForever);
 	intercom_s->run_task--;
 	os_mutex_unlock(&intercom_s->state_mutex);
+}
+
+static uint8_t intercom_task_state(INTERCOM_STRUCT *intercom_s)
+{
+	uint8_t state = 0;
+	os_mutex_lock(&intercom_s->state_mutex, osWaitForever);
+	state = intercom_s->run_task;
+	os_mutex_unlock(&intercom_s->state_mutex);
+	return state;
 }
 
 static void intercom_close_socket(INTERCOM_STRUCT *intercom_s)
@@ -138,13 +134,13 @@ static int intercom_room_init(INTERCOM_STRUCT *intercom_s)
 		return RET_ERR;
 	}		
 
-	INIT_LIST_HEAD((struct list_head *)&intercom_s->checkList_head);
-	INIT_LIST_HEAD((struct list_head *)&intercom_s->useList_head);
-	INIT_LIST_HEAD((struct list_head *)&intercom_s->nodeList_head);
-	INIT_LIST_HEAD((struct list_head *)&intercom_s->sublist_head);
-	INIT_LIST_HEAD((struct list_head *)&intercom_s->ringbuf_manage_empty);
-	INIT_LIST_HEAD((struct list_head *)&intercom_s->ringbuf_manage_used);
-	INIT_LIST_HEAD((struct list_head *)&intercom_s->device_head);
+	INIT_LIST_HEAD(&intercom_s->checkList_head);
+	INIT_LIST_HEAD(&intercom_s->useList_head);
+	INIT_LIST_HEAD(&intercom_s->nodeList_head);
+	INIT_LIST_HEAD(&intercom_s->sublist_head);
+	INIT_LIST_HEAD(&intercom_s->ringbuf_manage_empty);
+	INIT_LIST_HEAD(&intercom_s->ringbuf_manage_used);
+	INIT_LIST_HEAD(&intercom_s->device_head);
 
 	audio_node *audio_node_src = (audio_node*)INTERCOM_ZALLOC(sizeof(audio_node) * (SOFTBUF_LEN / NODE_DATA_LEN));
 	if(!audio_node_src) {
@@ -153,7 +149,7 @@ static int intercom_room_init(INTERCOM_STRUCT *intercom_s)
 	}
 	for(uint32_t i=0; i<(SOFTBUF_LEN/NODE_DATA_LEN); i++) {
 		audio_node_src[i].buf_addr = (uint8_t*)(intercom_s->sort_buf+(NODE_DATA_LEN * i));
-		list_add_tail((struct list_head *)&(audio_node_src[i].list),(struct list_head *)&intercom_s->nodeList_head); 
+		list_add_tail(&(audio_node_src[i].list), &intercom_s->nodeList_head); 
 	}
 	intercom_s->audio_node_src = audio_node_src;
 
@@ -165,7 +161,7 @@ static int intercom_room_init(INTERCOM_STRUCT *intercom_s)
 	for(uint32_t i=0; i<SUBLIST_NUM; i++) {
 		sublist_src[i].node_head.next = &(sublist_src[i].node_head);
 		sublist_src[i].node_head.prev = &(sublist_src[i].node_head);
-		list_add_tail((struct list_head *)&sublist_src[i].list, (struct list_head *)&intercom_s->sublist_head); 
+		list_add_tail(&sublist_src[i].list, &intercom_s->sublist_head); 
 	}
 	intercom_s->sublist_src = sublist_src;
 
@@ -175,7 +171,7 @@ static int intercom_room_init(INTERCOM_STRUCT *intercom_s)
 		return RET_ERR;		
 	}
 	for(uint32_t i=0; i<ENCODED_BUF_NUM; i++) {
-		list_add_tail((struct list_head *)&ringbuf_manage_src[i].list,(struct list_head *)&intercom_s->ringbuf_manage_empty); 
+		list_add_tail(&ringbuf_manage_src[i].list, &intercom_s->ringbuf_manage_empty); 
 	}
 	intercom_s->ringbuf_manage_src = ringbuf_manage_src;
 	intercom_s->manage_cur_pop = &intercom_s->ringbuf_manage_used;
@@ -206,28 +202,23 @@ static void intercom_room_free(INTERCOM_STRUCT *intercom_s)
 static void *get_ringbuf_manage_addr(struct list_head *list)
 {
 	ringbuf_manage *ringbuf_mana;
-	ringbuf_mana = list_entry((struct list_head *)list,ringbuf_manage,list);
+	ringbuf_mana = list_entry(list, ringbuf_manage, list);
 	return ringbuf_mana->buf_addr;
 }
 static uint32_t get_ringbuf_manage_datalen(struct list_head *list)
 {
 	ringbuf_manage *ringbuf_mana;
-	ringbuf_mana = list_entry((struct list_head *)list,ringbuf_manage,list);
+	ringbuf_mana = list_entry(list, ringbuf_manage, list);
 	return (uint32_t)ringbuf_mana->data_len;
 }
 static int32_t get_ringbuf_manage_count(INTERCOM_STRUCT *intercom_s)
 {
 	int count = 0;
-	struct list_head *list_n = (struct list_head *)intercom_s->manage_cur_pop;
-	struct list_head *head = (struct list_head *)intercom_s->manage_cur_push;
+	struct list_head *list_n = intercom_s->manage_cur_pop;
+	struct list_head *head = intercom_s->manage_cur_push;
 	while(list_n != head) {
 		list_n = list_n->next;
 		count++;
-		if(count > ENCODED_BUF_NUM)
-		{
-			count = 0;
-			break;
-		}
 	}
 	return count;			
 }
@@ -235,23 +226,20 @@ static struct list_head *get_ringbuf_manage(INTERCOM_STRUCT *intercom_s, uint8_t
 {
 	if(list_empty_careful((const struct list_head *)&intercom_s->ringbuf_manage_empty)) {
 		if(grab) {
-			list_move_tail((struct list_head *)intercom_s->ringbuf_manage_used.next,
-						   (struct list_head *)&intercom_s->ringbuf_manage_used);
+			list_move_tail(intercom_s->ringbuf_manage_used.next, &intercom_s->ringbuf_manage_used);
 		}
 		else {		
 			return 0;
 		}
 	}
 	else {
-		list_move_tail((struct list_head *)intercom_s->ringbuf_manage_empty.next,
-					   (struct list_head *)&intercom_s->ringbuf_manage_used);
+		list_move_tail(intercom_s->ringbuf_manage_empty.next, &intercom_s->ringbuf_manage_used);
 	}
 	return intercom_s->ringbuf_manage_used.prev;				
 }
 static void del_ringbuf_manage(INTERCOM_STRUCT *intercom_s)
 {
-	list_move_tail((struct list_head *)intercom_s->ringbuf_manage_used.next,
-						(struct list_head*)&intercom_s->ringbuf_manage_empty);
+	list_move_tail(intercom_s->ringbuf_manage_used.next, &intercom_s->ringbuf_manage_empty);
 }
 
 static void output_sema_up(uint32_t *args)
@@ -340,16 +328,16 @@ static uint16_t calulate_sum(uint8_t * buf, uint16_t len)
 
 void ringbuf_write_pre(INTERCOM_STRUCT *intercom_s, uint32_t size)
 {
+	uint32_t last_front = 0;
+	uint32_t cur_front = 0;
+	uint32_t lookback = 0;
 	ringbuf_manage *ringbuf_mana_n = NULL;
 	struct list_head *ringbuf_mana_l = NULL;
-	struct list_head *manage_l_del = NULL;
 	ringbuf_manage *manage_n_del = NULL;
+	ringbuf_manage *npos = NULL;
 
 	ringbuf_mana_l = get_ringbuf_manage(intercom_s, 0);
 	if(!ringbuf_mana_l) {
-		ringbuf_mana_l = intercom_s->ringbuf_manage_used.next;
-		ringbuf_mana_n = list_entry(ringbuf_mana_l, ringbuf_manage, list);
-		ringbuf_move_readptr(intercom_s->encoded_ringbuf, size);
 		if(intercom_s->manage_cur_pop == intercom_s->ringbuf_manage_used.next)
 			intercom_s->manage_cur_pop = intercom_s->manage_cur_pop->next;
 		ringbuf_mana_l = get_ringbuf_manage(intercom_s, 1);
@@ -359,13 +347,30 @@ void ringbuf_write_pre(INTERCOM_STRUCT *intercom_s, uint32_t size)
 	ringbuf_mana_n->buf_addr = (uint8_t*)intercom_s->encoded_ringbuf->data + 
 											intercom_s->encoded_ringbuf->rear;
 	ringbuf_mana_n->data_len = size;
-	while(ringbuf_write_available(intercom_s->encoded_ringbuf) < size) {
-		manage_l_del = intercom_s->ringbuf_manage_used.next;
-		manage_n_del = list_entry(manage_l_del, ringbuf_manage, list);
-		ringbuf_move_readptr(intercom_s->encoded_ringbuf, size);
-		if(intercom_s->manage_cur_pop == intercom_s->ringbuf_manage_used.next)
-			intercom_s->manage_cur_pop = intercom_s->manage_cur_pop->next;
-		del_ringbuf_manage(intercom_s);
+	if(ringbuf_write_available(intercom_s->encoded_ringbuf) < size) {
+		last_front = ringbuf_cur_front(intercom_s->encoded_ringbuf);
+		ringbuf_move_readptr(intercom_s->encoded_ringbuf, size, &lookback);
+		cur_front = ringbuf_cur_front(intercom_s->encoded_ringbuf);
+		list_for_each_entry_safe(manage_n_del, npos, &(intercom_s->ringbuf_manage_used), list) {
+			if(lookback == 1) {
+				if(((manage_n_del->buf_addr+manage_n_del->data_len) > (intercom_s->encoded_ringbuf->data + last_front)) ||
+					(manage_n_del->buf_addr <= (intercom_s->encoded_ringbuf->data + cur_front))) {
+					if(intercom_s->manage_cur_pop == &manage_n_del->list) {
+						intercom_s->manage_cur_pop = intercom_s->manage_cur_pop->next;
+					}
+					del_ringbuf_manage(intercom_s);
+				}
+			}
+			else {
+				if(((manage_n_del->buf_addr+manage_n_del->data_len) > (intercom_s->encoded_ringbuf->data + last_front)) &&
+					(manage_n_del->buf_addr <= (intercom_s->encoded_ringbuf->data + cur_front))) {
+					if(intercom_s->manage_cur_pop == &manage_n_del->list) {
+						intercom_s->manage_cur_pop = intercom_s->manage_cur_pop->next;
+					}
+					del_ringbuf_manage(intercom_s);
+				}
+			}
+		}
 	}
 }
 
@@ -422,19 +427,19 @@ static void intercom_send_task(void *d)
 #endif
 
 	intercom_task_increase(intercom_s);
-	g_s_identify_num = 0;
-	os_random_bytes((uint8_t*)(&g_s_identify_num), 4);
-	os_printf("\n**********intercom ID:%d***********\n",g_s_identify_num);
+	os_random_bytes((uint8_t*)(&intercom_s->g_s_identify_num), 4);
+	os_printf("\n**********intercom ID:%d***********\n",intercom_s->g_s_identify_num);
 
 	auenc_init.destroy_self = 0;
 #if MAGIC_VOICE_EN
-	auadc_msi_add_output(AUSYS_AUAD, intercom_s->magic_voice_msi->name);
+	auadc_msi_add_output(MAIN_MIC_ID, intercom_s->magic_voice_msi->name);
 	magic_voice_s = intercom_s->magic_voice_msi->priv;
-	auenc_init.src_msi = magic_voice_s->autpc_msi;
+	auenc_init.src_msi = magic_voice_s->msi;
 #else
-	auenc_init.src_msi = get_auadc_msi(AUSYS_AUAD);
+	auenc_init.src_msi = get_auadc_msi(MAIN_MIC_ID);
 #endif
-	intercom_s->encoder_msi = audio_encode_init(AUDIO_ENCODER, audio_adc_get_samplerate(AUSYS_AUAD), &auenc_init);
+	auenc_init.channels = audio_adc_get_channels(MAIN_MIC_ID);
+	intercom_s->encoder_msi = audio_encode_init(AUDIO_ENCODER, audio_adc_get_samplerate(MAIN_MIC_ID), &auenc_init);
 	if(!intercom_s->encoder_msi) {
 		os_printf("intercom audio encoder init fail!\n");
 		intercom_task_decrease(intercom_s);
@@ -503,7 +508,7 @@ static void intercom_send_task(void *d)
 				*((uint16_t*)(encoded_buf+2)) = send_sort;
 				*((uint32_t*)(encoded_buf+4)) = timestamp;
 				*((uint32_t*)(encoded_buf+8)) = data_len;
-				*((uint32_t*)(encoded_buf+12)) = g_s_identify_num;
+				*((uint32_t*)(encoded_buf+12)) = intercom_s->g_s_identify_num;
 				*((uint16_t*)(encoded_buf+16)) = calulate_sum(encoded_buf,HEAD_RESERVE_BYTE-2);
 				if(data_len)
 					os_memcpy(encoded_buf + HEAD_RESERVE_BYTE, data, data_len);
@@ -538,139 +543,129 @@ static void intercom_send_task(void *d)
 static int32_t get_audio_node_count(struct list_head *head)
 {
 	int count = 0;
-	struct list_head *list_n = (struct list_head *)head;
+	struct list_head *list_n = head;
 	while(list_n->next != head) {
 		list_n = list_n->next;
 		count++;
-		if(count > (SOFTBUF_LEN / NODE_DATA_LEN)) {
-			count = 0;
-			break;
-		}
 	}
 	return count;			
 }
 static void *get_audio_node_addr(struct list_head *list)
 {
 	audio_node *audio_n;
-	audio_n = list_entry((struct list_head *)list,audio_node,list);
+	audio_n = list_entry(list, audio_node, list);
 	return audio_n->buf_addr;
 }
 static struct list_head *get_audio_node(INTERCOM_STRUCT *intercom_s, struct list_head *head, uint32_t node_num)
 {
-	int ret = os_mutex_lock(&intercom_s->list_mutex, osWaitForever);
-	if(ret < 0)
-		return 0;
-	if(get_audio_node_count((struct list_head *)&intercom_s->nodeList_head) < node_num) {
+	os_mutex_lock(&intercom_s->list_mutex, osWaitForever);
+	if(get_audio_node_count(&intercom_s->nodeList_head) < node_num) {
 		os_mutex_unlock(&intercom_s->list_mutex);
 		os_printf("nodeList_head empty\n");
 		return 0;
 	}
-
 	for(uint32_t i=0; i<node_num; i++)
-		list_move_tail((struct list_head *)intercom_s->nodeList_head.next, (struct list_head *)head);
+		list_move_tail(intercom_s->nodeList_head.next, head);
 	os_mutex_unlock(&intercom_s->list_mutex);
 	return head->next;			
 }
 static void del_audio_node(INTERCOM_STRUCT *intercom_s, struct list_head *del)
 {
 	del->next->prev = intercom_s->nodeList_head.prev;
-	del->prev->next = (struct list_head*)(&(intercom_s->nodeList_head));
+	del->prev->next = &(intercom_s->nodeList_head);
 	intercom_s->nodeList_head.prev->next = del->next;
 	intercom_s->nodeList_head.prev = del->prev;
-	del->next = (struct list_head *)del;
-	del->prev = (struct list_head *)del;
+	del->next = del;
+	del->prev = del;
 }
 
 static int32_t get_audio_sublist_count(INTERCOM_STRUCT *intercom_s, struct list_head *head)
 {
 	int count = 0;
-	struct list_head *list_n = (struct list_head *)head;
-	int ret = os_mutex_lock(&intercom_s->list_mutex, osWaitForever);
-	if(ret < 0) {
-		return 0;
-	}
+	struct list_head *list_n = head;
+	os_mutex_lock(&intercom_s->list_mutex, osWaitForever);
 	while(list_n->next != head) {
 		list_n = list_n->next;
 		count++;
-		if(count > SUBLIST_NUM) {
-			count = 0;
-			break;
-		}
 	}
 	os_mutex_unlock(&intercom_s->list_mutex);
 	return count;			
 }
-static struct list_head *get_audio_sublist(INTERCOM_STRUCT *intercom_s, struct list_head *head)
+static struct list_head *get_audio_sublist(INTERCOM_STRUCT *intercom_s)
 {
-	int ret = os_mutex_lock(&intercom_s->list_mutex, osWaitForever);
-	if(ret < 0)
-		return 0;
+	struct list_head *get_list = NULL;
+	os_mutex_lock(&intercom_s->list_mutex, osWaitForever);
 	if(list_empty_careful((const struct list_head *)&intercom_s->sublist_head)) {
 		os_mutex_unlock(&intercom_s->list_mutex);
 		os_printf("sublist_head empty\n");
-		return 0;
+		return NULL;
 	}
-	list_move_tail((struct list_head *)intercom_s->sublist_head.next,(struct list_head *)head);
+	get_list = intercom_s->sublist_head.next;
+	list_del_init(get_list);
 	os_mutex_unlock(&intercom_s->list_mutex);
-	return head->prev;			
+	return get_list;			
 }
 static void del_audio_sublist(INTERCOM_STRUCT *intercom_s, struct list_head *del)
 {
-	int32_t ret = os_mutex_lock(&intercom_s->list_mutex, osWaitForever);
-	if(ret < 0)
-		return;		
-	sublist *sublist_n = list_entry((struct list_head *)del,sublist,list);
+	os_mutex_lock(&intercom_s->list_mutex, osWaitForever);	
+	sublist *sublist_n = list_entry(del, sublist, list);
 	if(sublist_n->node_cnt)
 		del_audio_node(intercom_s, &(sublist_n->node_head));
-	list_move_tail((struct list_head *)del,(struct list_head*)&intercom_s->sublist_head);
+	list_move_tail(del, &intercom_s->sublist_head);
 	os_mutex_unlock(&intercom_s->list_mutex);	
 }
-static void insert_into_useList(INTERCOM_STRUCT *intercom_s, struct list_head *del, volatile struct list_head *head)
+static void insert_into_checkList(INTERCOM_STRUCT *intercom_s, struct list_head *del)
+{
+	os_mutex_lock(&intercom_s->list_mutex, osWaitForever);
+	list_move_tail(del, &intercom_s->checkList_head);
+	os_mutex_unlock(&intercom_s->list_mutex);
+}
+static void insert_into_useList(INTERCOM_STRUCT *intercom_s, struct list_head *del)
 {
 	sublist *sublist_n;
 	sublist *sublist_n_pos;
 	sublist *npos;
-	sublist_n = list_entry((struct list_head *)del,sublist,list);
+	sublist_n = list_entry(del, sublist, list);
 	int32_t prev_sort = 0;
 	uint16_t new_sort = 0;
 	uint16_t next_sort = 0;
-	int32_t ret;
+	struct list_head *head = &intercom_s->useList_head;
 
 	new_sort = sublist_n->sort;
-	prev_sort = (play_start_flag&BIT(0))?g_play_sort:-1;
+	prev_sort = (play_start_flag&BIT(0))?intercom_s->g_current_sort:-1;
 	if((prev_sort >= new_sort) && ((prev_sort - new_sort) < 60000)) {
-		del_audio_sublist(intercom_s, del);
+		if(sublist_n->node_cnt) {
+			del_audio_node(intercom_s, &(sublist_n->node_head));
+		}
+		list_move_tail(del, &intercom_s->sublist_head);
 		return;					
 	}
 	// os_printf("insert:%d\n",new_sort);
-	ret = os_mutex_lock(&intercom_s->list_mutex, osWaitForever);
-	if(ret < 0)
-		return;
-	if(list_empty_careful((struct list_head *)head)) {	
-		list_move((struct list_head *)del, (struct list_head *)head);
+	if(list_empty_careful((const struct list_head *)head)) {	
+		list_move(del, head);
 		goto insert_into_useList_end;	
 	}
-	list_for_each_entry_safe(sublist_n_pos, npos, (struct list_head *)head, list) {
+	list_for_each_entry_safe(sublist_n_pos, npos, head, list) {
 		next_sort = sublist_n_pos->sort;
 		if(new_sort == next_sort) {
-			if(sublist_n->node_cnt)
+			if(sublist_n->node_cnt) {
 				del_audio_node(intercom_s, &(sublist_n->node_head));
-			list_move_tail((struct list_head *)del,(struct list_head*)&intercom_s->sublist_head);
+			}
+			list_move_tail(del, &intercom_s->sublist_head);
 			goto insert_into_useList_end;
 		}
 		else if( (prev_sort < new_sort ) && (new_sort < next_sort) && ((next_sort-new_sort) < 60000) ) {
-			list_move((struct list_head *)del, (struct list_head *)(sublist_n_pos->list.prev));	
+			list_move(del, sublist_n_pos->list.prev);	
 			goto insert_into_useList_end;
 		}
 		else if( (prev_sort>60000) && ((prev_sort - new_sort)>60000) && (new_sort < next_sort) && (prev_sort - next_sort > 60000) ) {	
-			list_move((struct list_head *)del, (struct list_head *)(sublist_n_pos->list.prev));
+			list_move(del, sublist_n_pos->list.prev);
 			goto insert_into_useList_end;			
 		}
 		prev_sort = next_sort;
 	}		
-	list_move_tail((struct list_head *)del, (struct list_head *)head);
+	list_move_tail(del, head);
 insert_into_useList_end:
-	os_mutex_unlock(&intercom_s->list_mutex);
 	return;	
 }
 
@@ -687,7 +682,7 @@ static int32_t recv_repeat_check(uint16_t seq, uint16_t sort)
 	}
 }
 
-static void lose_packet_check(INTERCOM_STRUCT *intercom_s)
+static void lose_packet_check(INTERCOM_STRUCT *intercom_s, sublist *sublist_n)
 { 
 	static char sequence = 0;
 	char temp = 0;
@@ -698,10 +693,8 @@ static void lose_packet_check(INTERCOM_STRUCT *intercom_s)
 	uint32_t new_loop_lose = 0;
 	uint8_t seq = 0;
 	uint16_t sort = 0;
-	struct list_head *sublist_l = NULL;
-	sublist *sublist_n = NULL;
+	struct list_head *sublist_l = &(sublist_n->list);
 	uint32_t i = 0;
-	int32_t prev_sort = 0;
 
 	for(i=1; i<(ENCODED_BUF_NUM*2+1); i++)
 	{
@@ -714,26 +707,18 @@ static void lose_packet_check(INTERCOM_STRUCT *intercom_s)
 		}
 	}
 
-	sublist_l = intercom_s->checkList_head.next;
-	sublist_n = list_entry((struct list_head *)sublist_l, sublist, list);
-
 	temp = (sequence % (ENCODED_BUF_NUM*2))+1;
 	seq = sublist_n->seq;
 	if(os_abs(seq-temp) >= 8)
 		temp = seq;
 	sort = sublist_n->sort;
-	prev_sort = (play_start_flag&BIT(0))?g_play_sort:-1;
 	/*收到重复包，丢弃*/
 	if(recv_repeat_check(seq, sort)) {
 		del_audio_sublist(intercom_s, sublist_l);
-	}
-	else if((sort <= prev_sort) && ((prev_sort-sort) < 60000)) {
-		del_audio_sublist(intercom_s, sublist_l);
-		lose_packet &= ~BIT(seq);
-		retrans_num[seq] = 0;
 	}	
 	else
 	{
+		insert_into_checkList(intercom_s, sublist_l);
 		/*收到丢包，清掉该丢包位*/
 		if( lose_packet & BIT(seq) )  {
 			lose_packet &= ~BIT(seq);		
@@ -752,7 +737,6 @@ static void lose_packet_check(INTERCOM_STRUCT *intercom_s)
 		}
 		else
 			sequence = temp;
-		insert_into_useList(intercom_s, sublist_l, &intercom_s->useList_head);
 	}
 
 	if(intercom_s->loss_state == serious_loss) {
@@ -775,7 +759,7 @@ static uint8_t is_new_device(INTERCOM_STRUCT *intercom_s, struct sockaddr_in *re
 {
 	intercom_device *device;
 	intercom_device *npos;
-	list_for_each_entry_safe(device, npos, (struct list_head *)&(intercom_s->device_head), list) {
+	list_for_each_entry_safe(device, npos, &(intercom_s->device_head), list) {
 		if(device->ip_addr == remote_trans_addr->sin_addr.s_addr) {
 			return 0;
 		}
@@ -793,7 +777,7 @@ static void add_new_device(INTERCOM_STRUCT *intercom_s, uint32_t new_identify_nu
 	}
 	device->identify_num = new_identify_num;
 	device->ip_addr = remote_trans_addr->sin_addr.s_addr;
-	list_move_tail((struct list_head *)device, (struct list_head *)&(intercom_s->device_head));
+	list_add_tail(&(device->list), &(intercom_s->device_head));
 	device->online = 1;
 	device->timeout_cnt = TIMEOUT_COUNT;
 	device->dev_id = ((remote_trans_addr->sin_addr.s_addr & 0xFF000000) >> 24) - 100;
@@ -801,7 +785,7 @@ static void add_new_device(INTERCOM_STRUCT *intercom_s, uint32_t new_identify_nu
 	intercom_s->connected_num++;
 	if(switch_new || device->dev_id == intercom_s->current_dev_id) {
 		send_start_flag = 0;
-		g_r_identify_num = new_identify_num;
+		intercom_s->g_r_identify_num = new_identify_num;
 		intercom_s->remote_trans_addr.sin_addr.s_addr = remote_trans_addr->sin_addr.s_addr;
 		intercom_s->remote_ret_addr.sin_addr.s_addr = remote_trans_addr->sin_addr.s_addr;
 		send_start_flag = 1;
@@ -813,7 +797,7 @@ static intercom_device *find_device(INTERCOM_STRUCT *intercom_s, struct sockaddr
 {
 	intercom_device *device;
 	intercom_device *npos;
-	list_for_each_entry_safe(device, npos, (struct list_head *)&(intercom_s->device_head), list) {
+	list_for_each_entry_safe(device, npos, &(intercom_s->device_head), list) {
 		if(device->ip_addr == remote_trans_addr->sin_addr.s_addr) {
 			return device;
 		}
@@ -826,12 +810,13 @@ static void switch_device(INTERCOM_STRUCT *intercom_s, uint32_t dev_id)
 	intercom_device *device;
 	intercom_device *npos;
 	os_mutex_lock(&intercom_s->send_mutex, osWaitForever);
-	list_for_each_entry_safe(device, npos, (struct list_head *)&(intercom_s->device_head), list) {
+	list_for_each_entry_safe(device, npos, &(intercom_s->device_head), list) {
 		if(device->dev_id == dev_id) {
-			g_r_identify_num = device->identify_num;
+			intercom_s->g_r_identify_num = device->identify_num;
 			intercom_s->remote_trans_addr.sin_addr.s_addr = device->ip_addr;
 			intercom_s->remote_ret_addr.sin_addr.s_addr = device->ip_addr;	
 			intercom_s->current_dev_id = dev_id;
+			break;
 		}
 	}	
 	os_mutex_unlock(&intercom_s->send_mutex);
@@ -841,7 +826,9 @@ static void clear_disconnect_device(INTERCOM_STRUCT *intercom_s)
 {
 	intercom_device *device;
 	intercom_device *npos;
-	list_for_each_entry_safe(device, npos, (struct list_head *)&(intercom_s->device_head), list) {
+	uint8_t switch_next_device = 0;
+	int8_t next_device_id = -1;
+	list_for_each_entry_safe(device, npos, &(intercom_s->device_head), list) {
 		if(device->online) {
 			device->timeout_cnt = TIMEOUT_COUNT;
 		}
@@ -854,7 +841,18 @@ static void clear_disconnect_device(INTERCOM_STRUCT *intercom_s)
 			os_printf("\n*****intercom del device:%d*****\n",device->identify_num);
 			list_del(&device->list);
 			INTERCOM_FREE(device);
-			switch_device(intercom_s, 0);
+			switch_next_device = 1;
+		}
+	}
+	if(switch_next_device) {
+		list_for_each_entry_safe(device, npos, &(intercom_s->device_head), list) {
+			if(device->timeout_cnt > 0) {
+				next_device_id = device->dev_id;
+			}
+		}
+		if(next_device_id >= 0) {
+			os_printf("\n*****intercom auto switch device id:%d*****\n",next_device_id);
+			switch_device(intercom_s, next_device_id);
 		}
 	}
 }
@@ -864,7 +862,7 @@ static void clear_one_device(INTERCOM_STRUCT *intercom_s, uint32_t dev_id)
 	intercom_device *device;
 	intercom_device *npos;
 	if(intercom_s->connected_num) {
-		list_for_each_entry_safe(device, npos, (struct list_head *)&(intercom_s->device_head), list) {
+		list_for_each_entry_safe(device, npos, &(intercom_s->device_head), list) {
 			if(device->dev_id == dev_id) {
 				list_del(&device->list);
 				INTERCOM_FREE(device);
@@ -879,7 +877,7 @@ static void clear_all_device(INTERCOM_STRUCT *intercom_s)
 	intercom_device *device;
 	intercom_device *npos;
 	if(intercom_s->connected_num) {
-		list_for_each_entry_safe(device, npos, (struct list_head *)&(intercom_s->device_head), list) {
+		list_for_each_entry_safe(device, npos, &(intercom_s->device_head), list) {
 			list_del(&device->list);
 			INTERCOM_FREE(device);
 		}
@@ -896,6 +894,7 @@ static void intercom_recv_task(void *d)
 	uint32_t offset = 0;
 	uint32_t node_num = 0;
 	uint32_t recv_timeout_cnt = 0;
+	uint32_t cur_r_identify_num = 0;
 	struct sockaddr_in remote_trans_addr;
 	socklen_t addrlen = sizeof(struct sockaddr_in);
 #if ONE_TO_MANY
@@ -915,7 +914,9 @@ recv_data_again:
 		if((play_start_flag&BIT(1)) == 0) {
 			continue;
 		}	
-		// clear_disconnect_device(intercom_s);
+#if ONE_TO_MANY
+		clear_disconnect_device(intercom_s);
+#endif
 		if(rlen >= HEAD_RESERVE_BYTE) {
 			offset = 0;
 			while(rlen > offset) {
@@ -927,10 +928,10 @@ recv_data_again:
 				}
 				recv_timeout_cnt = 0;
 				// os_printf("recv:%d\n",*((uint16_t*)(intercom_s->recv_buf + offset + 2)));
-				struct list_head *sublist_l = get_audio_sublist(intercom_s, (struct list_head*)(&intercom_s->checkList_head));
+				struct list_head *sublist_l = get_audio_sublist(intercom_s);
 				if(!sublist_l)
 					goto recv_data_again;
-				sublist *sublist_n = list_entry((struct list_head *)sublist_l, sublist, list);
+				sublist *sublist_n = list_entry(sublist_l, sublist, list);
 				os_memcpy(&(sublist_n->seq), intercom_s->recv_buf + offset, HEAD_RESERVE_BYTE - 2);
 #if ONE_TO_MANY
 				if(intercom_s->current_dev_id != intercom_s->next_dev_id) {
@@ -945,18 +946,18 @@ recv_data_again:
 					device = find_device(intercom_s, &remote_trans_addr);
 					if(device) {
 						device->online = 1;
-						if((device->identify_num == g_r_identify_num) && (device->identify_num != sublist_n->identify_num)) {
-							g_r_identify_num = sublist_n->identify_num;
+						if((device->identify_num == intercom_s->g_r_identify_num) && (device->identify_num != sublist_n->identify_num)) {
+							intercom_s->g_r_identify_num = sublist_n->identify_num;
 						}
 						device->identify_num = sublist_n->identify_num;
 					}
 				}
 				os_mutex_unlock(&intercom_s->send_mutex);
-				if(cur_r_identify_num != g_r_identify_num) {
+				if(cur_r_identify_num != intercom_s->g_r_identify_num) {
 					os_event_set(&intercom_s->clear_event, clear_useList_event, NULL);
 					os_event_wait(&intercom_s->clear_event, clear_useList_finish_event, 
 								  NULL, OS_EVENT_WMODE_CLEAR|OS_EVENT_WMODE_OR, osWaitForever);	
-					cur_r_identify_num = g_r_identify_num;
+					cur_r_identify_num = intercom_s->g_r_identify_num;
 					os_printf("\n******change intercom identify_num****\n");				
 				}
 				if(cur_r_identify_num != sublist_n->identify_num) {
@@ -975,8 +976,8 @@ recv_data_again:
 					os_event_set(&intercom_s->clear_event, clear_useList_event, NULL);
 					os_event_wait(&intercom_s->clear_event, clear_useList_finish_event, 
 								  NULL, OS_EVENT_WMODE_CLEAR|OS_EVENT_WMODE_OR, osWaitForever);
-					g_r_identify_num = sublist_n->identify_num;
-					cur_r_identify_num = g_r_identify_num;
+					intercom_s->g_r_identify_num = sublist_n->identify_num;
+					cur_r_identify_num = intercom_s->g_r_identify_num;
 					os_printf("\n******change intercom identify_num****\n");
 				}
 #endif
@@ -1006,11 +1007,11 @@ recv_data_again:
 						code_len = 0;
 					}
 #if INTERCOM_HALF_DUPLEX
-					if((send_start_flag == 0) || (g_r_identify_num < g_s_identify_num)) {
-						g_send_enable = 0;
+					if((send_start_flag == 0) || (intercom_s->g_r_identify_num < intercom_s->g_s_identify_num)) {
+						intercom_s->g_send_enable = 0;
 					}
 #endif
-					lose_packet_check(intercom_s);
+					lose_packet_check(intercom_s, sublist_n);
 				}
 				else {
 					sublist_n->node_cnt = 0;
@@ -1052,26 +1053,23 @@ static void intercom_output_framebuf(INTERCOM_STRUCT *intercom_s, uint32_t cache
 	struct framebuff *frame_buf = NULL;
 	struct list_head *sublist_l = NULL;
 	sublist *sublist_n = NULL;	
-	AUDIO_TRACK *audio_track = NULL;
 
-output_framebuf_again:
 	frame_buf = fbpool_get(&intercom_s->tx_pool, 0, intercom_s->msi);
 	if(frame_buf) {
-		g_play_sort = g_current_sort;
 		((AUDECODER_OPERATION*)frame_buf->priv)->decode_operation = 0;
-		if(list_empty((struct list_head*)&intercom_s->useList_head) == 0) {
+		if(list_empty(&intercom_s->useList_head) == 0) {
 			sublist_l = intercom_s->useList_head.next;
-			sublist_n = list_entry((struct list_head*)sublist_l, sublist, list);
+			sublist_n = list_entry(sublist_l, sublist, list);
 			new_sort = sublist_n->sort;
-			// os_printf("dec:%d %d %d\n",cached, g_current_sort, new_sort);
-			if((g_current_sort>new_sort) && ((g_current_sort-new_sort)<60000)) {
+			// os_printf("dec:%d %d %d\n",cached, intercom_s->g_current_sort, new_sort);
+			if((intercom_s->g_current_sort>new_sort) && ((intercom_s->g_current_sort-new_sort)<60000)) {
 				del_audio_sublist(intercom_s, sublist_l);
 			}
-			if((SUBLIST_NUM-cached<4) && (((new_sort>g_current_sort)&&(new_sort-g_current_sort<60000)) || 
-										((g_current_sort>new_sort)&&(g_current_sort-new_sort>=60000)))) {
-				g_current_sort = new_sort;
+			if((SUBLIST_NUM-cached<4) && (((new_sort>intercom_s->g_current_sort)&&(new_sort-intercom_s->g_current_sort<60000)) || 
+										((intercom_s->g_current_sort>new_sort)&&(intercom_s->g_current_sort-new_sort>=60000)))) {
+				intercom_s->g_current_sort = new_sort;
 			} 
-			if(g_current_sort == new_sort) {
+			if(intercom_s->g_current_sort == new_sort) {
 				timestamp = sublist_n->timestamp;
 				last_timestamp = timestamp;
 				code_len = sublist_n->code_len;
@@ -1097,7 +1095,7 @@ output_framebuf_again:
 					msi_delete_fb(intercom_s->msi, frame_buf);
 					del_audio_sublist(intercom_s, sublist_l);	
 					frame_buf = NULL;
-					g_current_sort += 1;
+					intercom_s->g_current_sort += 1;
 					return;
 				}
 				os_memcpy(frame_buf->data, encode_data, sublist_n->code_len);
@@ -1150,25 +1148,28 @@ output_framebuf_again:
 				max_lose_cnt = plc_cnt;			
 		}
 #if CHANGE_PLAY_SPEED
-		if((cached > 0) && (cached <= (play_start_wait - 5))) {
+		if(cached < (intercom_s->play_start_wait - 2)) {
 			if(play_speed_sta != 0) {
 				play_speed = 90;
 				msi_do_cmd(intercom_s->decoder_msi, MSI_CMD_AUCODER, MSI_AUCODER_SET_SPEED, play_speed);
 				play_speed_sta = 0;
+				intercom_s->time_s.time_keep = FRAME_TIME*100/90;
 			}
 		}
-		else if(cached >= (play_start_wait + 5)) {
+		else if(cached > (intercom_s->play_start_wait + 2)) {
 			if(play_speed_sta != 1) {
 				play_speed = 110;
 				msi_do_cmd(intercom_s->decoder_msi, MSI_CMD_AUCODER, MSI_AUCODER_SET_SPEED, play_speed);
 				play_speed_sta = 1;
+				intercom_s->time_s.time_keep = FRAME_TIME*100/110;
 			}
 		}
-		else if((cached == 0) || (cached == play_start_wait)) {
+		else if(cached == intercom_s->play_start_wait) {
 			if(play_speed_sta != 2) {
 				play_speed = 100;
 				msi_do_cmd(intercom_s->decoder_msi, MSI_CMD_AUCODER, MSI_AUCODER_SET_SPEED, play_speed);
 				play_speed_sta = 2;
+				intercom_s->time_s.time_keep = FRAME_TIME;
 			}
 		}	
 		if(play_speed == 90) 
@@ -1179,16 +1180,8 @@ output_framebuf_again:
 		frame_buf->time = timestamp;
 		frame_buf->mtype = F_AUDIO;	
 		output_res = msi_output_fb(intercom_s->msi, frame_buf);
-		// os_printf("out:%d %d\n",g_current_sort,(int32_t)(os_jiffies()-timestamp));
-		msi_cmd("R_AUDAC", MSI_CMD_AUDAC, MSI_AUDAC_GET_FILTER_TRACK, (uint32_t)(&audac_fiter_track));
-		audio_track = intercom_s->decoder_msi->priv;
-		if((audac_fiter_track==audio_track) && (cached>=1) && (cached >= (play_start_wait-2))) {    
-			cached -= 1;
-			g_current_sort += 1;
-			os_sleep_ms(5);
-			goto output_framebuf_again;     
-		}
-		g_current_sort += 1;
+		// os_printf("out:%d %d\n",intercom_s->g_current_sort,(int32_t)(os_jiffies()-timestamp));
+		intercom_s->g_current_sort += 1;
 	}
 	if(os_jiffies()-last_statistical_time > 5000) {
 #if LOSE_STATISTICAL
@@ -1210,24 +1203,41 @@ output_framebuf_again:
 
 static void clear_useList_func(INTERCOM_STRUCT *intercom_s)
 {
-	g_numofcached = get_audio_sublist_count(intercom_s, (struct list_head *)&intercom_s->useList_head);
-	for(uint8_t i=0; i<g_numofcached; i++) {
-		struct list_head *sublist_l = intercom_s->useList_head.next;
-		del_audio_sublist(intercom_s, sublist_l);
+	sublist *sublist_n_pos;
+	sublist *npos;
+	os_mutex_lock(&intercom_s->list_mutex, osWaitForever);
+	list_for_each_entry_safe(sublist_n_pos, npos, &intercom_s->useList_head, list) {
+		del_audio_sublist(intercom_s, &(sublist_n_pos->list));
 	}
-	g_numofcached = 0;
+	os_mutex_unlock(&intercom_s->list_mutex);
+	intercom_s->g_numofcached = 0;
 	play_start_flag &= ~BIT(0);
+}
+
+static void update_useList_func(INTERCOM_STRUCT *intercom_s)
+{
+	sublist *sublist_n_pos;
+	sublist *npos;	
+	os_mutex_lock(&intercom_s->list_mutex, osWaitForever);
+	list_for_each_entry_safe(sublist_n_pos, npos, &intercom_s->checkList_head, list) {
+		insert_into_useList(intercom_s, &(sublist_n_pos->list));
+	}
+	os_mutex_unlock(&intercom_s->list_mutex);
 }
 
 static void intercom_output_task(void *d)
 {
 	uint8_t numofwait = 0;
+	int16_t audac_list_cnt = 0;
 	uint32_t useList_clear = 0;
 	struct list_head *sublist_l = NULL;
 	sublist *sublist_n = NULL;
 	INTERCOM_STRUCT *intercom_s = (INTERCOM_STRUCT*)d;
 	struct os_semaphore *sem = &intercom_s->output_sema;
 	AUDEC_INIT audec_init;
+	AUDIO_TRACK *audio_track = NULL;
+	struct msi *audac_msi = NULL;
+	AUDIO_TRACK *audac_fiter_track = NULL;
 
 	intercom_task_increase(intercom_s);
 
@@ -1243,16 +1253,28 @@ static void intercom_output_task(void *d)
 	audec_init.speed = 100;
 	audec_init.pitch = 100;
 	audec_init.src_msi = intercom_s->msi;
-	intercom_s->decoder_msi = audio_decode_init(AUDIO_DECODER, audio_adc_get_samplerate(AUSYS_AUAD), &audec_init);
+	intercom_s->decoder_msi = audio_decode_init(AUDIO_DECODER, audio_adc_get_samplerate(MAIN_MIC_ID), &audec_init);
 
 	if(!intercom_s->decoder_msi) {
 		os_printf("intercom audio decoder init fail!\n");
 		intercom_task_decrease(intercom_s);
 		return;
 	}
+	intercom_s->time_s.time_keep = FRAME_TIME;
+	intercom_s->time_s.last_time = os_jiffies();
+	intercom_s->time_s.time_diff = 0;
+	audac_msi = msi_find("R_AUDAC", 1);
+	if(audac_msi) {
+		msi_put(audac_msi);
+	}
+
 	while(1) {
-		if(intercom_s->run_state == intercom_stop) 
-			break;	
+		if(intercom_s->run_state == intercom_stop) {
+			if(intercom_s->run_task == 1) {     //需要等到其他线程退出才退出此线程，因为recv线程可能会通知此线程清除缓存，要确保recv线程退出了再退出此线程。
+				break;	
+			}
+		}
+		update_useList_func(intercom_s);
 		os_event_wait(&intercom_s->clear_event, clear_useList_event, &useList_clear, OS_EVENT_WMODE_CLEAR|OS_EVENT_WMODE_OR, 0);
 		if(useList_clear & clear_useList_event) {
 			useList_clear = 0;
@@ -1261,39 +1283,60 @@ static void intercom_output_task(void *d)
 			numofwait = 0;
 			continue;
 		}
-		if(os_sema_down(sem, 5) == 1) {	
-			g_numofcached = get_audio_sublist_count(intercom_s, (struct list_head *)&intercom_s->useList_head);
-			if(g_numofcached == 0) {
-				g_send_enable = 1;
+		if(os_sema_down(sem, osWaitForever) == 1) {	
+			if(os_jiffies()-intercom_s->time_s.last_time >= intercom_s->time_s.time_keep + intercom_s->time_s.time_diff) {
+				intercom_s->time_s.last_time += intercom_s->time_s.time_keep + intercom_s->time_s.time_diff;
+			}
+			else {
+				continue;
+			}
+			intercom_s->g_numofcached = get_audio_sublist_count(intercom_s, &intercom_s->useList_head);
+			if(intercom_s->g_numofcached == 0) {
+				intercom_s->g_send_enable = 1;
 			}
 #if INTERCOM_HALF_DUPLEX
-			if((send_start_flag == 1) && (g_r_identify_num > g_s_identify_num) && (g_numofcached > 0)) {
+			if((send_start_flag == 1) && (intercom_s->g_r_identify_num > intercom_s->g_s_identify_num) && (intercom_s->g_numofcached > 0)) {
 				clear_useList_func(intercom_s);
 				numofwait = 0;
-				g_numofcached = 0;
+				intercom_s->g_numofcached = 0;
 			}
 #endif
-			if(((play_start_flag&BIT(0)) == 0) && ((g_numofcached > play_start_wait) || (numofwait > play_start_wait))) {
+			if(((play_start_flag&BIT(0)) == 0) && ((intercom_s->g_numofcached > intercom_s->play_start_wait) || (numofwait > intercom_s->play_start_wait))) {
 				play_start_flag |= BIT(0);
 				numofwait = 0;
 				sublist_l = intercom_s->useList_head.next;
-				sublist_n = list_entry((struct list_head*)sublist_l, sublist, list);
-				g_current_sort = sublist_n->sort;
+				sublist_n = list_entry(sublist_l, sublist, list);
+				intercom_s->g_current_sort = sublist_n->sort;
 				lose_total = 0;
 				max_lose_cnt = 0;
 				slow_speed_cnt = 0;
 				fast_speed_cnt = 0;
 				os_printf("intercom start\n");			
 			}
-			if( ((play_start_flag&BIT(0)) == 0) && (g_numofcached > 0) ) 
+			if( ((play_start_flag&BIT(0)) == 0) && (intercom_s->g_numofcached > 0) ) 
 				numofwait++;
 			if(play_start_flag&BIT(0)) {
-				intercom_output_framebuf(intercom_s, g_numofcached);
+				intercom_output_framebuf(intercom_s, intercom_s->g_numofcached);
+				msi_cmd("R_AUDAC", MSI_CMD_AUDAC, MSI_AUDAC_GET_FILTER_TRACK, (uint32_t)(&audac_fiter_track));
+				audio_track = intercom_s->decoder_msi->priv;
+				if(audac_fiter_track == audio_track) {    
+					audac_list_cnt = fbq_count(&audac_msi->fbQ);
+					if(audac_list_cnt <= 1) {
+						intercom_s->time_s.time_diff = -1;
+					}
+					else if(audac_list_cnt > 2) {
+						intercom_s->time_s.time_diff = 1;
+					}
+					else {
+						intercom_s->time_s.time_diff = 0;
+					}
+				}
+				else {
+					intercom_s->time_s.time_diff = 0;
+				}
 			}
 		}
 	}
-	audio_code_pause(intercom_s->decoder_msi);
-	audio_code_clear(intercom_s->decoder_msi);
 	intercom_task_decrease(intercom_s);
 }
 
@@ -1392,6 +1435,9 @@ static void intercom_handel_task(void *d)
 		goto intercom_handel_task_err;
 	}
 
+	intercom_s->g_send_enable = 1; 
+	intercom_s->play_start_wait = 5;
+
 	intercom_s->recv_task_hdl = os_task_create("intercom_recv_task", intercom_recv_task, (void*)intercom_s, OS_TASK_PRIORITY_ABOVE_NORMAL-1, 0, NULL, 1024);
 	intercom_s->send_task_hdl = os_task_create("intercom_send_task", intercom_send_task, (void*)intercom_s, OS_TASK_PRIORITY_ABOVE_NORMAL, 0, NULL, 1024);
 	intercom_s->output_task_hdl = os_task_create("intercom_output_task", intercom_output_task, (void*)intercom_s, OS_TASK_PRIORITY_ABOVE_NORMAL, 0, NULL, 1024);
@@ -1400,7 +1446,7 @@ static void intercom_handel_task(void *d)
 		goto intercom_handel_task_err;
 	}
 
-	os_timer_start(&intercom_s->ctl_timer, FRAME_TIME);
+	os_timer_start(&intercom_s->ctl_timer, 2);
 	intercom_task_decrease(intercom_s);
 	return;	
 intercom_handel_task_err:	
@@ -1497,7 +1543,7 @@ struct msi *intercom_init(void)
     }
     intercom_s->msi->priv = intercom_s;
 #if MAGIC_VOICE_EN
-	intercom_s->magic_voice_msi = magic_voice_init(audio_adc_get_samplerate(AUSYS_AUAD), FRAME_TIME*audio_adc_get_samplerate(AUSYS_AUAD)/1000);
+	intercom_s->magic_voice_msi = magic_voice_init(audio_adc_get_samplerate(MAIN_MIC_ID), FRAME_TIME*audio_adc_get_samplerate(MAIN_MIC_ID)/1000);
 	if(intercom_s->magic_voice_msi == NULL) {
         os_printf("intercom create magic voice msi fail\n");
         goto intercom_init_err;   		
@@ -1525,19 +1571,20 @@ void intercom_deinit(void)
 		msi_put(msi);
 		INTERCOM_STRUCT *intercom_s = (INTERCOM_STRUCT*)(msi->priv);
 		intercom_s->run_state = intercom_stop;	
-		while(intercom_s->run_task > 0)
+		while(intercom_task_state(intercom_s) > 0)
 			os_sleep_ms(1);
 		clear_all_device(intercom_s);
-		if(intercom_s->magic_voice_msi) {
-			magic_voice_deinit();
-		}
+//		if(intercom_s->magic_voice_msi) {
+//			magic_voice_deinit();
+//		}
 		if(intercom_s->encoder_msi) {
-			audio_encode_deinit(intercom_s->encoder_msi);		
+			audio_encode_deinit(intercom_s->encoder_msi);	
 		}
 		if(intercom_s->decoder_msi)
 			audio_decode_deinit(intercom_s->decoder_msi);
 		if(intercom_s->ctl_timer.hdl) {
 			os_timer_stop(&intercom_s->ctl_timer);
+			os_sleep_ms(50);
 			os_timer_del(&intercom_s->ctl_timer);
 		}
 		if(intercom_s->output_sema.hdl)
@@ -1553,22 +1600,19 @@ void intercom_deinit(void)
 		intercom_close_socket(intercom_s);
 		intercom_room_free(intercom_s);
 		msi_destroy(intercom_s->msi);
-
-		g_play_sort = 0;
-		g_current_sort = 1;
-		g_numofcached = 0;
-		g_s_identify_num = 0;
-		play_start_flag = 2;
 	}
 }
 
 void intercom_send_enable(uint8_t state)
 {
-	if(state == 1) {
-		g_s_identify_num = 0;
-		os_random_bytes((uint8_t*)(&g_s_identify_num), 4);
-	}		
 	send_start_flag = state;
+	if(global_intercom_msi) {
+		INTERCOM_STRUCT *intercom_s = (INTERCOM_STRUCT*)(global_intercom_msi->priv);
+		if(state == 1) {
+			intercom_s->g_s_identify_num = 0;
+			os_random_bytes((uint8_t*)(&intercom_s->g_s_identify_num), 4);
+		}		
+	}
 }
 
 void intercom_recv_enable(uint8_t state)
@@ -1593,8 +1637,8 @@ void intercom_encode_pause(uint8_t state, uint8_t clear)
 			}
 		}
 		else if(state == 0) {
-			g_s_identify_num = 0;
-			os_random_bytes((uint8_t*)(&g_s_identify_num), 4);
+			intercom_s->g_s_identify_num = 0;
+			os_random_bytes((uint8_t*)(&intercom_s->g_s_identify_num), 4);
 			audio_code_continue(intercom_s->encoder_msi);
 		}		
 	}
@@ -1647,34 +1691,37 @@ void intercom_set_stream_type(uint8_t recv_type, uint8_t send_type)
 
 uint32_t intercom_ctrl_key(struct key_callback_list_s *callback_list,uint32_t keyvalue,uint32_t extern_value)
 {
-	#ifdef SYS_APP_WALKIE_TALKIE
-	if( (keyvalue>>8) != AD_SPEACH)
-		return 0;
-	#else
-	if( (keyvalue>>8) != AD_DOWN)
-		return 0;
-	#endif
+	if(global_intercom_msi) {
+		INTERCOM_STRUCT *intercom_s = (INTERCOM_STRUCT*)(global_intercom_msi->priv);
+#ifdef SYS_APP_WALKIE_TALKIE
+		if( (keyvalue>>8) != AD_SPEACH)
+			return 0;
+#else
+		if( (keyvalue>>8) != AD_DOWN)
+			return 0;
+#endif
 
-	uint32 key_val = (keyvalue & 0xff);
-	if(g_send_enable == 0) {
-		if(send_start_flag == 1) {
-			intercom_encode_pause(1, 1);
-			send_start_flag = 0;
-		}	
-		return 0;	
-	}
-	if((key_val == KEY_EVENT_DOWN) || (key_val == KEY_EVENT_LDOWN) || (key_val == KEY_EVENT_REPEAT)) {
-		if(send_start_flag == 0) {
-			intercom_encode_pause(0, 0);
-			g_s_identify_num = 0;
-			os_random_bytes((uint8_t*)(&g_s_identify_num), 4);
-			send_start_flag = 1;
+		uint32 key_val = (keyvalue & 0xff);
+		if(intercom_s->g_send_enable == 0) {
+			if(send_start_flag == 1) {
+				intercom_encode_pause(1, 1);
+				send_start_flag = 0;
+			}	
+			return 0;	
 		}
-	}
-	else if((key_val == KEY_EVENT_SUP) || (key_val == KEY_EVENT_LUP)) {
-		if(send_start_flag == 1) {
-			intercom_encode_pause(1, 1);
-			send_start_flag = 0;
+		if((key_val == KEY_EVENT_DOWN) || (key_val == KEY_EVENT_LDOWN) || (key_val == KEY_EVENT_REPEAT)) {
+			if(send_start_flag == 0) {
+				intercom_encode_pause(0, 0);
+				intercom_s->g_s_identify_num = 0;
+				os_random_bytes((uint8_t*)(&intercom_s->g_s_identify_num), 4);
+				send_start_flag = 1;
+			}
+		}
+		else if((key_val == KEY_EVENT_SUP) || (key_val == KEY_EVENT_LUP)) {
+			if(send_start_flag == 1) {
+				intercom_encode_pause(1, 1);
+				send_start_flag = 0;
+			}
 		}
 	}
 	return 0;

@@ -34,7 +34,11 @@ struct scale2_yuv_arg_s
 struct  scale2_msg_t scale2_msg[3] = {
 	//ISP_VIDEO_0
 	{
-		.stype = FSTYPE_YUV_P1,
+#ifdef SYS_APP_BBM_LCD
+		.stype = FSTYPE_YUV_P0,
+#else
+        .stype = FSTYPE_YUV_P1,
+#endif
 		.iw = 640,
 		.ih = 480,
 		.ow = 320,
@@ -46,7 +50,11 @@ struct  scale2_msg_t scale2_msg[3] = {
 	},
 	//ISP_VIDEO_1
 	{
-		.stype = FSTYPE_YUV_P0,
+#ifdef SYS_APP_BBM_LCD
+		.stype = FSTYPE_YUV_P1,
+#else 
+        .stype = FSTYPE_YUV_P0,
+#endif
 		.iw = 640,
 		.ih = 480,
 		.ow = 320,
@@ -158,7 +166,8 @@ static int32 scale2_stream_work(struct os_work *work)
     if (scale2->filter_type != ~0 && scale2->filter_type != fb->srcID) {
         msi_delete_fb(scale2->msi, fb);
     } else {
-    msi_output_fb(scale2->msi, fb);
+   		msi_output_fb(scale2->msi, fb);
+   		// msi_delete_fb(scale2->msi, fb);
     }
 
 scale2_stream_work_end:
@@ -166,6 +175,24 @@ scale2_stream_work_end:
     // 由于workqueue没有支持等待信号量,只能通过1ms轮询一下
     os_run_work_delay(work, 1);
     return 0;
+}
+
+void scale2_recfg_lock(uint8_t lock)
+{
+	struct msi *scaler_msi = msi_find("scale2",0);
+    if(scaler_msi) {
+        msi_put(scaler_msi);
+    }
+    else {
+        return;
+    }
+	struct scale2_msi_s *scale2 = (struct scale2_msi_s *)scaler_msi->priv;
+    if(lock == 1) {
+        os_mutex_lock(&scale2->mutex, osWaitForever);
+    }
+    else {
+        os_mutex_unlock(&scale2->mutex);
+    }
 }
 
 static int32_t scale2_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t param1, uint32_t param2)
@@ -243,7 +270,7 @@ static int32_t scale2_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t para
             }
 
             os_msgq_del(&scale2->msgq);
-			
+			os_mutex_del(&scale2->mutex);
 			
         }
         break;
@@ -301,14 +328,21 @@ static int32_t scale2_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t para
 					scale_set_start_addr(scale2->scale_dev,scale2->sx,scale2->sy);
 					
 					if(scaler2buf == NULL){
+#ifdef SYS_APP_BBM_LCD
+						scaler2buf = STREAM_LIBC_MALLOC(0x20+scale2_p1_w+60*SCALE2_SRAMBUF_WLEN*4+256 + 0x12+scale2_p1_w/2+33*SCALE2_SRAMBUF_WLEN*2+128+0x12+scale2_p1_w/2+33*SCALE2_SRAMBUF_WLEN*2+128+12);
+						memset(scaler2buf,0x55,0x20+scale2_p1_w+60*SCALE2_SRAMBUF_WLEN*4+256 + 0x12+scale2_p1_w/2+33*SCALE2_SRAMBUF_WLEN*2+128+0x12+scale2_p1_w/2+33*SCALE2_SRAMBUF_WLEN*2+128+12);
+#else
+#ifndef SYS_APP_WALKIE_TALKIE
 						if(scale2->ow <= scale2->iw){
 							scaler2buf = STREAM_LIBC_MALLOC(0x20+scale2_p1_w+20*SCALE2_SRAMBUF_WLEN*4+256 + 0x12+scale2_p1_w/2+11*SCALE2_SRAMBUF_WLEN*2+128+0x12+scale2_p1_w/2+11*SCALE2_SRAMBUF_WLEN*2+128+12);
 							memset(scaler2buf,0x55,0x20+scale2_p1_w+20*SCALE2_SRAMBUF_WLEN*4+256 + 0x12+scale2_p1_w/2+11*SCALE2_SRAMBUF_WLEN*2+128+0x12+scale2_p1_w/2+11*SCALE2_SRAMBUF_WLEN*2+128+12);
-						}else{
-							scaler2buf = STREAM_LIBC_MALLOC(0x20+scale2_p1_w+40*SCALE2_SRAMBUF_WLEN*4+256 + 0x12+scale2_p1_w/2+22*SCALE2_SRAMBUF_WLEN*2+128+0x12+scale2_p1_w/2+22*SCALE2_SRAMBUF_WLEN*2+128+12);
+						}else
+#endif
+						{
+							scaler2buf = STREAM_LIBC_MALLOC(0x20+scale2_p1_w+42*SCALE2_SRAMBUF_WLEN*4+256 + 0x12+scale2_p1_w/2+26*SCALE2_SRAMBUF_WLEN*2+128+0x12+scale2_p1_w/2+26*SCALE2_SRAMBUF_WLEN*2+128+12);						
 							memset(scaler2buf,0x55,0x20+scale2_p1_w+42*SCALE2_SRAMBUF_WLEN*4+256 + 0x12+scale2_p1_w/2+22*SCALE2_SRAMBUF_WLEN*2+128+0x12+scale2_p1_w/2+22*SCALE2_SRAMBUF_WLEN*2+128+12);
 						}
-						
+#endif
 						if(scaler2buf == NULL){
 							os_printf("malloc scaler2 fail.......\r\n");
 							return RET_ERR;
@@ -318,14 +352,21 @@ static int32_t scale2_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t para
 						
 						scale2->scaler2buf = scaler2buf;
 						yinaddr = scaler2buf;
+#ifdef SYS_APP_BBM_LCD
+						uinaddr = yinaddr+((0x20+scale2_p1_w+60*SCALE2_SRAMBUF_WLEN*4+256 + 3)/4)*4;
+						vinaddr = uinaddr+((0x12+scale2_p1_w/2+33*SCALE2_SRAMBUF_WLEN*2+128 + 3)/4)*4;	
+#else
+#ifndef SYS_APP_WALKIE_TALKIE
 						if(scale2->ow <= scale2->iw){
 							uinaddr = yinaddr+((0x20+scale2_p1_w+20*SCALE2_SRAMBUF_WLEN*4+256 + 3)/4)*4;
 							vinaddr = uinaddr+((0x12+scale2_p1_w/2+11*SCALE2_SRAMBUF_WLEN*2+128 + 3)/4)*4;
-						}else{
-							uinaddr = yinaddr+((0x20+scale2_p1_w+40*SCALE2_SRAMBUF_WLEN*4+256 + 3)/4)*4;
-							vinaddr = uinaddr+((0x12+scale2_p1_w/2+22*SCALE2_SRAMBUF_WLEN*2+128 + 3)/4)*4;
+						}else
+#endif
+						{
+							uinaddr = yinaddr+((0x20+scale2_p1_w+42*SCALE2_SRAMBUF_WLEN*4+256 + 3)/4)*4;
+							vinaddr = uinaddr+((0x12+scale2_p1_w/2+26*SCALE2_SRAMBUF_WLEN*2+128 + 3)/4)*4;
 						}
-						
+#endif					
 						scale_linebuf_yuv_addr(scale2->scale_dev,(uint32)yinaddr,(uint32)uinaddr,(uint32)vinaddr);
 					}
 
@@ -464,6 +505,7 @@ struct msi *scale2_msi(const char *name, uint16_t iw, uint16_t ih, uint16_t ow, 
         //msi_do_cmd(msi, MSI_CMD_SCALE2, MSI_SCALE2_START, 0);
 
         os_msgq_init(&scale2->msgq, MAX_SCALE2_TX);
+        os_mutex_init(&scale2->mutex);
 
         OS_WORK_INIT(&scale2->work, scale2_stream_work, 0);
         os_run_work_delay(&scale2->work, 1);		
@@ -480,6 +522,7 @@ int scale2_cfg_run(uint8_t streamfrom,uint8_t id){
 	struct scale2_msi_s *scale2 = (struct scale2_msi_s *)scaler_msi->priv;
 	uint32 ie;
 	int ret = 0;
+    uint32_t th;
     static uint32 last_cfg_time = 0;
 
 	if(scaler_msi) {
@@ -537,8 +580,25 @@ scale2_cfg_run_continue:
 	h_start = oh_n*larger/10;
 	scale2->stw = w_start;
 	scale2->sth = h_start;	
-	scale2->sx  = (w_start - ow_n)/2;
-	scale2->sy	= (h_start - oh_n)/2;	
+	scale2->sx  = (((w_start - ow_n)/2)*scale2->iw)/scale2->stw;
+	scale2->sy	= (((h_start - oh_n)/2)*scale2->ih)/scale2->sth;	
+    th = (scale2->oh*((256*scale2->ih)/scale2->sth))/256;
+    if((th+scale2->sy)%16 == 7)
+    {
+        scale2->sy = scale2->sy>=2?scale2->sy -2:scale2->sy;
+    }
+    else if((th+scale2->sy)%16 == 8)
+    {
+        scale2->sy = scale2->sy>=3?scale2->sy -3:scale2->sy;
+    }
+    else if((th+scale2->sy)%16 == 9)
+    {
+        scale2->sy = scale2->sy>=4?scale2->sy -4:scale2->sy;
+    }
+    else if((th+scale2->sy)%16 == 10)
+    {
+        scale2->sy = scale2->sy>=5?scale2->sy -5:scale2->sy;
+    }
 #endif	
 	enable_irq(ie);
 	

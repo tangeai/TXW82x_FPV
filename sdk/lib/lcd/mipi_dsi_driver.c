@@ -398,7 +398,9 @@ void mipi_dsi_io_remap(uint8_t *cfgbuf){
 
 
 #define DSI_CLK_SELECT  DSI_MODULE_CLK_480M
-void mipi_dsi_init(uint32 w,uint32 h,uint32 dclk,uint8 vsa,uint8 vbp,uint8 vfp,uint8 hsa,uint8 hbp,uint8 hfp,uint8 lanenum,uint8 colortype){
+
+static void mipi_dsi_init_common(uint32 w, uint32 h, uint32 dclk, uint8 vsa, uint8 vbp, uint8 vfp, uint8 hsa, uint8 hbp, uint8 hfp, uint8 lanenum, uint8 colortype, uint8 *panel_init_table)
+{
 	uint8_t itk = 0;
 	uint8_t cfgbuf[10];
 	//uint8_t idbuf[10];
@@ -484,7 +486,10 @@ void mipi_dsi_init(uint32 w,uint32 h,uint32 dclk,uint8 vsa,uint8 vbp,uint8 vfp,u
 	//mipi_read_id(dsi_dev,0x0,0x0a,idbuf,4);
 	//_os_printf("id:%08x\r\n",idbuf[0]);
 	
-	lcd_mipi_table_init(dsi_dev,GENERIC_VC_ID,(uint8_t*)lcdstruct.init_table);
+	if (panel_init_table)
+	{
+		lcd_mipi_table_init(dsi_dev,GENERIC_VC_ID,panel_init_table);
+	}
 	mipi_dsi_wait_pkt_fifo_full(dsi_dev);
 	mipi_dsi_cmd_pkt_fifo_empty(dsi_dev);
 
@@ -504,5 +509,15 @@ void mipi_dsi_init(uint32 w,uint32 h,uint32 dclk,uint8 vsa,uint8 vbp,uint8 vfp,u
 	mipi_dsi_select_mode(dsi_dev,0);
 	os_free(generic_fifo_mipi);
 
+}
+
+void mipi_dsi_init(uint32 w, uint32 h, uint32 dclk, uint8 vsa, uint8 vbp, uint8 vfp, uint8 hsa, uint8 hbp, uint8 hfp, uint8 lanenum, uint8 colortype)
+{
+	mipi_dsi_init_common(w, h, dclk, vsa, vbp, vfp, hsa, hbp, hfp, lanenum, colortype, (uint8_t *)lcdstruct.init_table);
+}
+
+void mipi_dsi_init_no_panel(uint32 w, uint32 h, uint32 dclk, uint8 vsa, uint8 vbp, uint8 vfp, uint8 hsa, uint8 hbp, uint8 hfp, uint8 lanenum, uint8 colortype)
+{
+	mipi_dsi_init_common(w, h, dclk, vsa, vbp, vfp, hsa, hbp, hfp, lanenum, colortype, NULL);
 }
 

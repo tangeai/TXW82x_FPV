@@ -299,6 +299,13 @@ static void hardware_init(uint8_t vcam)
     keyWork_init(10);
 #endif
 
+#if JPG_EN == 1
+    extern int32 jpg_mutex_init();
+    extern void  jpg_mem_init(int num);
+    jpg_mutex_init();
+    jpg_mem_init(32);
+#endif
+
     gen420_hardware_msi_init();
 
 #if SDH_EN && FS_EN
@@ -364,10 +371,10 @@ static void hardware_init(uint8_t vcam)
 #endif
 
 #if AUDIO_EN
-	reg_auproc_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-	reg_wsola_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-	reg_aures_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-    reg_aucoder_alloc(av_malloc, av_zalloc, av_calloc, av_realloc, av_free);
+	reg_auproc_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+	reg_wsola_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+	reg_aures_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+    reg_aucoder_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
     aucode_mutex_init();
     audio_adc_init(AUSYS_AUAD, 8000, 1, 4, 1);
     audio_dac_init();

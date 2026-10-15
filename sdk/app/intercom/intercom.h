@@ -12,13 +12,13 @@
 #include "keyScan.h"
 
 #ifdef PSRAM_HEAP
-#define INTERCOM_MALLOC av_psram_malloc
-#define INTERCOM_ZALLOC av_psram_zalloc
-#define INTERCOM_FREE   av_psram_free
+#define INTERCOM_MALLOC os_malloc_psram
+#define INTERCOM_ZALLOC os_zalloc_psram
+#define INTERCOM_FREE   os_free_psram
 #else
-#define INTERCOM_MALLOC av_malloc
-#define INTERCOM_ZALLOC av_zalloc
-#define INTERCOM_FREE   av_free
+#define INTERCOM_MALLOC os_malloc
+#define INTERCOM_ZALLOC os_zalloc
+#define INTERCOM_FREE   os_free
 #endif
 
 #define ADJUST_BY_LOSS  1
@@ -74,7 +74,22 @@ typedef enum {
     intercom_stop,
 }intercom_state;
 
+typedef struct 
+{
+    uint32 last_time;
+    uint16 time_keep;
+    int16  time_diff;
+}time_synth;
+
 typedef struct {
+    uint16_t g_current_sort;
+    uint16_t g_numofcached;
+    uint32_t g_s_identify_num;
+    uint32_t g_r_identify_num;
+
+    uint8_t g_send_enable; 
+    uint8_t play_start_wait;
+
     uint8_t run_state;
     uint8_t run_task;
     uint8_t recv_stream_type;
@@ -132,6 +147,8 @@ typedef struct {
     struct os_event clear_event;
     struct os_semaphore output_sema;
     struct os_timer ctl_timer;
+
+    time_synth time_s;
 } INTERCOM_STRUCT;
 
 typedef struct {

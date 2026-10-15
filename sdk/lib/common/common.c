@@ -184,28 +184,6 @@ void hw_memcpy(void *dest, const void *src, uint32 size)
     }
 }
 
-void hw_memcpy0(void *dest, const void *src, uint32 size)
-{
-    if (m2mdma && size > 45) {
-#ifdef MEM_TRACE
-#ifdef PSRAM_HEAP
-        void *heap = (IS_PSRAM_ADDR(dest)) ? ((void *)&psram_heap) : ((void *)&sram_heap);
-#else
-        void *heap = (void *)&sram_heap;
-#endif
-        int32 ret = sysheap_of_check(heap, dest, size);
-        if (ret == 0) {
-            os_printf(KERN_WARNING"check addr fail: %x, size:%d \r\n", dest, size);
-        }
-#endif
-        uint64 __t__ = os_useconds();
-        dma_memcpy(m2mdma, dest, src, size);
-        m2mdam_time += os_useconds() - __t__;
-    } else {
-        os_memcpy(dest, src, size);
-    }
-}
-
 void hw_memcpy_no_cache(void *dest, const void *src, uint32 size)
 {
     if (dest && src) {

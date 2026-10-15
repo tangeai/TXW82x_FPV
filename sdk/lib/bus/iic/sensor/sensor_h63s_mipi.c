@@ -409,7 +409,7 @@ const _Sensor_LSC          h63s_lsc_init = {
     .p_lsc_tbl = (uint32 *)h63s_lsc_tbl,
 };
 
-const _Sensor_LHS h63s_lhs_map[] = {
+const _Sensor_LHS h63s_lhs_map[9] = {
     // region defination: lower -> center -> upper(direction: anticlockwise)
     // region_lower, region_center, region_upper, hue adjust value, saturation adjust value
     //   (9 bits)      (9 bits)       (9 bits)          (9 bits)           (8 bits)
@@ -582,23 +582,12 @@ const _Sensor_ISP_Init h63s_isp_init =
 
 SENSOR_OP_SECTION const _Sensor_Adpt_ h63s_cmd= 
 {	
-	.typ = 1, //YUV
 	.pixelw = 1280,
 	.pixelh= 720,
-	.hsyn = 1,
-	.vsyn = 0,
-	.rduline = 0,//
-	.rawwide = 1,//10bit
-	.colrarray = 2,//0:_RGRG_ 1:_GRGR_,2:_BGBG_,3:_GBGB_
 	.init = (uint8 *)H63SInitTable,
-//	.init_len = sizeof(H63SInitTable),
 	.mipi_lane_num = 1,
     .vts_reg = {0x23,0x22},
     .vts_reg_num = 2,
-	.rotate_adapt = {0},
-	//.hvb_adapt = {0x80,0x0a,0x80,0x0a},
-	. mclk = 24000000,
-	.p_fun_adapt = {NULL,NULL,NULL},
     .sensor_isp = (_Sensor_ISP_Init*)&h63s_isp_init,
 };
 

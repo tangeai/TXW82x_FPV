@@ -173,6 +173,7 @@ extern void msi_notify(struct msi *msi, uint32 cmd, uint32 param1, uint32 param2
 //组件执行自己的action（不会向下输出cmd）
 extern int32 msi_do_cmd(struct msi *msi, uint32 cmd, uint32 param1, uint32 param2);
 
+extern int32 msi_recv_fb(struct msi *out, struct framebuff *fb);
 #ifdef __cplusplus
 }
 #endif

@@ -9,7 +9,7 @@
 extern struct msi *jpg_decode_msi(const char *name);
 extern struct msi *jpg_decode_msg_msi(const char *name, uint16_t out_w, uint16_t out_h, uint16_t step_w, uint16_t step_h, uint32_t filter);
 extern struct msi *jpg_thumb_msi_init(const char *msi_name, uint16_t filter, uint8_t thumb_stype);
-extern struct msi *usb_jpg_thumb_msi_init(const char *msi_name, uint8_t filter, uint8_t thumb_stype);
+extern struct msi *usb_jpg_thumb_msi_init(const char *msi_name, const char *src_name, uint8_t filter, uint8_t thumb_stype);
 extern struct msi *usb_thumb_over_dpi_msi_init(const char *msi_name, uint8_t stype, uint32_t magic);
 
 // 过滤类型,因为缩略图的stype一定大于FSYPTE_INVALID
@@ -28,9 +28,8 @@ static uint8_t filter(void *f, uint8_t recv_type)
 
 void usb_takephoto_init(const char *source_msi_name, const char *photo_msi_name, const char *thumb_msi_name)
 {
-    msi_add_output(NULL, source_msi_name, photo_msi_name);
-
-    struct msi *usb_jpg_thumb_msi = usb_jpg_thumb_msi_init(photo_msi_name, FRAMEBUFF_SOURCE_USB, FSTYPE_NORMAL_THUMB_JPG);
+    struct msi *usb_jpg_thumb_msi = usb_jpg_thumb_msi_init(photo_msi_name, source_msi_name, FRAMEBUFF_SOURCE_USB, FSTYPE_NORMAL_THUMB_JPG_USB);
+	// struct msi *usb_jpg_thumb_msi = usb_jpg_thumb_msi_init(photo_msi_name, source_msi_name, FRAMEBUFF_SOURCE_JPG_GEN420, FSTYPE_NORMAL_THUMB_JPG_USB);
     if(thumb_msi_name)
     {
         // 给到缩略图模块去解码后编码小缩略图

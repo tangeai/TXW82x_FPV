@@ -5,6 +5,9 @@
 #endif
 #include "lib/lmac/lmac.h"
 
+#define POWERON_BATTERY_VOLTAGE              (3.2f)
+#define MEDIAN_FILTER_SIZE                   5
+
 struct bat_det_priv {
     struct os_work work;
     struct hgadc_v0 *adc_dev;
@@ -14,9 +17,36 @@ struct bat_det_priv {
     uint8_t level;
     uint8_t get_value;
     uint32_t adc_raw;
+    uint32_t adc_history[MEDIAN_FILTER_SIZE];  // 历史采样环形缓冲区
+    uint8_t  adc_hist_idx;                      // 写入索引
+    uint8_t  adc_hist_cnt;                      // 已填充计数（最大 MEDIAN_FILTER_SIZE）
 };
 
 struct bat_det_priv *g_bat_det_priv_data = NULL;
+
+static uint32_t median_from_history(uint32_t *buf, uint32_t len)
+{
+    uint32_t temp_arr[MEDIAN_FILTER_SIZE];
+    uint32_t temp;
+
+    // 拷贝到临时数组，避免破坏环形缓冲区
+    for (uint32_t i = 0; i < len; i++) {
+        temp_arr[i] = buf[i];
+    }
+
+    // 冒泡排序（数据量小，开销可忽略）
+    for (uint32_t i = 0; i < len - 1; i++) {
+        for (uint32_t j = 0; j < len - 1 - i; j++) {
+            if (temp_arr[j] > temp_arr[j + 1]) {
+                temp = temp_arr[j];
+                temp_arr[j] = temp_arr[j + 1];
+                temp_arr[j + 1] = temp;
+            }
+        }
+    }
+
+    return temp_arr[len / 2];
+}
 
 static int32 bat_detect_work(struct os_work *work)
 {
@@ -30,6 +60,17 @@ static int32 bat_detect_work(struct os_work *work)
 
     adc_get_value((struct adc_device *)bat_det_priv_data->adc_dev, bat_det_priv_data->bat_det_io, &adc_value);
 
+    // 存入环形缓冲区
+    bat_det_priv_data->adc_history[bat_det_priv_data->adc_hist_idx] = adc_value;
+    bat_det_priv_data->adc_hist_idx = (bat_det_priv_data->adc_hist_idx + 1) % MEDIAN_FILTER_SIZE;
+    if (bat_det_priv_data->adc_hist_cnt < MEDIAN_FILTER_SIZE) {
+        bat_det_priv_data->adc_hist_cnt++;
+        // 对历史值做中值滤波
+    }
+
+    adc_value = median_from_history(bat_det_priv_data->adc_history,
+                                    bat_det_priv_data->adc_hist_cnt);
+
     bat_det_priv_data->adc_raw = adc_value;
     bat_det_priv_data->get_value = 1;
 
@@ -41,6 +82,15 @@ static int32 bat_detect_work(struct os_work *work)
     }
 
 	os_printf("---- battery adc:%d vol:%.2fV _update_fme_adc_val:%.2fV adc_val:%d----\n", adc_value, (float)adc_value * 3 / 2048 * 2, (float)bat_det_priv_data->_update_fme_adc_val * 5 / 2048, bat_det_priv_data->_update_fme_adc_val);
+
+    if(bat_det_priv_data->vol < POWERON_BATTERY_VOLTAGE) {
+		os_printf("****Battery voltage too low****!\n");
+        os_sleep_ms(10);
+        gpio_set_mode(MACRO_PIN(LCD_BACKLIGHT_IO), GPIO_PULL_NONE, GPIO_PULL_LEVEL_NONE);   //PA_3
+        gpio_set_dir(MACRO_PIN(LCD_BACKLIGHT_IO), GPIO_DIR_OUTPUT);
+        gpio_set_val(MACRO_PIN(LCD_BACKLIGHT_IO), 0);
+        pmu_vccfls_power_set(0, 0);
+    }
 
     // bat_det_priv_data->vol = 4;
     #if WIFI_FEM_CHIP
@@ -135,3 +185,31 @@ void bat_ad_init()
     OS_WORK_INIT(&bat_det_priv_data->work, bat_detect_work, 0);
     os_run_work_delay(&bat_det_priv_data->work, 1000);
 }
+
+void poweron_check(void)
+{
+    uint32 adc_value = 0;
+    uint32 adc_value_buf[3] = {0};
+    float vol = 0.0f;
+	struct adc_device *adc_dev = (struct adc_device*)dev_get(HG_ADC0_DEVID);
+	uint32 bat_det_io = MACRO_PIN(BAT_ADC_IO);
+    adc_open(adc_dev);
+    gpio_set_mode(bat_det_io, GPIO_PULL_NONE, GPIO_PULL_LEVEL_NONE);
+    adc_add_channel(adc_dev, bat_det_io);
+    adc_get_value(adc_dev, bat_det_io, &adc_value_buf[0]);
+    os_sleep_ms(5);
+    adc_get_value(adc_dev, bat_det_io, &adc_value_buf[1]);
+    os_sleep_ms(5);
+    adc_get_value(adc_dev, bat_det_io, &adc_value_buf[2]);
+	adc_value = (adc_value_buf[0] > adc_value_buf[1]) ?
+                ((adc_value_buf[0] > adc_value_buf[2]) ? adc_value_buf[0] : adc_value_buf[2]) :
+                ((adc_value_buf[1] > adc_value_buf[2]) ? adc_value_buf[1] : adc_value_buf[2]);
+    vol = (float)adc_value * 3 / 2048 * 2;
+    os_printf("poweron_check value:%d, vol:%f\n",adc_value,vol);
+    if(vol < POWERON_BATTERY_VOLTAGE) {
+		os_printf("****Battery voltage too low****!\n");
+		os_sleep_ms(10);
+        pmu_vccfls_power_set(0, 0);
+    }
+    adc_close(adc_dev);
+} 

@@ -73,6 +73,7 @@ struct scale2_msi_s
     struct fbpool tx_pool;
     int mutex_count;
     uint32_t filter_type;
+    struct os_mutex mutex;
 };
 
 
@@ -98,5 +99,5 @@ struct msi *scale3_msi_const_buf(const char *name, uint8_t *buf,uint16_t iw, uin
 void scale3_output_size_local_change(uint8_t id,uint8_t show_only,uint16 x,uint16 y,uint16 w,uint16 h);
 int scale2_cfg_run(uint8_t streamfrom,uint8_t id);
 void scale2_recfg_input_size(uint16_t w,uint16_t h,uint8_t id);
-
+void scale2_recfg_lock(uint8_t lock);
 #endif

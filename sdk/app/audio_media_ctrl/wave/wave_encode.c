@@ -17,6 +17,7 @@ struct wave_encode_struct {
     uint8_t next_status;
     uint8_t current_status;
     uint32_t samplerate;
+    uint32_t channels;
     uint32_t data_size; 
     TYPE_WAVE_HEAD wave_head; 
 };
@@ -28,10 +29,10 @@ const unsigned char wav_header[] = {
     'f', 'm', 't', ' ',      // "fmt" 标志  
     16, 0, 0, 0,             // 过渡字节（不定）  
     0x01, 0x00,              // 格式类别  
-    0x01, 0x00,              // 声道数      
+    0x00, 0x00,              // 声道数      
     0, 0, 0, 0,              // 采样率  
     0, 0, 0, 0,              // 位速  
-    0x01, 0x00,              // 一个采样多声道数据块大小  
+    0x00, 0x00,              // 一个采样多声道数据块大小  
     0x10, 0x00,              // 一个采样占的 bit 数  
     'd', 'a', 't', 'a',      // 数据标记符＂data ＂  
     0, 0, 0, 0               // 语音数据的长度，比文件长度小42一般。这个是计算音频播放时长的关键参数~  
@@ -45,7 +46,6 @@ static void wave_encode_thread(void *d)
     struct framebuff *frame_buf = NULL;
     
     s->msi->enable = 1; 
-    msi_get(s->msi);
 
     while(1)
 	{
@@ -71,8 +71,10 @@ static void wave_encode_thread(void *d)
         if(s->next_status == AUCODEC_EXIT) {
             s->current_status = AUCODEC_EXIT;
             s->wave_head.riff_chunk.ChunkSize = s->data_size + sizeof(TYPE_WAVE_HEAD) - 8;
+            s->wave_head.fmt_chunk.FmtChannels = s->channels;
             s->wave_head.fmt_chunk.SampleRate = s->samplerate;
-            s->wave_head.fmt_chunk.ByteRate = s->samplerate*2;
+            s->wave_head.fmt_chunk.ByteRate = s->samplerate * s->channels * 2;  //2:BitsPerSample / 8
+            s->wave_head.fmt_chunk.BlockAlign = s->channels * 2;
             s->wave_head.data_chunk.DataSize = s->data_size;
 			osal_fseek(s->wave_fp, 0);
 			osal_fwrite(&(s->wave_head), 1, sizeof(TYPE_WAVE_HEAD), s->wave_fp);
@@ -195,7 +197,7 @@ static int32_t wave_encode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t
     return ret;
 }
 
-struct msi *wave_encode_init(char *filename, uint32_t samplerate, AUENC_INIT *auenc_init)
+struct msi *wave_encode_init(char *filename, uint32_t samplerate, uint32_t channels, AUENC_INIT *auenc_init)
 {  
 #if AUDIO_EN
     uint8_t msi_isnew = 0;
@@ -239,6 +241,7 @@ struct msi *wave_encode_init(char *filename, uint32_t samplerate, AUENC_INIT *au
 	wave_encode_s->msi = msi;
     wave_encode_s->src_msi = auenc_init->src_msi;
     wave_encode_s->samplerate = samplerate;
+	wave_encode_s->channels = channels;
     wave_encode_s->destroy_self = auenc_init->destroy_self;
 	wave_encode_s->next_status = AUCODEC_RUN;
     wave_encode_s->current_status = AUCODEC_RUN;
@@ -247,6 +250,7 @@ struct msi *wave_encode_init(char *filename, uint32_t samplerate, AUENC_INIT *au
 		WAVE_INFO("create wave encode task fail!\r\n");
 		goto wave_encode_init_err;
 	}
+    msi_get(msi);
 	return msi;
 
 wave_encode_init_err:

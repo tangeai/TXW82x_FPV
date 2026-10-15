@@ -1,5 +1,6 @@
 #include "basic_include.h"
 #include "lib/audio/audio_proc/audio_proc.h"
+#include "csi_common_tables.h"
 
 AUPROC_STACK *g_auproc_stack = NULL;
 
@@ -193,4 +194,88 @@ int32_t audio_process_deinit(AUPROC_HDL *auproc_hdl)
         g_auproc_stack = NULL;
     }
     return audio_process_close(auproc_hdl);
+}
+
+csi_status csi_rfft_fast_init_f32(csi_rfft_fast_instance_f32 *S, uint16_t fftLen)
+{
+    uint16_t fftLenBy2 = fftLen >> 1;
+
+    S->Sint.fftLen = fftLenBy2;
+    S->fftLenRFFT = fftLen;
+
+    switch (fftLenBy2) {
+		case 16:    /* RFFT 32 */
+			S->Sint.bitRevLength = CSIBITREVINDEXTABLE_16_TABLE_LENGTH;   /* 20 */
+			S->Sint.pBitRevTable = csiBitRevIndexTable16;
+			S->Sint.pTwiddle     = (const float32_t *)twiddleCoef_16;
+			S->pTwiddleRFFT      = twiddleCoef_rfft_32;
+			break;
+
+		case 32:    /* RFFT 64 */
+			S->Sint.bitRevLength = CSIBITREVINDEXTABLE_32_TABLE_LENGTH;   /* 48 */
+			S->Sint.pBitRevTable = csiBitRevIndexTable32;
+			S->Sint.pTwiddle     = (const float32_t *)twiddleCoef_32;
+			S->pTwiddleRFFT      = twiddleCoef_rfft_64;
+			break;
+
+		case 64:    /* RFFT 128 */
+			S->Sint.bitRevLength = CSIBITREVINDEXTABLE_64_TABLE_LENGTH;   /* 56 */
+			S->Sint.pBitRevTable = csiBitRevIndexTable64;
+			S->Sint.pTwiddle     = (const float32_t *)twiddleCoef_64;
+			S->pTwiddleRFFT      = twiddleCoef_rfft_128;
+			break;
+
+		case 128:   /* RFFT 256 */
+			S->Sint.bitRevLength = CSIBITREVINDEXTABLE_128_TABLE_LENGTH;   /* 208 */
+			S->Sint.pBitRevTable = csiBitRevIndexTable128;
+			S->Sint.pTwiddle     = (const float32_t *)twiddleCoef_128;
+			S->pTwiddleRFFT      = twiddleCoef_rfft_256;
+			break;
+
+		case 256:   /* RFFT 512 */
+			S->Sint.bitRevLength = CSIBITREVINDEXTABLE_256_TABLE_LENGTH;   /* 440 */
+			S->Sint.pBitRevTable = csiBitRevIndexTable256;
+			S->Sint.pTwiddle     = (const float32_t *)twiddleCoef_256;
+			S->pTwiddleRFFT      = twiddleCoef_rfft_512;
+			break;
+
+		case 512:   /* RFFT 1024 */
+			S->Sint.bitRevLength = CSIBITREVINDEXTABLE_512_TABLE_LENGTH;   /* 448 */
+			S->Sint.pBitRevTable = csiBitRevIndexTable512;
+			S->Sint.pTwiddle     = (const float32_t *)twiddleCoef_512;
+			S->pTwiddleRFFT      = twiddleCoef_rfft_1024;
+			break;
+			
+#if CSI_RFFT_FAST_F32_MAX_LEN >= 2048
+		case 1024:  /* RFFT 2048 */
+			S->Sint.bitRevLength = CSIBITREVINDEXTABLE_1024_TABLE_LENGTH;   /* 1800 */
+			S->Sint.pBitRevTable = csiBitRevIndexTable1024;
+			S->Sint.pTwiddle     = (const float32_t *)twiddleCoef_1024;
+			S->pTwiddleRFFT      = twiddleCoef_rfft_2048;
+			break;
+#endif
+
+#if CSI_RFFT_FAST_F32_MAX_LEN >= 4096
+		case 2048:  /* RFFT 4096 */
+			S->Sint.bitRevLength = CSIBITREVINDEXTABLE_2048_TABLE_LENGTH;   /* 3808 */
+			S->Sint.pBitRevTable = csiBitRevIndexTable2048;
+			S->Sint.pTwiddle     = (const float32_t *)twiddleCoef_2048;
+			S->pTwiddleRFFT      = twiddleCoef_rfft_4096;
+			break;
+#endif
+
+#if CSI_RFFT_FAST_F32_MAX_LEN >= 8192
+		case 4096:  /* RFFT 8192 */
+			S->Sint.bitRevLength = CSIBITREVINDEXTABLE_4096_TABLE_LENGTH;   /* 4032 */
+			S->Sint.pBitRevTable = csiBitRevIndexTable4096;
+			S->Sint.pTwiddle     = (const float32_t *)twiddleCoef_4096;
+			S->pTwiddleRFFT      = twiddleCoef_rfft_8192;
+			break;
+#endif
+
+		default:
+			return CSI_MATH_ARGUMENT_ERROR;
+    }
+
+    return CSI_MATH_SUCCESS;
 }

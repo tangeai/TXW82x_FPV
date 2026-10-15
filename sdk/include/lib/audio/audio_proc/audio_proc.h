@@ -4,6 +4,10 @@
 #include "typesdef.h"
 #include "osal/string.h"
 
+#ifndef CSI_RFFT_FAST_F32_MAX_LEN
+#define CSI_RFFT_FAST_F32_MAX_LEN 1024
+#endif
+
 #define AUPROC_STACK_SIZE     7168
 
 #define ANF_PROCESSING   0

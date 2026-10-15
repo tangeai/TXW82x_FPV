@@ -244,6 +244,7 @@ struct msi *msi_find(const char *name, uint8 inited)
     if(msi && inited && atomic_read(&msi->inited) == 0){
         msi = NULL;
     }else{
+
         msi_get(msi);
     }
     os_mutex_unlock(&g_MSI.lock);
@@ -347,6 +348,24 @@ int32 msi_output_fb(struct msi *msi, struct framebuff *fb)
     }
 
     fb_put(fb);
+    return ret;
+}
+
+// 这个名字不是接收,实际是发送(out接收fb的意思,为了版本名称统一,这里新增加也统一这个名称)
+// 这个只是发送到特定msi,但不会主动删除fb
+int32 msi_recv_fb(struct msi *out, struct framebuff *fb)
+{
+    int ret = RET_ERR;
+    if(!out || !out->enable || !fb)
+    {
+        return RET_ERR;
+    }
+    if(msi_do_cmd(out, MSI_CMD_TRANS_FB, (uint32)fb, 0) == RET_OK){
+        if(out->fbQ.init && fbq_enqueue(&out->fbQ, fb)){
+            msi_do_cmd(out, MSI_CMD_TRANS_FB_END, (uint32)fb, 0);
+            return RET_OK;
+        }
+    }
     return ret;
 }
 

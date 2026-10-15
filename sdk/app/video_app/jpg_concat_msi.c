@@ -145,8 +145,9 @@ int32_t jpg_concat_msg_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t par
                             {
                                 msi_do_cmd(jpg_concat_msg->jpg_msi, MSI_CMD_HARDWARE_JPEG, MSI_JPEG_SET_SCALE1_FLAG, 1);
                             }
-                            //是否转发取决于启动参数
-                            jpg_concat_msg->force_node = (arg&0x02)?1:0;
+                            // 是否转发取决于启动参数
+                            jpg_concat_msg->force_node = (arg & 0x02) ? 1 : 0;
+                            msi_do_cmd(jpg_concat_msg->jpg_msi, MSI_CMD_HARDWARE_JPEG, MSI_JPEG_SET_OUTPUT_MSI, (uint32_t) jpg_concat_msg->output_msi);
                             msi_do_cmd(jpg_concat_msg->jpg_msi, MSI_CMD_HARDWARE_JPEG, MSI_JPEG_HARDWARE_START, 0);
                         }
                         else
@@ -165,7 +166,6 @@ int32_t jpg_concat_msg_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t par
                                 jpg_concat_msg->scale1_flag = 0;
                             }
                             msi_do_cmd(jpg_concat_msg->jpg_msi, MSI_CMD_HARDWARE_JPEG, MSI_JPEG_HARDWARE_STOP, 0);
-                            
 
                             if (jpg_concat_msg->auto_free)
                             {
@@ -194,6 +194,12 @@ int32_t jpg_concat_msg_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t par
                 case MSI_SET_SCALE1_AUTO_FLAG:
                 {
                     jpg_concat_msg->scale1_flag = arg;
+                }
+                break;
+
+                case MSI_SET_OUTPUT_MSI:
+                {
+                    jpg_concat_msg->output_msi = (struct msi *) arg;
                 }
                 break;
                 case MSI_SET_SCALE1_TYPE:
@@ -266,7 +272,15 @@ int32_t jpg_concat_msg_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t par
                         struct framebuff *send_fb = fb_clone(fb, fb->mtype << 8 | fb->stype, msi);
                         send_fb->len              = jpg_priv->jpg_len;
                         send_fb->data             = NULL;
-                        msi_output_fb(msi, send_fb);
+                        // 如果是gen420编码的,则是克隆后直接发到output_msi中
+                        if ((send_fb->srcID == FRAMEBUFF_SOURCE_JPG_GEN420 || send_fb->srcID == FRAMEBUFF_SOURCE_JPG_SCALER) && jpg_priv->output_msi)
+                        {
+                            msi_output_fb(jpg_priv->output_msi, send_fb);
+                        }
+                        else
+                        {
+                            msi_output_fb(jpg_concat_msg->msi, send_fb);
+                        }
                         ret = RET_OK + 1;
                     }
                 }
@@ -382,12 +396,20 @@ static int32 jpg_concat_msi_work(struct os_work *work)
                     {
                         memcpy(jpg_msg, jpg_priv, sizeof(struct jpg_node_s));
                         send_fb->priv = (void *) jpg_msg;
-                        msi_output_fb(jpg_concat_msg->msi, send_fb);
+                        // 如果是gen420编码的,则是克隆后直接发到output_msi中
+                        if ((send_fb->srcID == FRAMEBUFF_SOURCE_JPG_GEN420 || send_fb->srcID == FRAMEBUFF_SOURCE_JPG_SCALER) && jpg_msg->output_msi)
+                        {
+                            msi_output_fb(jpg_msg->output_msi, send_fb);
+                        }
+                        else
+                        {
+                            msi_output_fb(jpg_concat_msg->msi, send_fb);
+                        }
                     }
                     // 申请不到内存,则不发送?正常不应该申请不到空间
                     else
                     {
-                        os_printf(KERN_DEBUG"%s:%d malloc jpg_node_s fail\n", __FUNCTION__, __LINE__);
+                        os_printf(KERN_DEBUG "%s:%d malloc jpg_node_s fail\n", __FUNCTION__, __LINE__);
                         msi_delete_fb(jpg_concat_msg->msi, send_fb);
                     }
                 }
@@ -395,7 +417,7 @@ static int32 jpg_concat_msi_work(struct os_work *work)
         }
         else
         {
-            os_printf(KERN_DEBUG"%s:%d find jpg msg fail\n", __FUNCTION__, __LINE__);
+            os_printf(KERN_DEBUG "%s:%d find jpg msg fail\n", __FUNCTION__, __LINE__);
         }
 
         // 将数据拷贝,然后发送出去

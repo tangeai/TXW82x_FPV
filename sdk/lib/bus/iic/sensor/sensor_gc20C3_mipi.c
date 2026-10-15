@@ -454,7 +454,7 @@ const _Sensor_LSC          gc20C3_lsc_init = {
     .p_lsc_tbl = (uint32 *)gc20C3_lsc_tbl,
 };
 
-const _Sensor_LHS gc20C3_lhs_map[] = {
+const _Sensor_LHS gc20C3_lhs_map[9] = {
     // region defination: lower -> center -> upper(direction: anticlockwise)
     // region_lower, region_center, region_upper, hue adjust value, saturation adjust value
     //   (9 bits)      (9 bits)       (9 bits)          (9 bits)           (8 bits)
@@ -657,23 +657,12 @@ const _Sensor_ISP_Init gc20C3_isp_init =
 
 SENSOR_OP_SECTION const _Sensor_Adpt_ gc20C3_cmd = 
 {
-	.typ = 1, //YUV
 	.pixelw = 1920,
 	.pixelh= 1080,
-	.hsyn = 1,
-	.vsyn = 1,
-	.rduline = 0,//
-	.rawwide = 1,//10bit
-	.colrarray = 0,//0:_RGRG_ 1:_GRGR_,2:_BGBG_,3:_GBGB_
 	.init = (uint8 *)GC20C3InitTable,
-    .init_len = sizeof(GC20C3InitTable),
     .mipi_lane_num = 2,
     .vts_reg = {0x0340,0x0341},
     .vts_reg_num = 2,
-	.rotate_adapt = {0},
-	//.hvb_adapt = {0x6a,0x12,0x6a,0x12},
-	. mclk = 24000000,
-	.p_fun_adapt = {NULL,NULL,NULL},
     .sensor_isp = (_Sensor_ISP_Init *)&gc20C3_isp_init,
 };
 

@@ -188,6 +188,26 @@ int32 sys_get_gpio_omap(const char *cmd, char *argv[], uint32 argc)
     return ATCMD_RESULT_OK;
 }
 
+int32 sys_vcam2_conflict_detect(const char *cmd, char *argv[], uint32 argc)
+{
+    uint32_t *gpioc = (uint32_t *)0x400e0200;
+    uint8_t packid;
+    sysctrl_efuse_config_and_read(125, &packid, 1);
+    uint32_t is_vcam2_en = pmu_is_vcam2_ldo_en();
+    uint32_t is_pc8_en = 
+        (((gpioc[5] & 3) ? 1 : 0)  ||               //PULL UP?
+         ((gpioc[7] & 3) ? 1 : 0)  ||               //PULL DONW?
+         (((gpioc[0] & (3 << 16)) == (1<<16) || (gpioc[0] & (3 << 16)) == (2<<16)) ? 1 : 0)) ? 1 : 0;  //output? alternate func?
+    os_printf("packid=%d, vcam2_en=%d, pc8_en=%d\r\n", packid, is_vcam2_en, is_pc8_en);
+    if (is_vcam2_en && is_pc8_en) {
+        os_printf("In genernal, vcam2 and pc8 conflict, please check your code\r\n");
+    } else {
+        os_printf("vcam2 and pc8 no conflict\r\n");
+    }
+    return 0;
+}
+
+
 int32 sys_atcmd_watchdog(const char *cmd, char *argv[], uint32 argc)
 {
     if (argc == 1) {

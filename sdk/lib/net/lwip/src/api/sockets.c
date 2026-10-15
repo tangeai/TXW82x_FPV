@@ -71,6 +71,13 @@
 #include LWIP_HOOK_FILENAME
 #endif
 
+/* errno=12 排查: 文件级 forward declare, 避免函数内重复 extern 各自创建
+ * block-scope struct tag 导致 "conflicting types for 'psram_heap'". */
+struct sys_psramheap;
+struct sys_heap;
+extern struct sys_psramheap psram_heap;
+extern unsigned int _sysheap_freesize(struct sys_heap *heap);
+
 /* If the netconn API is not required publicly, then we include the necessary
    files here to get the implementation */
 #if !LWIP_NETCONN
@@ -845,7 +852,8 @@ lwip_close(int s)
     err = netconn_prepare_delete(sock->conn);
     if (err != ERR_OK) {
         set_errno(err_to_errno(err));
-        done_socket(sock);
+//        done_socket(sock);
+        free_socket(sock, is_tcp);
         return -1;
     }
 
@@ -1594,6 +1602,8 @@ lwip_sendmsg(int s, const struct msghdr *msg, int flags)
         }
 #endif /* LWIP_NETIF_TX_SINGLE_PBUF */
 
+        /* errno=12 排查: 区分 pbuf_alloc 失败 vs netconn_send 失败 */
+        err_t err_step1 = err;
         if (err == ERR_OK) {
 #if LWIP_IPV4 && LWIP_IPV6
             /* Dual-stack: Unmap IPv4 mapped IPv6 addresses */
@@ -1609,6 +1619,19 @@ lwip_sendmsg(int s, const struct msghdr *msg, int flags)
 
         /* deallocated the buffer */
         netbuf_free(&chain_buf);
+
+        /* errno=12 现场诊断: 节流 500ms, 区分 pbuf_alloc / netconn_send + PSRAM free */
+        if (err != ERR_OK) {
+            extern int printf(const char *fmt, ...);
+            static u32_t s_last_diag_ms = 0;
+            u32_t now = sys_now();
+            if ((u32_t)(now - s_last_diag_ms) >= 500) {
+                s_last_diag_ms = now;
+                printf("[sendmsg-fail] step1(pbuf_alloc)=%d step2(netconn_send)=%d size=%d iov=%d psram_free=%u\r\n",
+                       (int)err_step1, (int)err, (int)size, (int)msg->msg_iovlen,
+                       (unsigned)_sysheap_freesize((struct sys_heap *)&psram_heap));
+            }
+        }
 
         set_errno(err_to_errno(err));
         done_socket(sock);
@@ -1705,6 +1728,8 @@ lwip_sendto(int s, const void *data, size_t size, int flags,
 #else /* LWIP_NETIF_TX_SINGLE_PBUF */
     err = netbuf_ref(&buf, data, short_size);
 #endif /* LWIP_NETIF_TX_SINGLE_PBUF */
+    /* errno=12 排查: 区分 netbuf_ref 失败 vs netconn_send 失败 */
+    err_t err_step1 = err;
     if (err == ERR_OK) {
 #if LWIP_IPV4 && LWIP_IPV6
         /* Dual-stack: Unmap IPv4 mapped IPv6 addresses */
@@ -1720,6 +1745,21 @@ lwip_sendto(int s, const void *data, size_t size, int flags,
 
     /* deallocated the buffer */
     netbuf_free(&buf);
+
+    /* errno=12 现场诊断: 节流, 每 500ms 一次, 区分两阶段 + 打 PSRAM free.
+     * sys_now() 是 lwip 自带, 返回 u32_t 毫秒, 不依赖 sdk osal.
+     * psram_heap / _sysheap_freesize 在文件顶部 extern. */
+    if (err != ERR_OK) {
+        extern int printf(const char *fmt, ...);
+        static u32_t s_last_diag_ms = 0;
+        u32_t now = sys_now();
+        if ((u32_t)(now - s_last_diag_ms) >= 500) {
+            s_last_diag_ms = now;
+            printf("[sendto-fail] step1(netbuf_ref)=%d step2(netconn_send)=%d size=%u psram_free=%u\r\n",
+                   (int)err_step1, (int)err, (unsigned)short_size,
+                   (unsigned)_sysheap_freesize((struct sys_heap *)&psram_heap));
+        }
+    }
 
     set_errno(err_to_errno(err));
     done_socket(sock);

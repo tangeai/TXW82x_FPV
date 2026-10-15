@@ -25,7 +25,9 @@
 #include "tx_platform.h"
 #include "dev/csi/hgdvp.h"
 
-#define UDISK_MAX_COUNT        8
+#define UDISK_OTA_DEMO         0
+
+#define UDISK_MAX_COUNT        2
 #define UDISK_CACHE_SIZE       (512)
 #define UDISK_SRAM_XFER_SIZE   (4096)
 #define UDISK_SRAM_XFER_SECTORS (UDISK_SRAM_XFER_SIZE / SECTOR_SIZE)
@@ -33,18 +35,7 @@
 static rt_uint8_t _udisk_idset = 0;
 static rt_uint8_t udisk_ota = 0;
 
-struct udisk_device
-{
-    rt_uint32_t count;
-    rt_uint32_t sector_size;
-    rt_uint8_t *rx_buff;
-    rt_uint8_t *tx_buff;
-    struct ustor_data* user_data;
-    struct uhintf* intf;
-};
-
-FATFS *udisk_fs = NULL;
-static struct udisk_device usb_disk;
+FATFS *udisk_fs[UDISK_MAX_COUNT] = {NULL};
 
 static int udisk_get_id(void)
 {
@@ -176,7 +167,7 @@ static DSTATUS rt_udisk_init(void *dev)
     struct udisk_device *disk = (struct udisk_device *)dev;
     if(!disk)
     {
-        os_printf("disk is null!!!\n");
+        rt_kprintf("disk is null!!!\n");
         return RES_ERROR;
     }
 
@@ -388,7 +379,7 @@ if(!udisk_ota){
     void *fp = osal_fopen("USB:/UPDATE.BIN","r");
     if(!fp)
     {
-        os_printf("udisk ota file not open\n");
+        rt_kprintf("udisk ota file not open\n");
         goto __udisk_ota_end;
     }
     rt_uint32_t filesize = osal_fsize(fp);
@@ -398,10 +389,10 @@ if(!udisk_ota){
     cache_buf = (rt_uint8_t *)os_malloc(UDISK_CACHE_SIZE);
     if(!cache_buf)
     {
-        os_printf("cache_buf malloc failed\n");
+        rt_kprintf("cache_buf malloc failed\n");
         goto __udisk_ota_end;
     }
-    os_printf("filesize:%d cache_buf:%x\n",filesize,cache_buf);
+    rt_kprintf("filesize:%d cache_buf:%x\n",filesize,cache_buf);
 
     while(filesize)
     {
@@ -443,7 +434,7 @@ rt_err_t rt_udisk_run(struct uhintf* intf)
 {
     int i = 0;
     rt_err_t ret;
-    //char dname[8];
+    char dname[8];
     char sname[8];
     rt_align(4) rt_uint8_t max_lun[1 + USB_RX_BUFF_RESERVE_SIZE];
     rt_uint8_t *sector;
@@ -569,18 +560,28 @@ rt_err_t rt_udisk_run(struct uhintf* intf)
 
     int res = 0;
 
-    struct ustor_data* data = rt_malloc(sizeof(struct ustor_data));
+    struct ustor_data* data = rt_zalloc(sizeof(struct ustor_data));
     if (data == RT_NULL)
     {
         rt_kprintf("Allocate partition data buffer failed.");
         rt_free(sector);
         return -RT_ERROR;
     }
+
+    struct udisk_device *udisk = rt_zalloc(sizeof(struct udisk_device));
+    if (udisk == RT_NULL)
+    {
+        rt_kprintf("Allocate udisk failed.");
+        rt_free(data);
+        rt_free(sector);
+        return -RT_ERROR;   
+    }
+
     rt_memset(data, 0, sizeof(struct ustor_data));
     data->intf = intf;
-    // data->udisk_id = udisk_get_id();
-    // os_printf("udisk_id:%d\n",data->udisk_id);
-    // os_snprintf(dname, 6, "ud%d-%d", data->udisk_id, 0);
+    data->udisk_id = udisk_get_id();
+    rt_kprintf("udisk_id:%d\n", data->udisk_id);
+    os_snprintf(dname, 6, "ud%d-%d", data->udisk_id, 0);
     os_snprintf(sname, 8, "sem_ud%d",  0);
 
     /* register sdcard device */
@@ -596,38 +597,51 @@ rt_err_t rt_udisk_run(struct uhintf* intf)
 #endif
     stor->dev[0].user_data = (void*)data;
 
-    usb_disk.count = stor->capicity[0];
-    usb_disk.sector_size = stor->capicity[1];
-    usb_disk.user_data = data;
-    usb_disk.intf = intf;
+    stor->udisk = udisk;
+
+    rt_kprintf("%s %d alloc data:0x%x\n",__FUNCTION__,__LINE__,data);
+    rt_kprintf("%s %d alloc disk:0x%x\n",__FUNCTION__,__LINE__,udisk);
+
+    struct udisk_device *disk = stor->udisk;
+    disk->count = stor->capicity[0];
+    disk->sector_size = stor->capicity[1];
+    disk->user_data = data;
+    disk->intf = intf;
 
 
-    fatfs_register_drive(DEV_USB, &udisk_driver, &usb_disk);
-    if(!udisk_fs)
+    char target[8];
+    os_sprintf(target, "%d:", DEV_USB + data->udisk_id);
+    fatfs_register_drive(DEV_USB + data->udisk_id, &udisk_driver, disk);
+    if(!udisk_fs[data->udisk_id])
     {
-        udisk_fs = (FATFS *)os_malloc(sizeof(FATFS));
+        udisk_fs[data->udisk_id] = (FATFS *)rt_malloc(sizeof(FATFS));
+        rt_kprintf("%s %d id:%d udisk_fs:0x%x\n",__FUNCTION__,__LINE__,data->udisk_id,udisk_fs[data->udisk_id]);
     }
 
-    if(udisk_fs)
+    if(udisk_fs[data->udisk_id])
     {
-        res = f_mount(udisk_fs, "USB:", 1);
+        res = f_mount(udisk_fs[data->udisk_id], target, 1);
         if(res)
         {
-            os_printf("%s mount fatfs err:%d\n",__FUNCTION__,res);
-            return RT_EOK;
+            rt_kprintf("%s mount fatfs err:%d\n",__FUNCTION__,res);
+            rt_free(sector);
+            return -RT_ERROR;
         }
     }
   
+    rt_kprintf("%s %d: target:%s source:%s\n", __FUNCTION__, __LINE__, target, DEV_USB + data->udisk_id);
+
     DIR dir;
     FILINFO f_info;
     rt_uint8_t maxdir = 0;
     FRESULT rets;
-    rets = f_opendir(&dir, "USB:/");
+    rets = f_opendir(&dir, target);
     if (rets != FR_OK) {
         printf("failed open\n");
-        return 1;
+        rt_free(sector);
+        return -RT_ERROR;
     }
-    os_printf("===========USB DIR===========\n");
+    rt_kprintf("===========USB DIR===========\n");
     while (1) {
             rets = f_readdir(&dir, &f_info); 
             if (rets != FR_OK) {
@@ -642,12 +656,12 @@ rt_err_t rt_udisk_run(struct uhintf* intf)
             }
         }
     }
-    os_printf("=============================\n");
-    os_printf("%s %d\n",__FUNCTION__,__LINE__);
+    rt_kprintf("=============================\n");
+    rt_kprintf("%s %d\n",__FUNCTION__,__LINE__);
 
 
 
-#if 0
+#if UDISK_OTA_DEMO
     rt_thread_t thread;
     thread = rt_thread_create("udisk_test",rt_udisk_ota_thread,NULL,4096,OS_TASK_PRIORITY_NORMAL,0);
     if(thread != RT_NULL)
@@ -686,20 +700,40 @@ rt_err_t rt_udisk_stop(struct uhintf* intf)
     {
         struct ustor_device *dev = &stor->dev[i];
         data = (struct ustor_data*)dev->user_data;
-        usb_disk.intf = NULL;
-        udisk_free_sram_xfer_buff(&usb_disk);
-        /* unmount filesystem */
-        f_umount("USB:");
-
-        if(udisk_fs)
-        {
-            os_free(udisk_fs);
-            udisk_fs = NULL;
+        if(data == NULL){
+            continue; 
         }
-        
-        // udisk_free_id(data->udisk_id);
+        struct udisk_device *disk = stor->udisk;
+        if (disk) {
+            disk->intf = NULL;
+        }
 
-        rt_free(data);
+        /* unmount filesystem */
+        char target[8];
+        os_sprintf(target, "%d:", DEV_USB + data->udisk_id);
+        f_umount(target);
+
+        rt_kprintf("%s %d: target:%s source:%d\n", __FUNCTION__, __LINE__, target, data->udisk_id);
+
+        if(udisk_fs[data->udisk_id])
+        {
+            rt_kprintf("%s %d id:%d udisk_fs:0x%x\n",__FUNCTION__,__LINE__,data->udisk_id,udisk_fs[data->udisk_id]);
+            rt_free(udisk_fs[data->udisk_id]);
+            udisk_fs[data->udisk_id] = NULL;
+        }
+
+        udisk_free_sram_xfer_buff(disk);
+        udisk_free_id(data->udisk_id);
+
+        if (disk) {
+            rt_kprintf("%s %d free disk:0x%x\n",__FUNCTION__,__LINE__,disk);
+            rt_free(disk);
+        }
+
+        if (data) {
+            rt_kprintf("%s %d free data:0x%x\n",__FUNCTION__,__LINE__,data);
+            rt_free(data);
+        }
     }
 
     return RT_EOK;

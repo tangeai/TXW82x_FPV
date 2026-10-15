@@ -2,7 +2,6 @@
 
 struct dev_mgr {
     struct dev_obj  *devs;
-    struct dev_hotplug_obj  *hotplug;
     os_mutex_t       mutex;
 };
 
@@ -12,14 +11,17 @@ __init int32 dev_init()
 {
     os_mutex_init(&s_dev_mgr.mutex);
     s_dev_mgr.devs = NULL;
-    s_dev_mgr.hotplug = NULL;
     return RET_OK;
 }
 
 void dev_put(struct dev_obj *dev)
 {
     if (dev && dev->hotplug) {
-        if(atomic_dec_and_test(&dev->ref)){
+        if (atomic_dec_and_test(&dev->ref)) {
+            struct dev_hotplug_info *info = (struct dev_hotplug_info *)dev->info;
+            if (info && info->release) {
+                info->release(info);
+            }
             os_free(dev);
         }
     }
@@ -40,8 +42,9 @@ struct dev_obj *dev_get(uint16 dev_id)
 
     if (dev && dev->hotplug) {
         atomic_inc(&dev->ref);
-        if (atomic_read(&dev->ref) > 32) {
-            //os_printf(KERN_WARNING"Device %d Ref is %d, Maybe device reference exception!!!(%08x)\r\n", dev_id, atomic_read(&dev->ref),__builtin_return_address(0));
+        if (atomic_read(&dev->ref) > 128) {
+            os_printf(KERN_WARNING"Device %d Ref is %d, Maybe device reference exception!!!(lr:%p)\r\n",
+                      dev_id, atomic_read(&dev->ref), RETURN_ADDR());
         }
     }
     os_mutex_unlock(&s_dev_mgr.mutex);
@@ -67,10 +70,6 @@ __init int32 dev_register(uint16 dev_id, struct dev_obj *device)
         return -EINVAL;
     }
 
-    if (atomic_read(&device->ref) == 0) {
-        atomic_set(&device->ref, 1); //未初始化
-    }
-
     dev = dev_get(dev_id);
     if (dev) {
         dev_put(dev);
@@ -85,7 +84,6 @@ __init int32 dev_register(uint16 dev_id, struct dev_obj *device)
     os_mutex_lock(&s_dev_mgr.mutex, osWaitForever);
     device->next = s_dev_mgr.devs;
     s_dev_mgr.devs = device;
-    atomic_inc(&device->ref);
     os_mutex_unlock(&s_dev_mgr.mutex);
     return RET_OK;
 }
@@ -145,7 +143,7 @@ int32 dev_suspend(uint16 type)
     dev = s_dev_mgr.devs;
     while (dev) {
         if (dev->ops && dev->ops->suspend && !dev->suspend) {
-            os_printf("%s: func= %x\r\n", __func__, dev->ops->suspend);
+            //os_printf("%s: func= %x\r\n", __func__, dev->ops->suspend);
             if (dev_suspend_hook(dev, type)) {
                 loop = 0;
                 dev->suspend = 1;
@@ -177,7 +175,7 @@ int32 dev_resume(uint16 type, uint32 wkreason)
     dev = s_dev_mgr.devs;
     while (dev) {
         if (dev->ops && dev->ops->resume && dev->suspend) {
-            os_printf("%s: func= %x\r\n", __func__, dev->ops->resume);
+            //os_printf("%s: func= %x\r\n", __func__, dev->ops->resume);
             if (dev_resume_hook(dev, type, wkreason)) {
                 dev->ops->resume(dev);
                 dev->suspend = 0;
@@ -215,53 +213,60 @@ int32 dev_resume(uint16 type, uint32 wkreason)
 
 #endif
 
-int32 dev_hotplug_in(void *hdl, uint16 dev_id, uint16 dev_type, void *info)
+int32 dev_hotplug_in(uint16 dev_id, uint16 dev_type, struct dev_hotplug_info *info)
 {
-    struct dev_hotplug_obj *dev;
+    struct dev_obj *dev;
 
     os_mutex_lock(&s_dev_mgr.mutex, osWaitForever);
-    dev = s_dev_mgr.hotplug;
+    dev = s_dev_mgr.devs;
     while (dev) {
-        if (dev->hdl == hdl) {
-            break;
+        if (dev->dev_id == dev_id) {
+            os_mutex_unlock(&s_dev_mgr.mutex);
+            os_printf(KERN_ERR"device %d exist!\r\n", dev_id);
+            return -EEXIST;
         }
         dev = dev->next;
     }
 
+    dev = os_zalloc(sizeof(struct dev_obj));
     if (dev) {
+        dev->hotplug  = 1;
         dev->dev_id   = dev_id;
         dev->dev_type = dev_type;
         dev->info     = info;
-    } else {
-        dev = os_zalloc(sizeof(struct dev_hotplug_obj));
-        if (dev) {
-            dev->hdl      = hdl;
-            dev->dev_id   = dev_id;
-            dev->dev_type = dev_type;
-            dev->info     = info;
-            dev->next = s_dev_mgr.hotplug;
-            s_dev_mgr.hotplug = dev;
-        }
+        dev->next     = s_dev_mgr.devs;
+        atomic_set(&dev->ref, 1);
+        s_dev_mgr.devs = dev;
+        SYSEVT_NEW_SYSTEM_EVT(SYSEVT_SYSTEM_PLUGIN, dev_id << 16 | dev_type);
     }
     os_mutex_unlock(&s_dev_mgr.mutex);
     return dev ? RET_OK : -ENOMEM;
 }
 
-int32 dev_hotplug_out(void *hdl)
+int32 dev_hotplug_out(uint16 dev_id)
 {
-    struct dev_hotplug_obj *dev  = NULL;
-    struct dev_hotplug_obj *prev = NULL;
+    struct dev_obj *dev  = NULL;
+    struct dev_obj *prev = NULL;
+    uint16 dev_type;
 
     os_mutex_lock(&s_dev_mgr.mutex, osWaitForever);
-    dev = s_dev_mgr.hotplug;
+    dev = s_dev_mgr.devs;
     while (dev) {
-        if (dev->hdl == hdl) {
+        if (dev->dev_id == dev_id && dev->hotplug) {
             if (prev == NULL) {
-                s_dev_mgr.hotplug = dev->next;
+                s_dev_mgr.devs = dev->next;
             } else {
                 prev->next = dev->next;
             }
-            os_free(dev);
+            dev_type = dev->dev_type;
+            if (atomic_dec_and_test(&dev->ref)) {
+                struct dev_hotplug_info *info = (struct dev_hotplug_info *)dev->info;
+                if (info && info->release) {
+                    info->release(info);
+                }
+                os_free(dev);
+            }
+            SYSEVT_NEW_SYSTEM_EVT(SYSEVT_SYSTEM_PLUGOUT, dev_id << 16 | dev_type);
             break;
         } else {
             prev = dev;
@@ -272,21 +277,27 @@ int32 dev_hotplug_out(void *hdl)
     return RET_OK;
 }
 
-int32 dev_hotplug_walk(uint16 type, dev_hotplug_walkcb cb)
+int32 dev_walk(uint16 type, dev_walkcb cb, void *arg)
 {
-    struct dev_hotplug_obj *dev;
+    struct dev_obj *dev;
 
     if (cb == NULL) {
         return -EINVAL;
     }
 
     os_mutex_lock(&s_dev_mgr.mutex, osWaitForever);
-    dev = s_dev_mgr.hotplug;
+    dev = s_dev_mgr.devs;
     while (dev) {
         if (type == 0 || dev->dev_type == type) {
-            if (cb((const struct dev_hotplug_obj *)dev)) {
-                break;
+            int32 ret = cb((const struct dev_obj *)dev, arg);
+            if (ret == -1 && dev->hotplug) {
+                atomic_inc(&dev->ref);
+                if (atomic_read(&dev->ref) > 128) {
+                    os_printf(KERN_WARNING"Device %d Ref is %d, Maybe device reference exception!!!(lr:%p)\r\n",
+                              dev->dev_id, atomic_read(&dev->ref), RETURN_ADDR());
+                }
             }
+            if (ret == 1) break;
         }
         dev = dev->next;
     }

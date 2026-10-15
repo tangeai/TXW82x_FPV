@@ -64,6 +64,7 @@ int32 tcp_test_atcmd_hdl(const char *cmd, char *argv[], uint32 argc);
 
 int32 sys_get_gpio_imap(const char *cmd, char *argv[], uint32 argc);
 int32 sys_get_gpio_omap(const char *cmd, char *argv[], uint32 argc);
+int32 sys_vcam2_conflict_detect(const char *cmd, char *argv[], uint32 argc);
 
 #ifdef __cplusplus
 }

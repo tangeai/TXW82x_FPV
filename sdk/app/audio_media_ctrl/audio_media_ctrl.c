@@ -3,12 +3,11 @@
 #include "fatfs/osal_file.h"
 #include "audio_media_ctrl.h"
 #include "audio_msi/audio_adc.h"
-#include "lib/heap/av_heap.h"
-#include "lib/heap/av_psram_heap.h"
 #include "aac/aac_code.h"
 #include "amr/amr_decode.h"
 #include "mp3/mp3_decode.h"
 #include "wave/wave_code.h"
+#include "pcm/pcm_decode.h"
 
 #define RECORD_DIR "0:/audio"
 #define MAX(a, b) ((a) > (b) ? a : b)
@@ -93,13 +92,13 @@ static void audio_file_record_thread(void *d)
     AUENC_INIT auenc_init;
 
     auenc_init.destroy_self = 0;
-    auenc_init.src_msi = get_auadc_msi(AUSYS_AUAD);
+    auenc_init.src_msi = get_auadc_msi(MAIN_MIC_ID);
     os_printf("start record file:%s\n",audio_record_s->filename);
     if(audio_record_s->record_format == WAV) {
-        audio_record_s->msi = wave_encode_init(audio_record_s->filename, audio_record_s->sampleRate, &auenc_init);
+        audio_record_s->msi = wave_encode_init(audio_record_s->filename, audio_adc_get_samplerate(MAIN_MIC_ID), audio_adc_get_channels(MAIN_MIC_ID), &auenc_init);
     }
     else if(audio_record_s->record_format == AAC) {
-        audio_record_s->msi = aac_encode_init(audio_record_s->filename, audio_record_s->sampleRate, 1, &auenc_init);
+        audio_record_s->msi = aac_encode_init(audio_record_s->filename, audio_adc_get_samplerate(MAIN_MIC_ID), audio_adc_get_channels(MAIN_MIC_ID), 1, &auenc_init);
     }
     if(audio_record_s->msi == NULL) {
         os_printf("audio encode init err!\r\n");
@@ -123,7 +122,7 @@ static void audio_file_record_thread(void *d)
     }
 audio_record_thread_end:
     msi_do_cmd(audio_record_s->msi, MSI_CMD_AUCODER, MSI_AUCODER_DEINIT, 1);
-    av_free(audio_record_s);
+    os_free_psram(audio_record_s);
     audio_record_s = NULL;  
     os_printf("audio record thread end!\r\n");  
 }
@@ -176,7 +175,7 @@ int32_t audio_file_record_init(char *filename, uint32_t sampleRate, int32_t reco
         return RET_ERR;
     }
     else {
-        audio_record_s = (struct audio_record_struct *)av_zalloc(sizeof(struct audio_record_struct));
+        audio_record_s = (struct audio_record_struct *)os_zalloc_psram(sizeof(struct audio_record_struct));
         if(!audio_record_s) {
             os_printf("malloc audio_record_s fail!\r\n");
             return RET_ERR;
@@ -193,7 +192,7 @@ int32_t audio_file_record_init(char *filename, uint32_t sampleRate, int32_t reco
         }
         else {
             os_printf("Unsupported audio record format!\r\n");
-			av_free(audio_record_s);
+			os_free_psram(audio_record_s);
 			audio_record_s = NULL;
             return RET_ERR;
         }
@@ -243,7 +242,7 @@ int32_t audio_file_play_status(struct msi *msi)
     return ret;
 }
 
-struct msi *audio_file_play_init(char *filename, uint8_t play_mode, AUDEC_INIT *audec_init)
+struct msi *audio_file_play_init(char *filename, uint8_t play_mode, AUDEC_INIT *audec_init, uint32_t samplerate)
 {
     uint8_t *file_extension = NULL;
     uint8_t audio_format = 0;
@@ -259,6 +258,8 @@ struct msi *audio_file_play_init(char *filename, uint8_t play_mode, AUDEC_INIT *
             audio_format = AMR;
         else if((os_strncmp(file_extension, "aac", 3)==0) || (os_strncmp(file_extension, "AAC", 3)==0))
             audio_format = AAC;
+        else if((os_strncmp(file_extension, "pcm", 3)==0) || (os_strncmp(file_extension, "PCM", 3)==0))
+            audio_format = PCM;
         else {
             return NULL;
         }
@@ -272,6 +273,7 @@ struct msi *audio_file_play_init(char *filename, uint8_t play_mode, AUDEC_INIT *
         case MP3:msi = mp3_decode_init(filename, (play_mode==2), audec_init);break;
         case AMR:msi = amr_decode_init(filename, (play_mode==2), audec_init);break;
         case AAC:msi = aac_decode_init(filename, (play_mode==2), audec_init);break;
+        case PCM:msi = pcm_decode_init(samplerate, filename, (play_mode==2), audec_init);break;
         default:break;
     }	
     return msi;

@@ -1,4 +1,5 @@
 #include "sys_config.h"
+#include "lwip/dhcp.h"
 #include "basic_include.h"
 #include "hal/adc.h"
 #include "lib/rpc/cpurpc.h"
@@ -79,7 +80,18 @@ void sys_dhcpd_start()
         param.router     = sys_cfgs.dhcpd_router;
         if (dhcpd_start("w0", &param)) {
             os_printf("dhcpd start error\r\n");
+        }else{
+            os_printf("dhcpd start successful\r\n");
         }
+    }
+}
+
+/* tcpip_thread 上下文执行: 真正启动 dhcp. 非阻塞回调, 不在调用方等待 */
+static void _dhcpc_restart_cb(void *ctx)
+{
+    struct netif *nif = (struct netif *)ctx;
+    if (nif) {
+        dhcp_start(nif);
     }
 }
 
@@ -88,7 +100,18 @@ void sys_dhcpc_check(void)
     static uint8 __loop;
     if (sys_cfgs.dhcpc_en && !sys_status.dhcpc_done) {
         if (__loop++ > 6) {
-            lwip_netif_set_dhcp2("w0", 1);
+//            lwip_netif_set_dhcp2("w0", 1);
+            /* 原 lwip_netif_set_dhcp2 -> netifapi_dhcp_start 是阻塞调用 (投消息给
+             * tcpip_thread 并等返回). 本函数跑在 main_wk 的 sys_main_loop 里,
+             * 而 sys_main_loop 还负责喂狗 —— 配网完成后探鸽建大量 socket, tcpip_thread
+             * 繁忙时阻塞调用会卡住 main_wk, sys_main_loop 不返回 -> 停止喂狗 -> 看门狗
+             * 复位 (BLE 配网时稳定复现). 改用 tcpip_try_callback 异步投递 dhcp_start,
+             * 立即返回不阻塞, mbox 满也直接返回, 永不卡住 main_wk。 */
+            struct netif *nif = netif_find("w0");
+            if (nif) {
+                tcpip_try_callback(_dhcpc_restart_cb, nif);
+            }
+
             __loop = 0;
         }
     }

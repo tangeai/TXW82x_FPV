@@ -47,12 +47,7 @@
 #include "loop_record_moudle/loop_record_moudle.h"
 #include "sysevt_usb/sysevt_usb.h"
 #include "takephoto_module/takephoto.h"
-
-
-#ifndef RECORDER_MODE
-    #define RECORDER_MODE 0
-#endif
-
+#include "lib/heap/av_psram_heap.h"
 
 struct msi *mp4_encode_msi2_init(const char *mp4_msi_name, uint8_t srcID, uint8_t filter_type, uint8_t rec_time, 
                                  uint32_t audio_encode, struct file_process *file_process, uint8_t mode);
@@ -67,12 +62,6 @@ uint8_t get_mipi2_video_status(void);
 uint8_t get_usb_video_status(void);
 void rec_lock_file(char *file_name, char *file_path);
 static void itemcfg_handle(void);
-
-#if RECORDER_MODE == 0
-//由于发现,录风者似乎不支持动态修改传输方式udp和tcp
-//切换完毕后,需要返回app,再出图才可以切换方式
-//如果传输方式不变,是可以动态切换的
-#endif
 
 //需要与items_list中设置分辨的一致才行
 static const int http_dpi[][2] = {
@@ -102,9 +91,9 @@ static const int http_dpi[][2] = {
 #endif
 
 // data申请空间函数
-#define STREAM_MALLOC av_psram_malloc
-#define STREAM_FREE   av_psram_free
-#define STREAM_ZALLOC av_psram_zalloc
+#define STREAM_MALLOC os_malloc_psram
+#define STREAM_FREE   os_free_psram
+#define STREAM_ZALLOC os_zalloc_psram
 
 // 消息推送端口
 #define PUSH_MESSAGE_PORT       60000
@@ -994,8 +983,9 @@ void open_audio(void)
                 if(!aac_init)
                 {
                     auenc_init.destroy_self = 0;
-                    auenc_init.src_msi = get_auadc_msi(AUSYS_AUAD);
-                    aac_msi = audio_encode_init(AAC_ENC, audio_adc_get_samplerate(AUSYS_AUAD), &auenc_init);
+                    auenc_init.src_msi = get_auadc_msi(MAIN_MIC_ID);
+                    auenc_init.channels = audio_adc_get_channels(MAIN_MIC_ID);
+                    aac_msi = audio_encode_init(AAC_ENC, audio_adc_get_samplerate(MAIN_MIC_ID), &auenc_init);
                 }
                 if(aac_msi)
                 {
@@ -1007,7 +997,7 @@ void open_audio(void)
             else if(g_cam_configs[i].type == AVI)
             {
                 g_cam_configs[i].aac_msi = NULL;
-                auadc_msi_add_output(AUSYS_AUAD, g_cam_configs[i].msi->name);
+                auadc_msi_add_output(MAIN_MIC_ID, g_cam_configs[i].msi->name);
             }
         }
     }
@@ -1032,7 +1022,7 @@ void close_audio(void)
             }
             else if(g_cam_configs[i].type == AVI)
             {
-                auadc_msi_del_output(AUSYS_AUAD, g_cam_configs[i].msi->name);
+                auadc_msi_del_output(MAIN_MIC_ID, g_cam_configs[i].msi->name);
             }
         }
     }
@@ -1916,19 +1906,49 @@ static void set_osd(struct items_config *item, uint8_t value, struct httpClient 
 	{
 		// 关闭时间水印
 		_os_printf("set osd close\r\n");
-        struct vpp_device *vpp_dev;
-        vpp_dev = (struct vpp_device *)dev_get(HG_VPP_DEVID);
-        vpp_set_watermark0_enable(vpp_dev,value);
-	    // vpp_set_watermark1_enable(vpp_dev,value);
+
+        for(int i = 0; i < CAMERAS_CONFIG_COUNT; i++)
+        {
+            if((g_cam_configs[i].mask & CAM_MASK_ENABLE) && g_cam_configs[i].enable && g_cam_configs[i].src_type == MIPI)
+            {
+                struct vpp_device *vpp_dev;
+                vpp_dev = (struct vpp_device *)dev_get(HG_VPP_DEVID);
+                vpp_set_watermark0_enable(vpp_dev,value);
+        	    // vpp_set_watermark1_enable(vpp_dev,value);
+            }
+            else if((g_cam_configs[i].mask & CAM_MASK_ENABLE) && g_cam_configs[i].enable && g_cam_configs[i].src_type == USB)
+            {
+                struct msi *watermark = msi_find(SR_YUV_WATERMARK, 1);
+                if(watermark)
+                {
+                    msi_do_cmd(watermark, MSI_CMD_WATERMARK, MSI_WATERMARK_SET_ENABLE, 0);
+                }
+            }
+        }
 	}
 	else if(value == 1)
 	{
 		// 打开时间水印
 		_os_printf("set osd open\r\n");
-        struct vpp_device *vpp_dev;
-        vpp_dev = (struct vpp_device *)dev_get(HG_VPP_DEVID);
-        vpp_set_watermark0_enable(vpp_dev,value);
-	    // vpp_set_watermark1_enable(vpp_dev,value);
+
+        for(int i = 0; i < CAMERAS_CONFIG_COUNT; i++)
+        {
+            if((g_cam_configs[i].mask & CAM_MASK_ENABLE) && g_cam_configs[i].enable && g_cam_configs[i].src_type == MIPI)
+            {
+                struct vpp_device *vpp_dev;
+                vpp_dev = (struct vpp_device *)dev_get(HG_VPP_DEVID);
+                vpp_set_watermark0_enable(vpp_dev,value);
+        	    // vpp_set_watermark1_enable(vpp_dev,value);
+            }
+            else if((g_cam_configs[i].mask & CAM_MASK_ENABLE) && g_cam_configs[i].enable && g_cam_configs[i].src_type == USB)
+            {
+                struct msi *watermark = msi_find(SR_YUV_WATERMARK, 1);
+                if(watermark)
+                {
+                    msi_do_cmd(watermark, MSI_CMD_WATERMARK, MSI_WATERMARK_SET_ENABLE, 1);
+                }
+            }
+        }
 	}
 	else
 	{
@@ -4429,7 +4449,6 @@ static void http_reponse_deletefile(struct httpClient *httpClient)
     closeRes(httpClient);
 }
 
-typedef void (*takephoto_fn)(uint8_t takephoto_num, uint16_t w, uint16_t h, const char *path);
 void takephoto_over_dpi_func(uint8_t takephoto_num, uint16_t w, uint16_t h, const char *path)
 {
     struct msi *over_dpi_jpg_msi = msi_find(SR_OVER_DPI_JPG, 1);
@@ -4452,7 +4471,7 @@ void takephoto_normal_func(uint8_t takephoto_num, uint16_t w, uint16_t h, const 
     }
 }
 
-void usb_takephoto_normal_func(uint8_t takephoto_num, const char *path)
+void usb_takephoto_normal_func(uint8_t takephoto_num, uint16_t w, uint16_t h, const char *path)
 {
     struct msi *usb_jpg_thumb_msi = msi_find(R_JPG_PHOTO_USB, 1);
     if (usb_jpg_thumb_msi)
@@ -4463,45 +4482,44 @@ void usb_takephoto_normal_func(uint8_t takephoto_num, const char *path)
     }
 }
 
+void usb_takephoto_over_dpi_func(uint8_t takephoto_num, uint16_t w, uint16_t h, const char *path)
+{
+    uint32_t    dpi_w_h = w << 16 | h;
+    struct msi *over_dpi_jpg_msi;
+    struct msi *over_dpi_recode_msi;
+    struct msi *takephoto_msi;
+
+    if (!takephoto_num)
+    {
+        return;
+    }
+
+    over_dpi_jpg_msi = msi_find(SR_OVER_DPI_JPG, 1);
+    if (over_dpi_jpg_msi)
+    {
+        msi_do_cmd(over_dpi_jpg_msi, MSI_CMD_JPG_THUMB, MSI_JPG_THUMB_TAKEPHOTO_SETPATH, (uint32_t) path);
+        msi_put(over_dpi_jpg_msi);
+    }
+
+    over_dpi_recode_msi = msi_find(R_SCALE1_JPG_RECODE, 1);
+    if (over_dpi_recode_msi)
+    {
+        msi_do_cmd(over_dpi_recode_msi, MSI_CMD_SCALE1, MSI_SCALE1_RESET_DPI, dpi_w_h);
+        msi_put(over_dpi_recode_msi);
+    }
+
+    takephoto_msi = msi_find(USB_ODPI_TAKEPHOTO_CTRL, 1);
+    if (takephoto_msi)
+    {
+        msi_do_cmd(takephoto_msi, MSI_CMD_JPG_THUMB, MSI_JPG_THUMB_TAKEPHOTO_SETPATH, (uint32_t) path);
+        msi_do_cmd(takephoto_msi, MSI_CMD_JPG_THUMB, MSI_JPG_THUMB_TAKEPHOTO, takephoto_num);
+        msi_put(takephoto_msi);
+    }
+}
+
 static void takephoto_mipi(const char *path)
 {
     uint8_t dpi_v = items_value_process("image_size", 0, GET_ITEMS_VALUE);
-    takephoto_fn t_fn;
-    uint16_t w,h;
-    switch(dpi_v)
-    {
-        case 0:
-            t_fn = takephoto_normal_func;
-            w = http_dpi[dpi_v][0];
-            h = http_dpi[dpi_v][1];
-        break;
-        case 1:
-            t_fn = takephoto_over_dpi_func;
-            w = http_dpi[dpi_v][0];
-            h = http_dpi[dpi_v][1];
-        break;
-        case 2:
-            t_fn = takephoto_over_dpi_func;
-            w = http_dpi[dpi_v][0];
-            h = http_dpi[dpi_v][1];
-        break;
-        case 3:
-            t_fn = takephoto_over_dpi_func;
-            w = http_dpi[dpi_v][0];
-            h = http_dpi[dpi_v][1];
-        break;
-        case 4:
-            t_fn = takephoto_over_dpi_func;
-            w = http_dpi[dpi_v][0];
-            h = http_dpi[dpi_v][1];
-        break;
-        default:
-            t_fn = takephoto_normal_func;
-            w = http_dpi[0][0];
-            h = http_dpi[0][1];
-        break;
-    }
-
     uint8_t take_photo_num = 1;
     int continue_shot = items_value_process("continue_shot", 0, GET_ITEMS_VALUE);
     switch (continue_shot)
@@ -4516,11 +4534,20 @@ static void takephoto_mipi(const char *path)
         take_photo_num = 10;
         break;
     }
-    t_fn(take_photo_num, w, h, path);
+
+    if (dpi_v > 0 && dpi_v < REC_ARRAY_SIZE(http_dpi))
+    {
+        takephoto_over_dpi_func(take_photo_num, http_dpi[dpi_v][0], http_dpi[dpi_v][1], path);
+    }
+    else
+    {
+        takephoto_normal_func(take_photo_num, 0, 0, path);
+    }
 }
 
 static void takephoto_usb(const char *path)
 {
+    uint8_t dpi_v = items_value_process("image_size", 0, GET_ITEMS_VALUE);
     uint8_t take_photo_num = 1;
     int continue_shot = items_value_process("continue_shot", 0, GET_ITEMS_VALUE);
     switch (continue_shot)
@@ -4535,7 +4562,15 @@ static void takephoto_usb(const char *path)
         take_photo_num = 10;
         break;
     }
-    usb_takephoto_normal_func(take_photo_num, path);
+
+    if (dpi_v > 0 && dpi_v < REC_ARRAY_SIZE(http_dpi))
+    {
+        usb_takephoto_over_dpi_func(take_photo_num, http_dpi[dpi_v][0], http_dpi[dpi_v][1], path);
+    }
+    else
+    {
+        usb_takephoto_normal_func(take_photo_num, 0, 0, path);
+    }
 }
 
 static void http_reponse_snapshot(struct httpClient *httpClient)
@@ -4760,87 +4795,6 @@ static void http_reponse_getparamitems_all(struct httpClient *httpClient)
     closeRes(httpClient);
     cJSON_free(post_content);
     cJSON_Delete(root);
-}
-
-void sd_status_push2(int fd)
-{
-	uint8_t new_status = 0;
-    uint8_t real_status = 0;
-    int last_status = items_value_process("sdstatus", 0, GET_ITEMS_VALUE);
-    if(last_status == -1)
-    {
-        os_printf("get sdstatus failed!\r\n");
-        return;
-    }
-#if FS_EN
-    new_status = get_fat_isready() ? 0 : 2;
-#endif
-    char *push_content = NULL;
-    {
-        if(new_status == 0) {
-        #if SD_FREE_SIZE_EN
-            int res = 0;
-            uint32_t freesize = 0;
-            uint8_t try_counts = 0;
-        get_again:
-            res = osal_fatfsfree("0:", NULL, &freesize);
-            if (res == FR_OK) {
-                if(freesize < SD_FREE_SIZE_MIN) {
-                    real_status = 4;
-                } else {
-                    real_status = 0;
-                }
-            } else if (res == FR_TIMEOUT) {
-                try_counts++;
-                if (try_counts <= 3) {
-                    os_printf("get sd free size timeout, try again\r\n");
-                    os_sleep_ms(500);
-                    goto get_again;
-                } else {
-                    real_status = 1;
-                    os_printf("get sd free size timeout, exit\r\n");
-                }
-            } else {
-                real_status = 1;
-                _os_printf("get sd failed\r\n");
-            }
-        #else
-            real_status = 0;
-        #endif
-        } else {
-            real_status = 2;
-        }
-
-        if(last_status == real_status)
-            return;
-
-        cJSON *root = NULL;
-        struct timeval ptimeval;
-        gettimeofday(&ptimeval, NULL);
-        root = cJSON_CreateObject();
-        if (!root)
-            goto clean_up;
-        cJSON *info = cJSON_CreateObject();
-        if (!info)
-            goto clean_up;
-        
-        items_value_process("sdstatus", real_status, SET_ITEMS_VALUE);
-
-        cJSON_AddStringToObject(root, "msgid", "sd");
-        cJSON_AddItemToObject(root, "info", info);
-        cJSON_AddNumberToObject(root, "time", ptimeval.tv_sec);
-        cJSON_AddNumberToObject(info, "status", real_status);
-        push_content = cJSON_PrintUnformatted(root);
-        _os_printf("postcontent: %s\r\n", push_content);
-        _os_printf("postlen: %d\r\n", strlen(push_content));
-        if (push_content && fd > 0) {
-            send(fd, push_content, strlen(push_content), 0);
-        }
-
-    clean_up:
-        if (push_content) cJSON_free(push_content);
-        if (root) cJSON_Delete(root);
-    }
 }
 
 void sd_status_push(int fd)

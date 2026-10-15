@@ -7,6 +7,7 @@
 #include "lib/video/mipi_csi/mipi_csi.h"
 #include "lib/video/h264/h264_drv.h"
 #include "lib/video/vpp/vpp_dev.h"
+#include "lib/video/dual/dual_org_dev.h"
 #include "lib/video/para_in/para_in_dev.h"
 #include "lib/multimedia/msi.h"
 #include "stream_define.h"
@@ -21,6 +22,7 @@
 #include "lib/audio/audio_code/audio_code.h"
 #include "lib/audio/audio_proc/audio_proc.h"
 #include "lib/audio/wsola/wsola_process.h"
+#include "lib/audio/resample/resample.h"
 
 #if RTT_USB_EN
 #include "rtthread.h"
@@ -53,7 +55,10 @@
 #include "takephoto_module/takephoto.h"
 #include "scale_msi/scale3_normal_msi.h"
 #include "mp4_encode_msi2.h"
-
+#include "yuv_from_cmd_msi.h"
+#if (CUSTOMER_ID == 3) || (CUSTOMER_ID == 4)
+#include "rec_playback.h"
+#endif
 
 int32 atcmd_recv(uint8 *data, int32 len);
 void  user_workqueue_init(uint16 pri, void *stack, uint16 stack_size);
@@ -161,7 +166,7 @@ __weak void user_protocol()
 // 应用程序初始化
 __init static void fpv_app_init(void)
 {
-#if TAKEPHOTO_EN || JPG_EN
+#if (TAKEPHOTO_EN || JPG_EN) && (CUSTOMER_ID != 3) && (CUSTOMER_ID != 4)
     int8_t takephoto_from  = 0;
     int8_t takephoto1_from = -1;
 #endif
@@ -172,10 +177,12 @@ __init static void fpv_app_init(void)
     cJSON_InitHooks(&hook);
 #endif
 
+#if (CUSTOMER_ID != 3) && (CUSTOMER_ID != 4)
     eloop_init();
     os_task_create("eloop_run", user_eloop_run, NULL, OS_TASK_PRIORITY_NORMAL + 2, 0, NULL, 2048);
     os_sleep_ms(1);
     ota_Tcp_Server();
+#endif
 
     // 独立的文件保存msi(独立线程,后续可以所有的fb需要保存都发到这个msi去执行)
     extern struct msi *file_msi_init(const char *msi_name);
@@ -189,7 +196,12 @@ __init static void fpv_app_init(void)
         uint8_t  h264_ret = get_vpp1_w_h(&h264_w, &h264_h);
         if (!h264_ret)
         {
+#if CUSTOMER_ID == 4
+            /* TXW828 单目直接使用 VPP_DATA1；720P 和双目仍使用 GEN420。 */
+            auto_h264_msi_init(AUTO_H264, VPP_DATA0, 0, 0, VPP_DATA1, h264_w, h264_h);
+#else
             auto_h264_msi_init(AUTO_H264, VPP_DATA0, 0, 0, GEN420_DATA, h264_w, h264_h);
+#endif
         }
         else
         {
@@ -231,6 +243,13 @@ __init static void fpv_app_init(void)
 
 #endif
 
+#if (CUSTOMER_ID == 3) || (CUSTOMER_ID == 4)
+    /* 探鸽事件抓拍独占 JPGID0，不启动原厂常驻 JPEG/缩略图链路。 */
+#if JPG_EN == 1
+    extern void snapshot_init(void);
+    snapshot_init();
+#endif
+#else
 #ifndef LCD_EN
     // 启动无屏的scale3
     scale3_msi_no_lcd(S_PREVIEW_SCALE3, 0, FSTYPE_YUV_P0, 320, 180);
@@ -252,7 +271,7 @@ __init static void fpv_app_init(void)
         else if (camera_w == 1280 && camera_h == 720)
         {
             common_takephoto_normal_init(R_THUMB);
-            common_takephoto_over_dpi_init(JPGID0);
+            common_takephoto_over_dpi_init(JPGID1);
             takephoto_from = VPP_DATA0;
         }
         // 其他摄像头,主要是为了拍照720P的图片,1080P摄像头从VPP_DATA1,不支持大分辨率拍照
@@ -281,6 +300,8 @@ __init static void fpv_app_init(void)
     }
 #endif
 
+#endif
+
 #if USB_JPG_ADD_WATERMARK
     usb_to_recode_init(JPGID1);
 #endif
@@ -293,7 +314,22 @@ __init static void fpv_app_init(void)
     void isp_tunning_init(uint32 img_w, uint32 img_h);
     isp_tunning_init(1920, 1080);
 #endif
+
+
+#if (CUSTOMER_ID == 3) || (CUSTOMER_ID == 4)
+    /* 探鸽音视频发送 */
+    extern void avstream_send_demo(void);
+    avstream_send_demo();
+    
+#if SDH_EN && FS_EN
+    /* SD 卡录像 + 探鸽 P2P 回放模块 */
+    if (rec_playback_init() != 0)
+        os_printf(KERN_ERR "SD recording/playback init failed\n");
+#endif
+
+#else
     user_protocol();
+#endif
 }
 
 __weak void user_hardware_config()
@@ -334,8 +370,10 @@ void        hardware_init(uint8_t vcam)
     jpg_mutex_init();
     jpg_mem_init(32);
 #endif
-    // 默认打开gen420的模块
+#if CUSTOMER_ID != 4
+    /* TXW828 单目辅码流直接读取 VPP_DATA1，无需常驻 GEN420。 */
     gen420_hardware_msi_init();
+#endif
 
 #if SDH_EN && FS_EN
     extern bool fatfs_register();
@@ -378,6 +416,8 @@ void        hardware_init(uint8_t vcam)
     mipi_debug.debug_io1    = PD_5;
     mipi_debug.debug_io2    = PD_6;
     mipi_debug.debug_io3    = PD_7;
+    mipi_debug.debug_io4    = 255;
+    mipi_debug.debug_io5    = 255;
     mipi_debug.debug_type0  = 6;
     mipi_debug.debug_type1  = 7;
     mipi_debug.debug_type2  = 8;
@@ -385,7 +425,7 @@ void        hardware_init(uint8_t vcam)
 #if DVP_EN
     int ret;
     ret = mipi_csi_hardware_config(HG_MIPI_CSI_DEVID, 1, CAM_DUAL_MASTER_SLAVE_MODE, 1, SENSOR_TYPE_SLAVE0, 24, &mipi_debug);
-    mipi_csi_hardware_config(HG_MIPI1_CSI_DEVID, 1, CAM_DUAL_MASTER_SLAVE_MODE, 1, ret?SENSOR_TYPE_SLAVE1:SENSOR_TYPE_SLAVE0, 24, &mipi_debug);
+    mipi_csi_hardware_config(HG_MIPI1_CSI_DEVID, 1, CAM_DUAL_MASTER_SLAVE_MODE, 1, ret ? SENSOR_TYPE_SLAVE1 : SENSOR_TYPE_SLAVE0, 24, &mipi_debug);
 #else
 
     mipi_csi_hardware_config(HG_MIPI_CSI_DEVID, 1, CAM_SINGLE_MASTER_MODE, 0, SENSOR_TYPE_MASTER, 24, &mipi_debug);
@@ -431,18 +471,18 @@ void        hardware_init(uint8_t vcam)
 #endif
 
 #if TOUCH_PAD_EN
-    touch_pad_hareware_init();
+    touch_pad_hardware_init();
 #endif
 
 #if DUAL_EN
-    void dorg_double_sensor(uint32 src0_w, uint32 src0_h, uint32 src1_w, uint32 src1_h, uint32 src0_raw_num, uint32 src1_raw_num, uint8_t dvp_type, uint8_t csi0_type, uint8_t csi1_type);
     dorg_double_sensor(1280, 720, 1280, 720, RAW8, RAW10, 1, 2, 3);
 #endif
 
 #if AUDIO_EN
-    reg_auproc_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-    reg_wsola_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
-    reg_aucoder_alloc(av_psram_malloc, av_psram_zalloc, av_psram_calloc, av_psram_realloc, av_psram_free);
+    reg_auproc_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+    reg_wsola_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+    reg_aures_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
+    reg_aucoder_alloc(_os_malloc_psram, _os_zalloc_psram, _os_calloc_psram, _os_realloc_psram, _os_free_psram);
     aucode_mutex_init();
     audio_adc_init(AUSYS_AUAD, 8000, 1, 4, 0);
     audio_dac_init();
@@ -501,10 +541,10 @@ void        hardware_init(uint8_t vcam)
     };
 #else
     struct hg_lv_mem_hooks hook = {
-            .malloc  = av_psram_malloc,
-            .realloc = av_psram_realloc,
-            .zalloc  = av_psram_zalloc,
-            .free    = av_psram_free,
+            .malloc  = _os_malloc_psram,
+            .realloc = _os_realloc_psram,
+            .zalloc  = _os_zalloc_psram,
+            .free    = _os_free_psram,
     };
 #endif
     hg_lv_mem_register(&hook);

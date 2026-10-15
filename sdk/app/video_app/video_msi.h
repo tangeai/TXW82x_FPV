@@ -11,4 +11,9 @@ void usb_to_recode_init(uint8_t jpg_num);
 struct msi *h264_msi_init_with_mode(uint32_t drv1_from, uint16_t drv1_w, uint16_t drv1_h, uint16_t drv2_from, uint16_t drv2_w, uint16_t drv2_h);
 struct msi *gen420_jpg_msi_init(const char *msi_name, uint8_t which_jpg, uint8_t recv_type, uint8_t lock_value, uint8_t queue_value, uint16_t *filter_type, gen420_filter_fn fn);
 struct msi *scale1_jpg_msi_init(const char *msi_name, uint8_t which_jpg, uint8_t recv_type, uint8_t lock_value, uint16_t force_type, scale1_filter_fn fn, uint8_t force_node);
+struct msi *scale1_h264_msi_init(const char *name, uint16_t filter_type, uint16_t out_w, uint16_t out_h);
+struct msi *scale2_yuv_msi_init(const char *name, uint16_t filter_type, uint16_t out_w, uint16_t out_h, uint16_t show_x, uint16_t show_y);
+void compat_get_scale3_msi_init();
+struct msi *jpg_decode_msi(const char *name);
+struct msi *jpg_decode_msg_msi(const char *name, uint16_t out_w, uint16_t out_h, uint16_t step_w, uint16_t step_h, uint32_t filter);
 #endif

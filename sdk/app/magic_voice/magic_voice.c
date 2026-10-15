@@ -42,46 +42,42 @@ static int32_t magic_voice_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t
     switch(cmd_id) {
         case MSI_CMD_TRANS_FB:
         {
+            ret = RET_OK+1;
+			if(msi->enable == 0) {
+				break;
+			}
             struct framebuff *recv_frame_buf = (struct framebuff *)param1;
             struct framebuff *send_frame_buf = NULL;
             if(recv_frame_buf->mtype == F_AUDIO) {
                 if(magic_voice_s->current_type != magic_voice_s->new_type) {
-                    uint32_t pitch = 100;
+                    float pitch = 1.0f;
                     switch(magic_voice_s->new_type) {
-                        case original_voice: pitch = 100; break; 
-                        case alien_voice: pitch = 130; break; 
-                        case robot_voice: pitch = 90; break;
-                        case hight_voice: pitch = 150; break;
-                        case deep_voice: pitch = 70; break; 
-                        case etourdi_voice: pitch = 120; break; 
+                        case original_voice: pitch = 1.0f; break; 
+                        case alien_voice: pitch = 1.3f; break; 
+                        case robot_voice: pitch = 0.9f; break;
+                        case hight_voice: pitch = 1.5f; break;
+                        case deep_voice: pitch = 0.7f; break; 
+                        case etourdi_voice: pitch = 1.2f; break; 
                         default: break;
                     }
-                    msi_output_cmd(msi, MSI_CMD_AUTPC, MSI_AUTPC_SET_PITCH, pitch);
+                    wsola_stream_clean(magic_voice_s->wsola_stream);
+                    wsolaStream_set_pitch(magic_voice_s->wsola_stream, pitch);
                     magic_voice_s->current_type = magic_voice_s->new_type;
                 }
             }
             if(recv_frame_buf->mtype == F_AUDIO) {
                 uint8_t delaySamples = 0;
-                int16_t *send_buf = NULL;
                 int32_t temp32 = 0;
-                uint32_t nsamples = recv_frame_buf->len / 2;
+                int32_t nsamples = recv_frame_buf->len / 2;
+                if(nsamples != 160) {
+                    os_printf("magic voice nsamples abormal\n");
+                    break;
+                }
                 while(!send_frame_buf) {
                     send_frame_buf = fbpool_get(&magic_voice_s->tx_pool, 0, magic_voice_s->msi);
                     if(!send_frame_buf)
                         os_sleep_ms(1);
                 }
-                send_frame_buf->data = (uint8_t*)MAGIC_VOICE_MALLOC(sizeof(int16_t) * nsamples);
-                if(send_frame_buf->data == NULL) {
-                    os_printf("magic voice msi malloc send_frame_buf->data fail\n");
-                    msi_delete_fb(magic_voice_s->msi, send_frame_buf);
-                    break;
-                }
-                if(nsamples != 160) {
-                    os_memcpy(send_frame_buf->data, recv_frame_buf->data, recv_frame_buf->len);
-                    os_printf("magic voice nsamples abormal\n");
-                    goto magic_voice_output;
-                }
-                send_buf = (int16_t*)(send_frame_buf->data);
                 os_memcpy(magic_voice_s->buf+nsamples, recv_frame_buf->data, recv_frame_buf->len);
                 if(magic_voice_s->current_type == alien_voice) {
                     for(uint32_t i=0; i<nsamples; i++) {
@@ -90,7 +86,7 @@ static int32_t magic_voice_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t
                         else
                             delaySamples = delaySamples_table[999-magic_voice_s->table_index];
                         temp32 = (magic_voice_s->buf[(i + nsamples - delaySamples)]+magic_voice_s->buf[(i + nsamples)])>>1;
-                        send_buf[i] = SETW32TOW16(temp32);
+                        magic_voice_s->outbuf[i] = SETW32TOW16(temp32);
                         magic_voice_s->table_index = (magic_voice_s->table_index+1)%1000;
                     }
                     os_memcpy(magic_voice_s->buf,magic_voice_s->buf+nsamples,recv_frame_buf->len);   
@@ -103,23 +99,30 @@ static int32_t magic_voice_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t
                         delay_data = magic_voice_s->buf[(i + nsamples - delaySamples)];
                         back_data = delay_data;
                         temp32 = ((magic_voice_s->buf[nsamples+i]>>1)+delay_data)*8/10;
-                        send_buf[i] = SETW32TOW16(temp32);
+                        magic_voice_s->outbuf[i] = SETW32TOW16(temp32);
                         temp32 = ((magic_voice_s->buf[nsamples+i]>>1)+(back_data<<2)/5);
                         magic_voice_s->buf[nsamples+i] = SETW32TOW16(temp32);
                     }
                     os_memcpy(magic_voice_s->buf,magic_voice_s->buf+nsamples,recv_frame_buf->len);        
                 }
                 else {
-                    os_memcpy(send_frame_buf->data, recv_frame_buf->data, recv_frame_buf->len);
+                    os_memcpy(magic_voice_s->outbuf, recv_frame_buf->data, recv_frame_buf->len);
                 }
-magic_voice_output:
-                send_frame_buf->mtype = recv_frame_buf->mtype;
-                send_frame_buf->stype = recv_frame_buf->stype; 
-                send_frame_buf->time = recv_frame_buf->time;    
-                send_frame_buf->len = recv_frame_buf->len;  
-                msi_output_fb(magic_voice_s->msi, send_frame_buf);     
+                wsolaStream_input_data(magic_voice_s->wsola_stream, magic_voice_s->outbuf, nsamples);
+                nsamples = wsolaStream_output_available(magic_voice_s->wsola_stream);
+                if(nsamples > 0) {
+                    send_frame_buf->data = (uint8*)MAGIC_VOICE_MALLOC(nsamples * sizeof(int16));
+                    if(send_frame_buf->data == NULL) {
+                        break;
+                    }
+                    nsamples = wsolaStream_output_data(magic_voice_s->wsola_stream, (int16_t*)(send_frame_buf->data), nsamples);
+                    send_frame_buf->mtype = recv_frame_buf->mtype;
+                    send_frame_buf->stype = recv_frame_buf->stype; 
+                    send_frame_buf->time = recv_frame_buf->time;    
+                    send_frame_buf->len = nsamples * sizeof(int16); 
+                    msi_output_fb(magic_voice_s->msi, send_frame_buf);
+                }
             }
-            ret = RET_OK+1;
             break;
         }            
         case MSI_CMD_FREE_FB:
@@ -146,9 +149,9 @@ magic_voice_output:
                     }
                 }
                 fbpool_destroy(&magic_voice_s->tx_pool);
-                if(magic_voice_s->autpc_msi) {
-                    autpc_msi_deinit(magic_voice_s->autpc_msi);
-                    magic_voice_s->autpc_msi = NULL;
+                if(magic_voice_s->wsola_stream) {
+                    wsolaStream_deinit(magic_voice_s->wsola_stream);
+                    magic_voice_s->wsola_stream = NULL;
                 }
                 if(magic_voice_s->buf) {
                     MAGIC_VOICE_FREE(magic_voice_s->buf);
@@ -183,10 +186,7 @@ int32_t magic_voice_msi_add_output(const char *msi_name)
     struct msi *msi = msi_find("SR_MAGIC_VOICE", 1);
     if(msi) {
         msi_put(msi);
-        magic_voice_struct *magic_voice_s = (magic_voice_struct*)msi->priv;
-        if(magic_voice_s->autpc_msi) {
-            ret = autpc_msi_add_output(magic_voice_s->autpc_msi, msi_name);
-        }
+        ret = msi_del_output(msi, NULL, msi_name);
     }
     return ret;
 }
@@ -197,10 +197,7 @@ int32_t magic_voice_msi_del_output(const char *msi_name)
     struct msi *msi = msi_find("SR_MAGIC_VOICE", 1);
     if(msi) {
         msi_put(msi);
-        magic_voice_struct *magic_voice_s = (magic_voice_struct*)msi->priv;
-        if(magic_voice_s->autpc_msi) {
-            ret = autpc_msi_add_output(magic_voice_s->autpc_msi, msi_name);
-        }
+        ret = msi_add_output(msi, NULL, msi_name);
     }
     return ret;
 }
@@ -210,6 +207,8 @@ int32_t magic_voice_deinit(void)
     int ret = RET_ERR;
     struct msi *msi = msi_find("SR_MAGIC_VOICE", 1);
     if(msi) {
+		msi->enable = 0;
+		os_sleep_ms(100);
         msi_put(msi);
         msi_destroy(msi);
         ret = RET_OK;
@@ -233,7 +232,7 @@ struct msi *magic_voice_init(uint32_t samplerate, uint32_t size)
 		return NULL;	
 	}   
     if(msi_isnew == 0) {
-        return NULL;
+        return msi;
     }
     magic_voice_struct *magic_voice_s = (magic_voice_struct*)MAGIC_VOICE_ZALLOC(sizeof(magic_voice_struct));
     if(magic_voice_s == NULL) {
@@ -246,20 +245,20 @@ struct msi *magic_voice_init(uint32_t samplerate, uint32_t size)
 	magic_voice_s->msi = msi;
     magic_voice_s->msi->enable = 1;
     magic_voice_s->msi->action = magic_voice_msi_action;
-    magic_voice_s->autpc_msi = autpc_msi_init(samplerate, 100, 100, size, NULL);
-    if(magic_voice_s->autpc_msi == NULL) {
+    magic_voice_s->wsola_stream = wsolaStream_init(samplerate, 1, 1.0f, 1.0f, size*2, size*4);
+    if(magic_voice_s->wsola_stream == NULL) {
         msi_destroy(msi);
-        os_printf("magic voice create autpc msi fail\n");
+        os_printf("magic voice create wsola stream fail\n");
         return NULL;        
     }
 
-    magic_voice_s->buf = (int16_t*)MAGIC_VOICE_MALLOC(size*2+320);
+    magic_voice_s->buf = (int16_t*)MAGIC_VOICE_MALLOC(size*2+320+320);
     if(magic_voice_s->buf == NULL) {
         msi_destroy(msi);
         os_printf("magic voice alloc buf fail\n");
         return NULL;        
     }
-    msi_add_output(msi, NULL, magic_voice_s->autpc_msi->name);
+    magic_voice_s->outbuf = magic_voice_s->buf + size + 160;
     magic_voice_s->new_type = original_voice;
     magic_voice_s->current_type = original_voice;
 	return msi;

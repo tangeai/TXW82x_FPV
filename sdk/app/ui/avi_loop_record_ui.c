@@ -94,7 +94,7 @@ static void start_avi_record_ui(lv_event_t * e)
         {
             lv_obj_add_flag(ui_s->now_ui, LV_OBJ_AVI_RECORD_FLAG); 
             #if AUDIO_EN
-            auadc_msi_add_output(AUSYS_AUAD, R_AVI_ENCODE_MSI);
+            auadc_msi_add_output(MAIN_MIC_ID, R_AVI_ENCODE_MSI);
             #endif
             ret = avi_encode_msi_init(R_AVI_ENCODE_MSI, (uint16_t)~0, 60*1);
             
@@ -122,7 +122,7 @@ static void exit_avi_record_ui(lv_event_t * e)
         lv_group_del(ui_s->now_group);
         ui_s->now_group = NULL;
         #if AUDIO_EN
-        auadc_msi_del_output(AUSYS_AUAD, R_AVI_ENCODE_MSI);
+        auadc_msi_del_output(MAIN_MIC_ID, R_AVI_ENCODE_MSI);
         #endif
         msi_del_output(ui_s->jpg_s, NULL, R_AVI_ENCODE_MSI);
         msi_put(ui_s->jpg_s);

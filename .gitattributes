@@ -1,2 +1,2 @@
-# Keep all repository text files portable across Linux and Windows.
+# Match the previous project's text normalization policy on future Git adds.
 * text=auto eol=lf

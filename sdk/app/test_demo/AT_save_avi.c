@@ -25,7 +25,7 @@ int32 demo_atcmd_save_avi(const char *cmd, char *argv[], uint32 argc)
     if(os_atoi(argv[0]) == 0)
     {
         #if AUDIO_EN
-        auadc_msi_del_output(AUSYS_AUAD, R_AT_AVI_JPEG);
+        auadc_msi_del_output(MAIN_MIC_ID, R_AT_AVI_JPEG);
         #endif
         msi_del_output(NULL, AUTO_JPG, R_AT_AVI_JPEG);
         if (g_at_avi_msi)
@@ -61,7 +61,7 @@ int32 demo_atcmd_save_avi(const char *cmd, char *argv[], uint32 argc)
                     #if AUDIO_EN
                     if (frq)
                     {
-                        auadc_msi_add_output(AUSYS_AUAD, R_AT_AVI_JPEG);
+                        auadc_msi_add_output(MAIN_MIC_ID, R_AT_AVI_JPEG);
                     }
                     #endif
                     msi_do_cmd(g_at_avi_msi, MSI_CMD_MEDIA_CTRL, MSI_MEDIA_CTRL_SET_RECORD_SEC, 30);

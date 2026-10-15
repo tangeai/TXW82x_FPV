@@ -115,8 +115,9 @@ static void start_mp4_record_ui(lv_event_t *e)
                 uint8_t    audio_flag = 0;
                 AUENC_INIT auenc_init;
                 auenc_init.destroy_self = 0;
-                auenc_init.src_msi      = get_auadc_msi(AUSYS_AUAD);
-                ui_s->aac_msi           = audio_encode_init(AAC_ENC, audio_adc_get_samplerate(AUSYS_AUAD), &auenc_init);
+                auenc_init.src_msi      = get_auadc_msi(MAIN_MIC_ID);
+                auenc_init.channels     = audio_adc_get_channels(MAIN_MIC_ID);
+                ui_s->aac_msi           = audio_encode_init(AAC_ENC, audio_adc_get_samplerate(MAIN_MIC_ID), &auenc_init);
                 if (ui_s->aac_msi)
                 {
                     audio_code_add_output(ui_s->aac_msi, LVGL_MP4_MSI_NAME);

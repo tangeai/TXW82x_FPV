@@ -18,9 +18,11 @@
 struct avi_thumb_s
 {
     struct msi *msi;
+    const char *source_msi_name;
     uint8_t     thumb_name[64];
     uint8_t     filter_type;
     uint8_t     srcID;
+    uint8_t     src_bind;
 };
 
 int32_t avi_thumb_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t param1, uint32_t param2)
@@ -31,6 +33,11 @@ int32_t avi_thumb_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t param1, 
     {
         case MSI_CMD_POST_DESTROY:
         {
+            if (avi_thumb->src_bind)
+            {
+                msi_del_output(NULL, avi_thumb->source_msi_name, avi_thumb->msi->name);
+                avi_thumb->src_bind = 0;
+            }
             STREAM_LIBC_FREE(avi_thumb);
         }
         break;
@@ -38,6 +45,11 @@ int32_t avi_thumb_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t param1, 
         // 需要关闭,则将关联的msi关闭
         case MSI_CMD_PRE_DESTROY:
         {
+            if (avi_thumb->src_bind)
+            {
+                msi_del_output(NULL, avi_thumb->source_msi_name, avi_thumb->msi->name);
+                avi_thumb->src_bind = 0;
+            }
         }
         break;
 
@@ -54,10 +66,14 @@ int32_t avi_thumb_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t param1, 
                     c_fb->priv = avi_thumb->thumb_name;
                     msi_output_fb(msi, c_fb);
                     msi->enable = 0;
+                    if (avi_thumb->src_bind)
+                    {
+                        msi_del_output(NULL, avi_thumb->source_msi_name, avi_thumb->msi->name);
+                        avi_thumb->src_bind = 0;
+                    }
                 }
-                break;
             }
-            ret = RET_ERR;
+            ret = RET_OK + 1;
         }
         break;
         case MSI_CMD_FREE_FB:
@@ -83,20 +99,27 @@ struct msi *avi_thumb_msi_init(const char *filename, uint8_t srcID, uint8_t filt
         os_memcpy(avi_thumb->thumb_name, filename, strlen(filename) + 1);
         msi->priv              = avi_thumb;
         avi_thumb->msi         = msi;
+        avi_thumb->source_msi_name = R_GEN420_JPG_RECODE;
         avi_thumb->filter_type = filter;
         avi_thumb->srcID       = srcID;
         msi->action            = avi_thumb_msi_action;
         // 给到解码然后生成缩略图
         msi_add_output(msi, NULL, R_THUMB_USB);
-        msi->enable = 1;
-        msi_add_output(NULL, ROUTE_USB, R_AVI_THUMB); // avi缩略图?
+        // msi_add_output(NULL, ROUTE_USB, R_AVI_THUMB); // avi缩略图?
     }
     else
     {
         avi_thumb = (struct avi_thumb_s *) msi->priv;
         os_memcpy(avi_thumb->thumb_name, filename, strlen(filename) + 1);
-        msi->enable = 1;
+        avi_thumb->filter_type = filter;
+        avi_thumb->srcID       = srcID;
     }
+
+    if (!avi_thumb->src_bind && msi_add_output(NULL, avi_thumb->source_msi_name, avi_thumb->msi->name) == RET_OK)
+    {
+        avi_thumb->src_bind = 1;
+    }
+    msi->enable = 1;
 
     return msi;
 }

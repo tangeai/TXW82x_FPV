@@ -18,6 +18,12 @@ typedef struct sensor_isp_info {
     uint32 sensor_config;
 } SENSOR_BASIC_INFO;
 
+// sensor device info,记录当前摄像头的分辨率
+typedef struct sensor_dev_info {
+    uint16 w;
+    uint16 h;
+} SENSOR_DEV_INFO;
+
 void sensor_info_init();
 void sensor_info_destory();
 void sensor_info_add(enum sensor_type type, enum isp_input_dat_src sensor_src, uint32 sensor_config, uint32 iic_id, uint32 opt_cmd);

@@ -122,7 +122,7 @@ typedef struct hgisp_cfg_awb {
     uint32 back_cb_max  :  8, back_cr_max : 8, back_uv_max : 8, reserved1  : 8;
     uint32 back_cb_min  :  8, back_cr_min : 8, back_uv_min : 8, reserved2  : 8;
     int32  lock_hi_thr  :  8, lock_lo_thr : 8, coarse_scale   : 16;
-    uint32 reversed0 :  8, coarse_thr  : 8, fine_step   : 8, stable_thr  : 8;
+    uint32 reserved0 :  8, coarse_thr  : 8, fine_step   : 8, stable_thr  : 8;
     uint32 cbcr_thr     :  8, awb_cent_cons_en : 8, awb_back_cons_en : 8, reserved3 : 8;   
     uint32 awb_auto_en  :  4, awb_fine_cons_en : 4, awb_meas_mode : 3, awb_gain_type : 3, awb_formula : 2, awb_wp_max : 8, awb_wp_min : 8;
     uint32 awb_r_max : 8, awb_g_max : 8, awb_b_max : 8, awb_precision : 4, awb_coarse_cons_en : 4; 
@@ -141,7 +141,8 @@ typedef struct
 }_Sensor_WDR;
 
 typedef struct hgisp_cfg_wdr {
-    uint8 auto_noise_floor_out; // auto_noise_floor_out : 打开自动计算噪声抑制输出控制点功能 wdr_en:是否使能wdr
+    uint32 auto_noise_floor_out : 8, // auto_noise_floor_out : 打开自动计算噪声抑制输出控制点功能 wdr_en:是否使能wdr
+           reserve0             : 24; 
     uint32 wdr_en               : 8, //WDR使能,isp tuning时需要设0
            wdr_opt              : 8, 
            dynamic_gamma_en     : 8, //动态y_gamma模块使能, 打开才能(自动/手动)切换y_gamma曲线, 使用1.0.3tuning工具调试需打开
@@ -180,7 +181,7 @@ typedef struct
 typedef struct hgisp_cfg_ae {
     uint32 luma_target : 16, luma_weight_sum : 16;
     uint8  luma_weight[25];
-    uint8   exposure_alpha, reserved1, reserved2;
+    uint8   exposure_alpha, ae_unlock_tolerance, reserved2;
     uint32  ae_lock_cnt                 : 8,
             ae_lock_tolerance           : 8,
             ae_manual_en                : 8,
@@ -206,7 +207,7 @@ typedef struct hgisp_cfg_ae {
     float  dark_pixel_high_ratio;
     uint32 abl_dark_pos_low_wthr  : 8,     // [0,61] abl°µÇøÎ»ÖÃÈ¨ÖØ×îÐ¡ãÐÖµ¡£
            abl_dark_pos_add_wthr  : 8,     // [0,61] abl°µÇøÎ»ÖÃÈ¨ÖØ×ÔÊÊÓ¦Öµ¡£
-           reversed4              : 16;        
+           reserved4              : 16;        
     float  bright_pos_adjust_ratio;          
     uint32 aoe_bright_pos_wthr : 8,     // [0,61] aoeÁÁÇøÎ»ÖÃÈ¨ÖØãÐÖµ¡£
            aoe_dark_pos_wthr   : 8,     // [0,61] aoe°µÇøÎ»ÖÃÈ¨ÖØãÐÖµ¡£
@@ -257,7 +258,7 @@ typedef struct hgisp_md_param {
 }_Sensor_MD;
 
 typedef struct {
-    uint32 adj_by_bv : 8, reversed : 24;
+    uint32 adj_by_bv : 8, reserved : 24;
     float bv[BV2GAMMA_ARRAY_NUM];
     uint8 y_alpha[BV2GAMMA_ARRAY_NUM];
     uint8 rgb_alpha[BV2GAMMA_ARRAY_NUM];

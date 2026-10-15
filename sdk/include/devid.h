@@ -201,6 +201,16 @@ typedef enum {
     HG_PARA_IN_DEVID,
     HG_PARA_OUT_DEVID,
     HG_SSWITCH_DEVID,
+    HG_CAM0_DEVID,
+    HG_CAM1_DEVID,
+    HG_CAM2_DEVID,
+    HG_CAM3_DEVID,
+    HG_CAM4_DEVID,
+    HG_USB_CAM0_DEVID,
+    HG_USB_CAM1_DEVID,
+    HG_USB_CAM2_DEVID,
+    HG_USB_CAM3_DEVID,
+    HG_USB_CAM4_DEVID,
 } DEV_ID; /**** 只能在后面追加新增，不能在中间插入 ****/
 	
 #ifdef __cplusplus

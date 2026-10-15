@@ -42,8 +42,20 @@ void *cpu1_RXBUF_heap()
     {
         cpu1_mem_info_msg = os_malloc(sizeof(struct cpu1_mem_info));
     }
-    cpu1_mem_info_msg->rxbuf_heap = os_malloc(CONFIG_CORE_RXBUF_SIZE);
-    cpu1_mem_info_msg->rxbuf_heap_size = CONFIG_CORE_RXBUF_SIZE;
+    #ifdef TXW82X
+    /* 如果设置的RXBUF大小小于等于14KB,直接使用ld中SRAM2-3的14KB空间 */
+    if (CONFIG_CORE_RXBUF_SIZE <= (14*1024)) {
+        cpu1_mem_info_msg->rxbuf_heap = (void*)(0x20068000);
+        cpu1_mem_info_msg->rxbuf_heap_size = (14*1024);
+    } else {
+        cpu1_mem_info_msg->rxbuf_heap = os_malloc(CONFIG_CORE_RXBUF_SIZE);
+        cpu1_mem_info_msg->rxbuf_heap_size = CONFIG_CORE_RXBUF_SIZE;
+    }
+    #else
+        cpu1_mem_info_msg->rxbuf_heap = os_malloc(CONFIG_CORE_RXBUF_SIZE);
+        cpu1_mem_info_msg->rxbuf_heap_size = CONFIG_CORE_RXBUF_SIZE;
+    #endif
+
     return cpu1_mem_info_msg->rxbuf_heap;
 }
 

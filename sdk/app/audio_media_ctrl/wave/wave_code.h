@@ -2,18 +2,16 @@
 #define _WAVE_CODE_H_
 
 #include "basic_include.h"
-#include "lib/heap/av_heap.h"
-#include "lib/heap/av_psram_heap.h"
 #include "audio_code_ctrl.h"
 
 #ifdef PSRAM_HEAP
-#define WAVE_CODE_MALLOC    av_psram_malloc
-#define WAVE_CODE_ZALLOC    av_psram_zalloc
-#define WAVE_CODE_FREE      av_psram_free
+#define WAVE_CODE_MALLOC    os_malloc_psram
+#define WAVE_CODE_ZALLOC    os_zalloc_psram
+#define WAVE_CODE_FREE      os_free_psram
 #else
-#define WAVE_CODE_MALLOC    av_malloc
-#define WAVE_CODE_ZALLOC    av_zalloc
-#define WAVE_CODE_FREE      av_free
+#define WAVE_CODE_MALLOC    os_malloc
+#define WAVE_CODE_ZALLOC    os_zalloc
+#define WAVE_CODE_FREE      os_free
 #endif
 
 #define WAVE_DEBUG(fmt, args...)         //os_printf(fmt, ##args)
@@ -44,7 +42,7 @@ typedef struct _wave_head {
 	TYPE_DATA_CHUNK  data_chunk;
 } TYPE_WAVE_HEAD;
 
-struct msi *wave_encode_init(char *filename, uint32_t samplerate, AUENC_INIT *auenc_init);
+struct msi *wave_encode_init(char *filename, uint32_t samplerate, uint32_t channels, AUENC_INIT *auenc_init);
 struct msi *wave_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec_init);
 
 #endif

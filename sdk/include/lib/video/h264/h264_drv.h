@@ -160,11 +160,19 @@ struct stream_h264_data_s
 #define IMAGE_W_H264      1280//1920//
 #define IMAGE_H_H264	  720//1088//
 
-#define H264_BS_SIZE      512*1024                    //512K
 
 #define H264_NODE_LEN     16*1024                     //不要改
-#define H264_NODE_NUM     32
-#define H264_FRAME_NUM    4
+
+#if CUSTOMER_ID == 3
+#define H264_NODE_NUM 10
+#else
+#define H264_NODE_NUM     15//32
+#endif
+
+#define H264_FRAME_NUM    3
+
+
+#define H264_BS_SIZE      (H264_NODE_LEN * H264_NODE_NUM)
 
 #define H264_DEV_0_ID     0
 #define H264_DEV_1_ID     1

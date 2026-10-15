@@ -165,6 +165,110 @@
 #define WIFI_BSSBW_DEFAULT              20
 #endif
 
+// ============================================================================
+// WiFi 高级特性配置 (WiFi Advanced Features)
+// ============================================================================
+
+// RTS 阈值：-1 (禁用 RTS/CTS 握手)
+#ifndef WIFI_RTS_THRESHOLD
+#define WIFI_RTS_THRESHOLD              -1
+#endif
+
+// RTS 最大重试次数
+#ifndef WIFI_RTS_MAX_RETRY
+#define WIFI_RTS_MAX_RETRY              2
+#endif
+
+// TX (发送) 最大重试次数
+#ifndef WIFI_TX_MAX_RETRY
+#define WIFI_TX_MAX_RETRY               15
+#endif
+
+//TX速率支持，每1bit对应一种速率
+#ifndef WIFI_TX_SUPP_RATE
+#define WIFI_TX_SUPP_RATE               0x0FFFFF
+#endif
+
+//组播帧传输次数
+#ifndef WIFI_MULICAST_RETRY
+#define WIFI_MULICAST_RETRY             0
+#endif
+
+//自动选择信道时扫描的信道。每1bit对应1个信道(bit 0~11 -> chan 1~12)
+#ifndef WIFI_ACS_CHAN_LISTS
+#define WIFI_ACS_CHAN_LISTS             0x03FF
+#endif
+
+//每个信道的扫描时间，单位ms
+#ifndef WIFI_ACS_SCAN_TIME
+#define WIFI_ACS_SCAN_TIME              150
+#endif
+
+//tx发送占空比，单位是%，范围是0~100
+#ifndef WIFI_TX_DUTY_CYCLE
+#define WIFI_TX_DUTY_CYCLE              100
+#endif
+
+//是否使能SSID过滤功能。使能后，只有隐藏SSID和指定SSID的beacon才会上传
+#ifndef WIFI_SSID_FILTER_EN
+#define WIFI_SSID_FILTER_EN             0
+#endif
+
+//是否尽可能的阻止sta进入休眠
+#ifndef WIFI_PREVENT_PS_MODE_EN
+#define WIFI_PREVENT_PS_MODE_EN         0
+#endif
+
+//FEM芯片类型。LMAC_FEM_NONE以外的值会进行对应的FEM初始化
+#ifndef WIFI_FEM_CHIP
+#define WIFI_FEM_CHIP                   LMAC_FEM_NONE
+#endif
+
+//频偏跟踪功能：默认打开
+#ifndef WIFI_FREQ_OFFSET_TRACK_MODE
+#define WIFI_FREQ_OFFSET_TRACK_MODE     LMAC_FREQ_OFFSET_TRACK_ALWAYS_ON
+#endif
+
+//是否使能温度补偿
+#ifndef WIFI_TEMPERATURE_COMPESATE_EN
+#define WIFI_TEMPERATURE_COMPESATE_EN   1
+#endif
+
+//缓存的TX休眠帧是否不允许丢弃
+#ifndef WIFI_PS_NO_FRM_LOSS_EN
+#define WIFI_PS_NO_FRM_LOSS_EN          0
+#endif
+
+//是否允许发送聚合。如果对时延要求不高的，可以打开
+#ifndef WIFI_TX_AGG_EN
+#define WIFI_TX_AGG_EN                  0
+#endif
+
+//是否允许接收聚合。CONFIG_CORE_RXBUF_SIZE 小于 18KB 时 不推荐使能
+#ifndef WIFI_RX_AGG_EN
+#define WIFI_RX_AGG_EN                  0
+#endif
+
+//RF TX Power 档位。默认第0档
+#ifndef WIFI_RF_PWR_LEVEL
+#define WIFI_RF_PWR_LEVEL               0
+#endif
+
+//是否使能多MAC地址支持功能
+#ifndef WIFI_MODULE_MULTI_MAC_EN
+#define WIFI_MODULE_MULTI_MAC_EN        0
+#endif
+
+//是否使能重排序模块
+#ifndef WIFI_MODULE_RX_REORDER_EN
+#define WIFI_MODULE_RX_REORDER_EN       0
+#endif
+
+// ============================================================================
+// 网络默认参数
+// ============================================================================
+
+// 默认本机 IP：192.168.1.1
 #ifndef NET_IP_ADDR_DEFAULT
 #define NET_IP_ADDR_DEFAULT             0x0101A8C0  //192.168.1.1
 #endif
@@ -321,6 +425,10 @@
 #define ISP_SUPPORT_SENSOR_MAX_NUM      3
 #endif
 
+#ifndef ISP_PLL1_2X_CLK_SEL_VALUE     
+#define ISP_PLL1_2X_CLK_SEL_VALUE       6
+#endif
+
 #ifndef ISP_SENSOR_REG_MAX_LEN
 #define ISP_SENSOR_REG_MAX_LEN         (100)
 #endif
@@ -342,25 +450,55 @@
 #endif
 
 #ifdef PSRAM_HEAP
+#ifndef TCPIP_MBOX_SIZE
 #define TCPIP_MBOX_SIZE                 128
+#endif
+#ifndef DEFAULT_UDP_RECVMBOX_SIZE
 #define DEFAULT_UDP_RECVMBOX_SIZE       64
+#endif
+#ifndef DEFAULT_TCP_RECVMBOX_SIZE
 #define DEFAULT_TCP_RECVMBOX_SIZE       64
+#endif
+#ifndef DEFAULT_ACCEPTMBOX_SIZE
 #define DEFAULT_ACCEPTMBOX_SIZE         16
+#endif
 
 //#define MEM_LIBC_MALLOC 1
 //#define MEMP_MEM_MALLOC 1 
+#ifndef MEM_SIZE
 #define MEM_SIZE                        80*1024
+#endif
+#ifndef MEMP_NUM_PBUF
 #define MEMP_NUM_PBUF                   40
+#endif
+#ifndef MEMP_NUM_NETCONN
 #define MEMP_NUM_NETCONN                16
+#endif
+#ifndef MEMP_NUM_NETBUF
 #define MEMP_NUM_NETBUF                 64
+#endif
+#ifndef MEMP_NUM_UDP_PCB
 #define MEMP_NUM_UDP_PCB                8
+#endif
+#ifndef MEMP_NUM_TCP_PCB
 #define MEMP_NUM_TCP_PCB                16
+#endif
+#ifndef MEMP_NUM_TCP_SEG
 #define MEMP_NUM_TCP_SEG                320
+#endif
+#ifndef PBUF_POOL_SIZE
 #define PBUF_POOL_SIZE                  80
+#endif
 
+#ifndef TCP_SND_BUF
 #define TCP_SND_BUF                    (40 * TCP_MSS)
+#endif
+#ifndef TCP_WND
 #define TCP_WND                        (40 * TCP_MSS)
+#endif
+#ifndef TCP_TMR_INTERVAL
 #define TCP_TMR_INTERVAL                50
+#endif
 #endif
 
 #ifndef VIDEO_YUV_RANGE_TYPE

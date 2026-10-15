@@ -32,7 +32,7 @@ struct mp3_decode_struct {
     uint8_t get_first_frame;
     uint8_t next_status;
     uint8_t current_status;
-    uint8_t inbuf[BUFF_SIZE];
+    uint8_t *inbuf;
     int16_t dec_buf[1152*2];
     uint32_t file_size;
     uint32_t buf_offset;
@@ -170,7 +170,7 @@ static void mp3_file_decode(struct mp3_decode_struct *s)
 			}
             if(mp3_info.channels == 2) {
                 for(uint32_t i=0; i<dec_samples; i++) 
-                    data[i] = s->dec_buf[2*i];
+                    data[i] = ((int32)(s->dec_buf[2*i]) + s->dec_buf[2*i+1]) / 2;
             }
 			else {
 				for(uint32_t i=0; i<dec_samples; i++)
@@ -403,7 +403,7 @@ mp3_get_first_frame:
 			}  
             if(mp3_info.channels == 2) {
                 for(uint32_t i=0; i<dec_samples; i++) 
-                    send_data[i] = s->dec_buf[2*i];
+                    send_data[i] = ((int32)(s->dec_buf[2*i]) + s->dec_buf[2*i+1]) / 2;
             }
 			else {
 				for(uint32_t i=0; i<dec_samples; i++)
@@ -461,8 +461,6 @@ static void mp3_decode_thread(void *d)
 		if(s->cur_mp3_info->normal_frame_offset)
 			s->get_first_frame = 1;		
 	}
-
-    msi_get(s->msi);
 
     if(s->direct_to_dac) {
         msi_cmd("R_AUDAC",MSI_CMD_AUDAC,MSI_AUDAC_SET_FILTER_TRACK,(uint32_t)(&(s->audio_track)));
@@ -679,6 +677,10 @@ static int32_t mp3_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
                     MP3_DECODE_FREE(mp3_decode_s->msi_name);
                     mp3_decode_s->msi_name = NULL;
                 }
+				if(mp3_decode_s->inbuf) {
+					MP3_DECODE_FREE(mp3_decode_s->inbuf);
+					mp3_decode_s->inbuf = NULL;
+				}
                 MP3_DECODE_FREE(mp3_decode_s);
                 mp3_decode_s = NULL;
             }
@@ -693,20 +695,28 @@ static int32_t mp3_decode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t 
 struct msi *mp3_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec_init)
 {
 #if AUDIO_EN
+    uint8_t msi_isnew = 0;
     char *msi_name = NULL;
+    uint32_t random_bytes = 0;
 
     msi_name = (char*)MP3_DECODE_ZALLOC(sizeof(char)*32);
     if(msi_name == NULL) {
-        os_printf("alloc autpc msi namefail\n");
+        os_printf("alloc mp3 decode msi namefail\n");
         return NULL;
     }
-    os_snprintf(msi_name, 20, "SR_MP3_DECODE_""%04d", (int)(os_jiffies()));
-	struct msi *msi = msi_new(msi_name, MAX_MP3_DECODE_RXBUF, NULL);
+create_msi_again:
+    os_random_bytes((uint8_t*)(&random_bytes), 4);
+    os_snprintf(msi_name, 20, "SR_MP3_DECODE_""%04u", random_bytes%10000);
+	struct msi *msi = msi_new(msi_name, MAX_MP3_DECODE_RXBUF, &msi_isnew);
 	os_printf("mp3 msi name:%s\n",msi_name);
 	if(msi == NULL) {
 		MP3_INFO("create mp3 decode msi fail!\r\n");
+        MP3_DECODE_FREE(msi_name);
 		return NULL;
-	}      
+	}  
+	else if(msi_isnew == 0) {
+		goto create_msi_again;
+	}    
 	struct mp3_decode_struct *mp3_decode_s = (struct mp3_decode_struct*)MP3_DECODE_ZALLOC(sizeof(struct mp3_decode_struct));
 	if(!mp3_decode_s) {
 		MP3_INFO("mp3_decode_s malloc fail!\r\n");
@@ -727,6 +737,11 @@ struct msi *mp3_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec
         MP3_INFO("create mp3 decode event fail!\r\n");
         goto mp3_decode_init_err;
     }
+	mp3_decode_s->inbuf = (uint8_t*)MP3_DECODE_MALLOC(BUFF_SIZE * sizeof(uint8_t));
+	if(mp3_decode_s->inbuf == NULL) {
+		MP3_INFO("mp3 decode alloc inbuf fail!\r\n");
+		goto mp3_decode_init_err;
+	}
 	if(filename) {
         os_memcpy(mp3_decode_s->mp3_filename, filename, 20);
 		mp3_decode_s->mp3_fp = osal_fopen((const char*)mp3_decode_s->mp3_filename, "rb");
@@ -759,6 +774,7 @@ struct msi *mp3_decode_init(char *filename, uint8_t loop_mode, AUDEC_INIT *audec
 		MP3_INFO("create mp3 decode task fail!\r\n");
 		goto mp3_decode_init_err;
 	}
+    msi_get(msi);
 	return msi;
 	
 mp3_decode_init_err:

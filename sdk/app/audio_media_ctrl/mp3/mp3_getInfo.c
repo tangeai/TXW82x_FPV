@@ -5,8 +5,6 @@
 #include "mp3_getInfo.h"
 #include "mp3_decode.h"
 #include "audio_code_ctrl.h"
-#include "lib/heap/av_heap.h"
-#include "lib/heap/av_psram_heap.h"
 
 #define MP3_SAVE_INFO   0
 
@@ -324,7 +322,7 @@ void curmp3_info_init(CUR_MP3_INFO **cur_mp3_info, uint8_t *mp3_filename)
 
 void find_first_frame(CUR_MP3_INFO *cur_mp3_info, void *fp)
 {
-	uint8_t mp3_head[512];
+	uint8_t *mp3_head = NULL;
 	uint8_t bitrate_index = 0;
 	uint8_t channel_mode = 0x11;
 	uint8_t padding = 0;
@@ -336,10 +334,14 @@ void find_first_frame(CUR_MP3_INFO *cur_mp3_info, void *fp)
 	uint32_t first_frame_offset = 0;
 	uint32_t seek = 0;
 	uint32_t frame_len = 0;
-
+	
     if(!cur_mp3_info) {
 		return;
 	}    
+	mp3_head = (uint8_t*)MP3_DECODE_MALLOC(512 * sizeof(uint8_t));
+	if(mp3_head == NULL) {
+		return;
+	}
 	osal_fread(mp3_head, 512, 1, fp);
 	if(os_strncmp(mp3_head+offset, "ID3", 3) == 0) {
 		uint32_t ID3V2_len = (mp3_head[6]&0x7F)*0x200000+ (mp3_head[7]&0x7F)*0x4000 + 
@@ -401,7 +403,7 @@ void find_first_frame(CUR_MP3_INFO *cur_mp3_info, void *fp)
 	 			cur_mp3_info->samples,cur_mp3_info->samplingrate,channel_mode,bitrate,frame_len);
 	cur_mp3_info->normal_frame_offset = cur_mp3_info->first_frame_offset+frame_len;
 	cur_mp3_info->one_second_frame = cur_mp3_info->samplingrate/cur_mp3_info->samples;
-
+	MP3_DECODE_FREE(mp3_head);
 #if MP3_SAVE_INFO
 	int32_t ret = 0;
 	DIR st_dir;

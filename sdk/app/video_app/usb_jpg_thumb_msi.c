@@ -27,12 +27,13 @@ struct usb_jpg_thumb_s
 {
     struct os_work work;
     struct msi    *msi;
-    struct msi    *gen420_msi;
+    const char    *src_name;
     char           filepath[64];
     char          *dirpath;
     uint8_t        filter;
     uint8_t        thumb_stype;
     uint8_t        takephoto_photo;
+    uint8_t        src_bind;
 };
 
 uint8_t takephoto_name(const char *img_dir, char *file_path, int filepath_size);
@@ -80,6 +81,11 @@ jpg_thumb_work_again:
         if (!usb_jpg_thumb->takephoto_photo)
         {
             usb_jpg_thumb->msi->enable = 0;
+            if(usb_jpg_thumb->src_bind)
+            {
+                msi_del_output(NULL, usb_jpg_thumb->src_name, usb_jpg_thumb->msi->name);
+                usb_jpg_thumb->src_bind = 0;
+            }
         }
         msi_delete_fb(NULL, fb);
         fb = NULL;
@@ -96,11 +102,21 @@ static int32_t usb_jpg_thumb_msi_action(struct msi *msi, uint32_t cmd_id, uint32
     {
         case MSI_CMD_POST_DESTROY:
         {
+            if(usb_jpg_thumb->src_bind)
+            {
+                msi_del_output(NULL, usb_jpg_thumb->src_name, usb_jpg_thumb->msi->name);
+                usb_jpg_thumb->src_bind = 0;
+            }
             STREAM_LIBC_FREE(usb_jpg_thumb);
         }
         break;
         case MSI_CMD_PRE_DESTROY:
         {
+            if(usb_jpg_thumb->src_bind)
+            {
+                msi_del_output(NULL, usb_jpg_thumb->src_name, usb_jpg_thumb->msi->name);
+                usb_jpg_thumb->src_bind = 0;
+            }
             os_work_cancle2(&usb_jpg_thumb->work, 1);
         }
         break;
@@ -114,6 +130,10 @@ static int32_t usb_jpg_thumb_msi_action(struct msi *msi, uint32_t cmd_id, uint32
                 case MSI_JPG_THUMB_TAKEPHOTO:
                 {
                     usb_jpg_thumb->takephoto_photo += arg;
+                    if(!usb_jpg_thumb->src_bind && msi_add_output(NULL, usb_jpg_thumb->src_name, usb_jpg_thumb->msi->name) == RET_OK)
+                    {
+                        usb_jpg_thumb->src_bind = 1;
+                    }
                     usb_jpg_thumb->msi->enable = 1;
                 }
                 break;
@@ -165,7 +185,7 @@ static int32_t usb_jpg_thumb_msi_action(struct msi *msi, uint32_t cmd_id, uint32
     return ret;
 }
 
-struct msi *usb_jpg_thumb_msi_init(const char *msi_name, uint8_t filter, uint8_t thumb_stype)
+struct msi *usb_jpg_thumb_msi_init(const char *msi_name, const char *src_name, uint8_t filter, uint8_t thumb_stype)
 {
     uint8_t             is_new;
     struct msi         *msi       = msi_new(msi_name, USB_JPG_THUMB_RECV_MAX, &is_new);
@@ -175,6 +195,7 @@ struct msi *usb_jpg_thumb_msi_init(const char *msi_name, uint8_t filter, uint8_t
         usb_jpg_thumb               = (struct usb_jpg_thumb_s *) STREAM_LIBC_ZALLOC(sizeof(struct usb_jpg_thumb_s));
         msi->priv                   = usb_jpg_thumb;
         usb_jpg_thumb->msi          = msi;
+        usb_jpg_thumb->src_name     = src_name;
         usb_jpg_thumb->filter       = filter;
         usb_jpg_thumb->thumb_stype  = thumb_stype;
         usb_jpg_thumb->dirpath      = IMG_PATH;

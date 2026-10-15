@@ -395,7 +395,9 @@ extern void hw_memcpy(void *dest, const void *src, unsigned int size);
 #define MEMP_SANITY_CHECK           1
 #else
 #define LWIP_NOASSERT               1
-#define LWIP_STATS                  0
+/* 探鸽事件任务使用 stats_display() 查看网络池水位。 */
+#define LWIP_STATS                  1
+#define LWIP_STATS_DISPLAY          1
 #endif
 
 #define LWIP_DBG_TYPES_ON           LWIP_DBG_ON

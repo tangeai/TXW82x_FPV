@@ -9,6 +9,7 @@ enum {
     MP3,
     AMR,
     AAC,
+    PCM,
 };
 
 enum {
@@ -38,6 +39,6 @@ int32_t audio_file_play_pause(struct msi *msi);
 int32_t audio_file_play_continue(struct msi *msi);
 int32_t audio_file_play_stop(struct msi *msi);
 int32_t audio_file_play_status(struct msi *msi);
-struct msi *audio_file_play_init(char *filename, uint8_t play_mode, AUDEC_INIT *audec_init);
+struct msi *audio_file_play_init(char *filename, uint8_t play_mode, AUDEC_INIT *audec_init,uint32_t samplerate);
 
 #endif

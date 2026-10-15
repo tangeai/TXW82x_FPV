@@ -377,7 +377,7 @@ const _Sensor_LSC          cv2008_lsc_init = {
     .p_lsc_tbl = (uint32 *)cv2008_lsc_tbl,
 };
 
-const _Sensor_LHS cv2008_lhs_map[] = {
+const _Sensor_LHS cv2008_lhs_map[9] = {
     // region defination: lower -> center -> upper(direction: anticlockwise)
     // region_lower, region_center, region_upper, hue adjust value, saturation adjust value
     //   (9 bits)      (9 bits)       (9 bits)          (9 bits)           (8 bits)
@@ -625,7 +625,6 @@ uint16 CV2008_sensorGainMapping[CV2008_MaxGainIndex][2] ={
 
 void CV2008_ae_adjust(struct isp_exposure_opt *p_cfg)
 {
-    uint8 i;
     uint8 index         = 0;
     uint32 shutter0         = 0;
     uint32 cv2008_gain  = 0;
@@ -686,23 +685,13 @@ const _Sensor_ISP_Init cv2008_isp_init =
 
 SENSOR_OP_SECTION const _Sensor_Adpt_ cv2008_cmd = 
 {
-	.typ = 1, //YUV
 	.pixelw = CV2008_IMA_W,
 	.pixelh= CV2008_IMA_H,
-	.hsyn = 1,
-	.vsyn = 1,
-	.rduline = 0,//
-	.rawwide = 1,//10bit
 	.colrarray = 0,//0:_RGRG_ 1:_GRGR_,2:_BGBG_,3:_GBGB_
 	.init = (uint8 *)CV2008InitTable,
-    .init_len = sizeof(CV2008InitTable),
     .mipi_lane_num = 2,
     .vts_reg = {0x301e,0x301d,0x301c},
     .vts_reg_num = 3,
-	.rotate_adapt = {0},
-	//.hvb_adapt = {0x6a,0x12,0x6a,0x12},
-	. mclk = 24000000,
-	.p_fun_adapt = {NULL,NULL,NULL},
     .sensor_isp = (_Sensor_ISP_Init *)&cv2008_isp_init,
 };
 

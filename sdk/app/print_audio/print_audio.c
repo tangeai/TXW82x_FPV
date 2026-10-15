@@ -247,7 +247,7 @@ int32 atcmd_print_audio_enable(const char *cmd, char *argv[], uint32 argc)
             }
         }
         else {
-            src_msi = get_auadc_msi(AUSYS_AUAD);
+            src_msi = get_auadc_msi(MAIN_MIC_ID);
         }
         if(src_msi == NULL) {
             os_printf("print_audio_enable fail, haven't src_msi!\n");

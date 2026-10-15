@@ -21,6 +21,7 @@ enum FRAMEBUFF_MTYPE {
     F_RGB,      //未压缩的rgb
     F_ERGB,     //压缩后的rgb
     F_FILE_T,     //文件类型(一般用于文件保存,仅仅支持普通模式:fb->data+fb->len)
+    F_YUV_CMD,
 };
 
 //设定framebuff的子类型,用uint16_t去定义吧
@@ -83,6 +84,9 @@ enum FRAMEBUFF_STYPE
 
     FSYPTE_INVALID = 0x80, //无效的stype,用于特殊值,由应用去特殊使用
     FSTYPE_GEN420_720P,
+    FSTYPE_NET_H264,
+    FSTYPE_MJPG_THUMB,      //固定这个类型是缩略图,只能产生用,不要用缩略图去重新编码
+    FSTYPE_SCALE1_JPG,
 };
 
 enum FRAMEBUFF_SOURCE{
@@ -99,7 +103,9 @@ enum FRAMEBUFF_SOURCE{
 
     FRAMEBUFF_SOURCE_OSD_ENC,
     FRAMEBUFF_SOURCE_CSC,
+    FRAMEBUFF_SOURCE_NET,
     
+    FRAMEBUFF_SOURCE_LCDC,
 };
 
 struct msi;
@@ -166,6 +172,9 @@ extern void fb_put(struct framebuff *fb);
 
 //framebuff 队列初始化，需要指定队列的buffer和大小
 extern int32 fbq_init(struct fbqueue *q, uint8 *qbuff, int32 qsize);
+
+//获取队列中当前的 framebuff 数量
+extern int32 fbq_count(struct fbqueue *q);
 
 //销毁framebuff队列，并释放队列中存放的framebuff
 extern int32 fbq_destory(struct fbqueue *q);

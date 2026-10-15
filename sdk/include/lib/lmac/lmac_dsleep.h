@@ -514,7 +514,7 @@ struct dsleep_udp_hdr{
 };
 
 extern struct dsleep_priv *bgn_dsleep;
-void *bgn_dsleep_init(void *ops);
+void *bgn_dsleep_init(void *ops, uint32 flags);
 void dsleep_wakeup(void);
 void debug_config(void);
 int32 dsleep_bgn_resume_hdl(void *ops, uint32 wake_reason, uint32 param2);

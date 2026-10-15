@@ -87,6 +87,7 @@ typedef enum
 {
     SDHC_INIT_FLAGS_SINGLE_BLK_RW_EN = BIT(0),
     SDHC_INIT_FLAGS_BUSY_FILTER_EN   = BIT(1),
+    SDHC_INIT_FLAGS_BUS_WIDTH_4      = BIT(2),
 } TYPE_SDHC_INIT_FLAGS;
 
 enum {
@@ -622,9 +623,13 @@ void stop_card();
 void sd_open();
 uint32 sdhost_deinit_for_sleep();
 
+/* The recorder drains live file handles before remount/format. */
+int sd_storage_app_managed(void);
+int sd_storage_app_busy(void);
+void sd_storage_request_recovery(void);
+
 int usb_sd_scsi_read(uint32 lba, uint32 count, uint8* buf);
 int usb_sd_scsi_write(uint32 lba, uint32 count, uint8* buf);
- 
 
 
 #endif

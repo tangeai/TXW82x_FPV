@@ -105,13 +105,13 @@ int32_t adkey_demo_work(struct os_work *work)
                         if (adkey_work->avi_msi)
                         {
                             msi_add_output(NULL, R_GEN420_JPG_RECODE, adkey_work->avi_msi->name);
-                            auadc_msi_add_output(AUSYS_AUAD, adkey_work->avi_msi->name);
+                            auadc_msi_add_output(MAIN_MIC_ID, adkey_work->avi_msi->name);
                         }
                     }
                     else
                     {
                         msi_del_output(NULL, R_GEN420_JPG_RECODE, adkey_work->avi_msi->name);
-                        auadc_msi_del_output(AUSYS_AUAD, adkey_work->avi_msi->name);
+                        auadc_msi_del_output(MAIN_MIC_ID, adkey_work->avi_msi->name);
                         msi_destroy(adkey_work->avi_msi);
                         adkey_work->avi_msi = NULL;
                     }

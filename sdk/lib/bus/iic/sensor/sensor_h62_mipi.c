@@ -367,7 +367,7 @@ const _Sensor_LSC          h62_lsc_init = {
     .p_lsc_tbl = (uint32 *)h62_lsc_tbl,
 };
 
-const _Sensor_LHS h62_lhs_map[] = {
+const _Sensor_LHS h62_lhs_map[9] = {
     // region defination: lower -> center -> upper(direction: anticlockwise)
     // region_lower, region_center, region_upper, hue adjust value, saturation adjust value
     //   (9 bits)      (9 bits)       (9 bits)          (9 bits)           (8 bits)
@@ -440,35 +440,41 @@ const _Sensor_YGAMMA h62_ygamma_tbl[] = {
         0x390E2380, 0x3A0E6390, 0x3B0EA3A0, 0x3C0EE3B0, 0x3D0F23C0, 0x3E0F63D0, 0x3F0FA3E0, 0x3FFFE3F0,}}
 };
 
+uint32 h62_gainLevelTable[] = {
+    1024, 1088, 1152, 1216, 1280, 1344, 1408, 1472, 1536, 1600, 
+    1664, 1728, 1792, 1856, 1920, 1984, 2048, 2176, 2304, 2432, 
+    2560, 2688, 2816, 2944, 3072, 3200, 3328, 3456, 3584, 3712, 
+    3840, 3968, 4096, 4352, 4608, 4864, 5120, 5376, 5632, 5888, 
+    6144, 6400, 6656, 6912, 7168, 7424, 7680, 7936, 8192, 8704, 
+    9216, 9728, 10240, 10752, 11264, 11776, 12288, 12800, 13312, 
+    13824, 14336, 14848, 15360, 15872, 16384, 17408, 18432, 19456, 
+    20480, 21504, 22528, 23552, 24576, 25600, 26624, 27648, 28672, 
+    29696, 30720, 31744, 0xffffffff,
+};
+
 void h62_ae_adjust(struct isp_exposure_opt *p_cfg)
 {
-    uint8  gain_segment[]    = {1, 2, 4, 8, 16, 32};
-    uint8  sensor_gain_part1 = 0;
-    uint8  i                 = 0;
-    uint8  sensor_gain_reg   = 0;
-    uint8  analog_gain       = p_cfg->analog_gain>>8;
-    uint16 sensor_gain_part2 = 0;
-    uint32 exposure_line     = p_cfg->exposure_line;
-    uint8  *addr             = (uint8 *)p_cfg->data.addr;
-
-    // convert the analog gain to match the SFR configure value of H62
-    for(i=0;i<5;i++){
-        // note: ae_param->analog_gain is UQ16.8
-        if(analog_gain < gain_segment[i+1]){
-            sensor_gain_part1 = i;
+    uint32 index        = 0;
+    uint32 tol_dig_gain = 0;
+    uint8  *addr        = (uint8 *)p_cfg->data.addr;
+	int   h62_total  = sizeof(h62_gainLevelTable) / sizeof(uint32);
+	uint16 gain = (p_cfg->analog_gain<<2);
+    for(uint16 i=0; i<h62_total; i++)
+    {
+        if(h62_gainLevelTable[i] >= gain)
+        {
+            tol_dig_gain = i;
             break;
         }
     }
-    sensor_gain_part2 = (((p_cfg->analog_gain >> sensor_gain_part1) - 256) >> 4) & 0x0f;
-    sensor_gain_reg = (sensor_gain_part1 << 4) | sensor_gain_part2;
-    i = 0;
-    addr[i++] = 0x02;
-    addr[i++] = (exposure_line >> 8) & 0xff;
-    addr[i++] = 0x01;
-    addr[i++] = exposure_line & 0xff;
-    addr[i++] = 0x00;
-    addr[i++] = sensor_gain_reg;
-    p_cfg->data.size = i;
+
+	addr[index++] = 0x00;
+	addr[index++] = tol_dig_gain;
+    addr[index++] = 0x02;
+    addr[index++] = (uint8)(p_cfg->exposure_line >> 8);
+    addr[index++] = 0x01;
+    addr[index++] = (p_cfg->exposure_line & 0xff);
+    p_cfg->data.size = index;
     p_cfg->cmd_len   = 1+1;
 }
 
@@ -496,21 +502,12 @@ const _Sensor_ISP_Init h62_isp_init =
 
 SENSOR_OP_SECTION const _Sensor_Adpt_ h62_cmd= 
 {	
-	.typ = 1, //YUV
 	.pixelw = 1280,
 	.pixelh= 720,
-	.hsyn = 1,
-	.vsyn = 0,
-	.rduline = 0,//
-	.rawwide = 1,//10bit
-	.colrarray = 2,//0:_RGRG_ 1:_GRGR_,2:_BGBG_,3:_GBGB_
 	.init = (uint8 *)H62InitTable,
-    .init_len = sizeof(H62InitTable),
-    .mipi_lane_num = 1,
-	.rotate_adapt = {0},
-	.hvb_adapt = {0x80,0x0a,0x80,0x0a},
-	. mclk = 20000000,
-	.p_fun_adapt = {NULL,NULL,NULL},
+	.mipi_lane_num = 1,
+    .vts_reg = {0x23,0x22},
+    .vts_reg_num = 2,
     .sensor_isp = (_Sensor_ISP_Init *)&h62_isp_init,
 };
 

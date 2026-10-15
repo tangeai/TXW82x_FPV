@@ -25,6 +25,8 @@
 #include "hal/csc.h"
 #include "dev/csc/hgcsc.h"
 #include "lib/video/vpp/vpp_dev.h"
+#include "lib/scale/scale_dev.h"
+
 extern uint8 *yuvbuf;
 extern uint8 *yuvbuf1;
 
@@ -264,9 +266,7 @@ void scale2_from_jpeg_config_for_msi(struct scale_device *scale_dev,uint32_t yin
 	scale_set_srambuf_wlen(scale_dev,SRAMBUF_WLEN);
 	scale_linebuf_yuv_addr(scale_dev,(uint32)yinsram,(uint32)uinsram,(uint32)vinsram);			
 	scale_open(scale_dev); 
-
 }
-
 
 void scale2_from_h264_config_for_msi(struct scale_device *scale_dev,uint32_t yinsram,uint32_t uinsram,uint32_t vinsram,uint32_t yuvoutbuf,uint32 in_w,uint32 in_h,uint32 out_w,uint32 out_h,uint8_t larger){	
 	uint32_t ow_n,oh_n;
@@ -291,9 +291,102 @@ void scale2_from_h264_config_for_msi(struct scale_device *scale_dev,uint32_t yin
 	scale_set_srambuf_wlen(scale_dev,SRAMBUF_WLEN);
 	scale_linebuf_yuv_addr(scale_dev,(uint32)yinsram,(uint32)uinsram,(uint32)vinsram);			
 	scale_open(scale_dev); 
-
 }
 
+void scale2_config_for_msi(struct scale_cfg *scale_cfg)
+{
+	uint16_t tailor_w = 0, tailor_h = 0;
+	uint16_t start_x = 0, start_y = 0;
+
+	if(scale_cfg->tailor_w && scale_cfg->tailor_h) {
+		tailor_w = scale_cfg->tailor_w;
+		tailor_h = scale_cfg->tailor_h;
+	} else {
+		tailor_w = scale_cfg->in_w;
+		tailor_h = scale_cfg->in_h;
+	}
+
+	switch (scale_cfg->loc_mode) 
+	{
+		case SCALE_MANUAL:
+			start_x = scale_cfg->start_x;
+			start_y = scale_cfg->start_y;
+			break;
+		case SCALE_ALIGN_CENTER:
+			if (scale_cfg->in_w >= tailor_w && scale_cfg->in_h >= tailor_h) {
+				start_x = (scale_cfg->in_w - tailor_w) / 2;
+				start_y = (scale_cfg->in_h - tailor_h) / 2;
+			} else {
+				_os_printf("scale2 tailor error\r\n");
+			}
+			break;
+		case SCALE_UPPER_LEFT:
+			start_x = 0;
+			start_y = 0;
+			break;
+		case SCALE_LOWER_RIGHT:
+			if (scale_cfg->in_w >= tailor_w && scale_cfg->in_h >= tailor_h) {
+				start_x = scale_cfg->in_w - tailor_w;
+				start_y = scale_cfg->in_h - tailor_h;
+			} else {
+				_os_printf("scale2 tailor error\r\n");
+			}
+			break;
+		default:
+			if (scale_cfg->in_w >= tailor_w && scale_cfg->in_h >= tailor_h) {
+				start_x = (scale_cfg->in_w - tailor_w) / 2;
+				start_y = (scale_cfg->in_h - tailor_h) / 2;
+			} else {
+				
+			}
+			break;
+	}
+	
+	if ((scale_cfg->out_w % 4) != 0) {
+		_os_printf("scale2 output need word aligned\r\n");
+	}
+	
+	if(scale_cfg->stream_type == H264_DEC) 
+	{
+		
+		uint16_t th = (tailor_h*256/scale_cfg->out_h)*scale_cfg->out_h/256;
+		if((th+start_y)%16 == 7) 
+		{
+			start_y = start_y>=2?start_y-2:start_y;
+		}
+		else if((th+start_y)%16 == 8) 
+		{
+			start_y = start_y>=3?start_y-3:start_y;
+		}
+		else if((th+start_y)%16 == 9) 
+		{
+			start_y = start_y>=4?start_y-3:start_y;
+		}
+		else if((th+start_y)%16 == 10) 
+		{
+			start_y = start_y>=5?start_y-5:start_y;
+		}
+	}
+	scale_close(scale_cfg->scale_dev);
+	scale_set_input_stream(scale_cfg->scale_dev, scale_cfg->stream_type);
+	scale_set_output_sram_or_frame(scale_cfg->scale_dev, 0);
+	scale_set_in_out_size(scale_cfg->scale_dev, scale_cfg->in_w, scale_cfg->in_h, scale_cfg->out_w, scale_cfg->out_h);
+	scale_set_step(scale_cfg->scale_dev, tailor_w, tailor_h, scale_cfg->out_w, scale_cfg->out_h);
+	scale_set_start_addr(scale_cfg->scale_dev, start_x, start_y);
+	
+	scale_set_out_yaddr(scale_cfg->scale_dev, scale_cfg->yuvoutbuf);
+	scale_set_out_uaddr(scale_cfg->scale_dev, scale_cfg->yuvoutbuf + scale_cfg->out_w * scale_cfg->out_h);
+	scale_set_out_vaddr(scale_cfg->scale_dev, scale_cfg->yuvoutbuf + scale_cfg->out_w * scale_cfg->out_h + scale_cfg->out_w * scale_cfg->out_h / 4);
+
+	if (scale_cfg->stream_type == MJPEG_DEC || scale_cfg->stream_type == H264_DEC) {
+		scale_set_srambuf_wlen(scale_cfg->scale_dev, SRAMBUF_WLEN);
+		scale_linebuf_yuv_addr(scale_cfg->scale_dev, scale_cfg->yinbuf, scale_cfg->uinbuf, scale_cfg->vinbuf);	
+	} else if (scale_cfg->stream_type == FRAME_YUV420P) {
+		scale_set_input_yuv_addr(scale_cfg->scale_dev,scale_cfg->yinbuf, scale_cfg->uinbuf, scale_cfg->vinbuf);
+	}
+
+	scale_open(scale_cfg->scale_dev);
+}
 
 void scale_soft_from_psram_to_enc(struct scale_device *scale_dev,uint8_t * psram_data,uint32_t w,uint32 h,uint32_t ow,uint32_t oh){
 	uint16 icount = 2;	

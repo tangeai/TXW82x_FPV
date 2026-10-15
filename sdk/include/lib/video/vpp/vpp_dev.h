@@ -19,12 +19,12 @@
 #define VPP_INPUT_FROM       			IN_ISP   
 #endif
 
-enum
-{
+
+typedef enum{
 	ISP_VIDEO_0,
 	ISP_VIDEO_1,
 	ISP_VIDEO_2,
-};
+} ISP_VIDEO_E;
 
 typedef enum {
 	SCALER3_DONE = 0,
@@ -50,24 +50,23 @@ struct  video_cfg_t {
 	uint8_t camera_mode;
 	uint8_t video_num;
 	uint8_t video_type_cur;     //cur frame is ISP_VIDEO_0/1/2
+    uint8_t video_type_next;
 	uint8_t video_type_last;    //last frame is ISP_VIDEO_0/1/2
 	uint8_t video_type_vpp;    //vpp runing which frame  ,app maybe use
 	uint8_t resv;	          
-	uint16_t dvp_iw;
-	uint16_t dvp_ih;
-	uint16_t dvp_ow;
-	uint16_t dvp_oh;
-	uint16_t dvp_type;          //0:no device   1:master    2:slave0     3:slave1
+    uint16_t dvp_iw;            /*dvp input image width*/
+    uint16_t dvp_ih;            /*dvp input image height*/
+    uint16_t dvp_type;          /*dvp device type: 0=no device, 1=master device, 2=slave device 0, 3=slave device 1*/
 	uint16_t csi0_iw;
 	uint16_t csi0_ih;
-	uint16_t csi0_ow;
-	uint16_t csi0_oh;
-	uint16_t csi0_type;         //0:master 1:slave0  2:slave1
+	uint16_t csi0_type;        //0:no device   1:master    2:slave0     3:slave1
 	uint16_t csi1_iw;
 	uint16_t csi1_ih;	
-	uint16_t csi1_ow;
-	uint16_t csi1_oh;
-	uint16_t csi1_type;         //0:master 1:slave0  2:slave1
+	uint16_t csi1_type;        //0:no device   1:master    2:slave0     3:slave1
+	
+    uint16_t cur_iw;
+	uint16_t cur_ih;	
+	uint16_t cur_type;    
 };
 
 struct mdt_coord_msg {	
@@ -110,6 +109,11 @@ enum
 #endif
 
 
+// 取两数最大值
+#define VPP_MAX2(x, y)  ((x) > (y) ? (x) : (y))
+// 取三数最大值
+#define VPP_MAX3(x, y, z) VPP_MAX2(VPP_MAX2(x, y), z)
+
 extern struct video_cfg_t video_msg;
 bool vpp_cfg(uint32_t w,uint32_t h,uint8_t input_from);
 void vpp_itp_save_only(struct vpp_device *p_vpp,uint16_t w,uint16_t h,uint32_t psram_adr);
@@ -122,5 +126,15 @@ uint8_t get_vpp1_w_h(uint16_t *w, uint16_t *h);
 void *get_vpp_buf(uint8_t which);
 int8_t vpp_dev_open();
 int32 vpp_is_closed(struct vpp_device *p_vpp);
+uint32 md_get_pot_x_y(ISP_VIDEO_E sensor_id);
+void md_get_table_size(ISP_VIDEO_E sensor_id, uint16_t *w_out, uint16_t *h_out);
+int8_t md_get_binary_table(ISP_VIDEO_E sensor_id, uint8_t *bin_buf);
+uint32 md_get_relative_pot_x_y(ISP_VIDEO_E sensor_id, uint16_t r_w, uint16_t r_h, uint16_t *gx, uint16_t *gy);
+uint32 md_get_relative_pot_x0_y0_x1_y1(uint8_t num, uint16_t r_w, uint16_t r_h, uint16_t *gx0, uint16_t *gy0, uint16_t *gx1, uint16_t *gy1);
+int32_t get_vpp_buf_y_u_v(uint8_t which,uint32_t *y,uint32_t *u,uint32_t *v);
+void set_cur_video_size(uint16_t dev_type,uint16_t w,uint16_t h);
+void get_vpp_dev_w_h(uint16_t *dev_type,uint16_t *w,uint16_t *h);
+int32_t tran_vpp_w_h(uint8_t which, uint16_t *w, uint16_t *h);	// 用于通过buf0或者buf1进行转换是否成功,主要为了多镜头,单镜头也可以适配
+
 #endif
 

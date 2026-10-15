@@ -171,6 +171,7 @@ static void scale1_soft_from_psram_to_enc(struct scale1_jpg_msi_s *scale1_jpg, u
             os_printf("%s:%d\n", __FUNCTION__, __LINE__);
         }
     }
+    os_event_wait(&scale1_jpg->evt, MSI_SCALE1_THREAD_KICK, NULL, OS_EVENT_WMODE_OR, 50);
     scale_close(scale_dev);
 }
 
@@ -195,6 +196,7 @@ static void scale1_jpg_work(void *d)
     uint32_t                 flags;
     int32_t                  ret;
     uint8_t                 *scale1_buf;
+    uint16_t                 encode_w, encode_h;
     // struct msi *msi = scale1_jpg_s->msi;
     struct scale1_jpg_msi_s *scale1_jpg_s = (struct scale1_jpg_msi_s *) d;
     while (1)
@@ -239,19 +241,27 @@ static void scale1_jpg_work(void *d)
             }
 
             // 去获取jpg的锁
-            int32_t ret = jpg_mutex_lock(scale1_jpg_s->which_jpg, scale1_jpg_s->lock_value, NULL);
+            int32 ret = jpg_mutex_lock(scale1_jpg_s->which_jpg, scale1_jpg_s->lock_value, NULL);
             // 获取成功,则去编码
             if (ret == 0)
             {
                 //  获取成功后,初始化mjpg1相关硬件
                 if (!scale1_jpg_s->register_jpg_msi)
                 {
-                    scale1_jpg_s->register_jpg_msi = jpg_concat_msi_init_start(scale1_jpg_s->which_jpg, scale1_jpg_s->jpg_w, scale1_jpg_s->jpg_h, NULL, scale1_jpg_s->src_from, 0);
-                    if (scale1_jpg_s->register_jpg_msi)
+                    struct msi *jpg_msi = jpg_concat_msi_init_start(scale1_jpg_s->which_jpg, 0, 0, NULL, scale1_jpg_s->src_from, 0);
+                    if (jpg_msi)
                     {
                         // 主动停止一下
-                        msi_do_cmd(scale1_jpg_s->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_JPEG_START, 0);
-                        msi_add_output(scale1_jpg_s->register_jpg_msi, NULL, scale1_jpg_s->msi->name);
+                        msi_do_cmd(jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_JPEG_START, 0);
+                        ret = msi_add_output(jpg_msi, NULL, scale1_jpg_s->msi->name);
+                        if (ret == RET_OK)
+                        {
+                            scale1_jpg_s->register_jpg_msi = jpg_msi;
+                        }
+                        else
+                        {
+                            msi_destroy(jpg_msi);
+                        }
                     }
                 }
 
@@ -275,13 +285,32 @@ static void scale1_jpg_work(void *d)
                 msi_do_cmd(scale1_jpg_s->register_jpg_msi, MSI_CMD_SET_DATATAG, scale1_jpg_s->fb->datatag, 0);
                 msi_do_cmd(scale1_jpg_s->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_SET_SCALE1_TYPE, scale1_jpg_s->force_type ? scale1_jpg_s->force_type : scale1_jpg_s->fb->stype);
                 msi_do_cmd(scale1_jpg_s->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_JPEG_FROM, scale1_jpg_s->src_from);
-                msi_do_cmd(scale1_jpg_s->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_JPEG_MSG, scale1_jpg_s->jpg_w << 16 | scale1_jpg_s->jpg_h);
                 // 重新启动mjpg
                 if (scale1_jpg_s->force_node)
                 {
                     start_arg = BIT(scale1_jpg_s->force_node) | start_arg;
                 }
                 msi_do_cmd(scale1_jpg_s->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_SET_SCALE1_AUTO_FLAG, 0);
+
+                if (scale1_jpg_s->fb->rev)
+                {
+                    struct takephoto_yuv_arg_s *takephoto_yuv_arg = (struct takephoto_yuv_arg_s *) scale1_jpg_s->fb->priv;
+                    msi_do_cmd(scale1_jpg_s->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_SET_TIME, scale1_jpg_s->fb->time);
+                    // 特殊处理,利用fb多余字段来作为标记,设置msi
+                    // 那么编码size采用新的方式,读取里面的记录需要编码和解码的size
+                    encode_w = takephoto_yuv_arg->target_encode_w;
+                    encode_h = takephoto_yuv_arg->target_encode_h;
+                    msi_do_cmd(scale1_jpg_s->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_JPEG_MSG, encode_w << 16 | encode_h);
+                    msi_do_cmd(scale1_jpg_s->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_SET_OUTPUT_MSI, (uint32_t) scale1_jpg_s->fb->msi);
+                }
+                else
+                {
+                    encode_w = scale1_jpg_s->jpg_w;
+                    encode_h = scale1_jpg_s->jpg_h;
+                    msi_do_cmd(scale1_jpg_s->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_JPEG_MSG, encode_w << 16 | encode_h);
+                    msi_do_cmd(scale1_jpg_s->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_SET_OUTPUT_MSI, 0);
+                }
+
                 msi_do_cmd(scale1_jpg_s->register_jpg_msi, MSI_CMD_JPEG_CONCAT, MSI_JPEG_START, start_arg);
 
                 struct yuv_arg_s *yuv_msg;
@@ -296,7 +325,7 @@ static void scale1_jpg_work(void *d)
                     scale1_jpg_s->stop   = 0;
 
                     // 行数不够,直接复用yuv的buf
-                    if (STATIC_SCALE1_BUF || scale1_jpg_s->jpg_w <= 2 * p_w)
+                    if (STATIC_SCALE1_BUF || encode_w <= 2 * p_w)
                     {
                         // yuvbuf需要给28行,传入14行
                         scale1_buf = (uint8_t *) get_vpp_buf(0);
@@ -312,7 +341,7 @@ static void scale1_jpg_work(void *d)
                                 os_event_wait(&scale1_jpg_s->evt, MSI_SCALE1_THREAD_VPP_CLOSE, NULL, OS_EVENT_WMODE_OR | OS_EVENT_WMODE_CLEAR, 0);
                             }
                             uint32_t start_encode = os_jiffies();
-                            scale1_soft_from_psram_to_enc(scale1_jpg_s, scale1_buf, 14, scale1_jpg_s->fb->data, p_w, p_h, scale1_jpg_s->jpg_w, scale1_jpg_s->jpg_h);
+                            scale1_soft_from_psram_to_enc(scale1_jpg_s, scale1_buf, 14, scale1_jpg_s->fb->data, p_w, p_h, encode_w, encode_h);
                             vpp_dev_open();
                             os_printf(KERN_INFO "spend1 time:%d\n", (uint32_t) os_jiffies() - start_encode);
                             already_kick = 1;
@@ -347,7 +376,7 @@ static void scale1_jpg_work(void *d)
                         if (scale1_jpg_s->scale1_buf)
                         {
                             uint32_t start_encode = os_jiffies();
-                            scale1_soft_from_psram_to_enc(scale1_jpg_s, scale1_jpg_s->scale1_buf, 10, scale1_jpg_s->fb->data, p_w, p_h, scale1_jpg_s->jpg_w, scale1_jpg_s->jpg_h);
+                            scale1_soft_from_psram_to_enc(scale1_jpg_s, scale1_jpg_s->scale1_buf, 10, scale1_jpg_s->fb->data, p_w, p_h, encode_w, encode_w);
                             os_printf("spend2 time:%d\n", (uint32_t) os_jiffies() - start_encode);
                             already_kick = 1;
                             jpg_mutex_unlock(scale1_jpg_s->which_jpg, scale1_jpg_s->lock_value);
@@ -366,6 +395,7 @@ static void scale1_jpg_work(void *d)
                 // 不应该进入这里,可能fb给错了,下一次移除
                 else
                 {
+                    jpg_mutex_unlock(scale1_jpg_s->which_jpg, scale1_jpg_s->lock_value);
                     // 移除
                     msi_delete_fb(NULL, scale1_jpg_s->fb);
                     scale1_jpg_s->fb = NULL;

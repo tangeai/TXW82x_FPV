@@ -7,4 +7,7 @@ int sys_app_fpv_init(void);
 int sys_app_isp_tunning_init(void);
 void sys_wifi_pair_init();
 int sys_app_double_sensor_splice_init(void);
+int sys_app_double_sensor_init(void);
+int sys_app_ahd_init(void);
+void sys_ble_netconfig_init();
 #endif

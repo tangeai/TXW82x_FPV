@@ -124,7 +124,7 @@ static int32_t auto_h264_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t p
                 // 类型匹配才可以转发
                 if ((fb->stype == FSTYPE_H264_VPP_DATA0 + auto_h264->src_from0) || (fb->stype == FSTYPE_H264_VPP_DATA0 + auto_h264->src_from1))
                 {
-                    _os_printf("+");
+//                    _os_printf("+");
                     struct framebuff *fb = (struct framebuff *) param1;
                     fb_get(fb);
                     msi_output_fb(msi, fb);

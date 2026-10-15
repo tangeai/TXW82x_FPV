@@ -44,7 +44,7 @@ static void mouse_task(void* param)
             ((struct uhid*)intf->user_data)->buffer, ((struct uhid*)intf->user_data)->pipe_in->ep.wMaxPacketSize,
             USB_TIMEOUT_BASIC) == 0)
         {
-            break;
+            continue;
         }
 
         rt_usbh_hid_mouse_callback(intf->user_data);

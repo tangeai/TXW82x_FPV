@@ -595,6 +595,40 @@ void lcd_from_sim_file_decode(void *d)
     }
 }
 
+// route-usb -> decode -> watermark -> LCD
+void lcd_from_usb_video(void *d)
+{
+    struct msi *lcd_route_usb  = route_msi(ROUTE_USB);
+    if (lcd_route_usb)
+    {
+        msi_add_output(lcd_route_usb, NULL, SR_OTHER_JPG_USB1);
+    }
+
+    struct msi *lcd_decode_msg_msi = jpg_decode_msg_msi(SR_OTHER_JPG_USB1, 360, 360, 240, 240, FSTYPE_USB_CAM0);
+    if (lcd_decode_msg_msi)
+    {
+        // 配置解码的坐标值
+        msi_do_cmd(lcd_decode_msg_msi, MSI_CMD_DECODE_JPEG_MSG, MSI_JPEG_DECODE_X_Y, 220 << 16 | 60);    // 居中显示
+        msi_do_cmd(lcd_decode_msg_msi, MSI_CMD_DECODE_JPEG_MSG, MSI_JPEG_DECODE_FORCE_TYPE, FSTYPE_YUV_P0);
+        msi_add_output(lcd_decode_msg_msi, NULL, S_JPG_DECODE);
+    }
+
+    struct msi *lcd_decode_msi = jpg_decode_msi(S_JPG_DECODE);
+    if (lcd_decode_msi)
+    {
+        msi_add_output(lcd_decode_msi, NULL, SR_LCD_YUV_WATERMARK);
+    }
+
+    extern struct msi *yuv_time_watermark(const char *name, uint8_t filter);
+    struct msi *lcd_watermark = yuv_time_watermark(SR_LCD_YUV_WATERMARK, FSTYPE_YUV_P0);
+    if (lcd_watermark)
+    {
+        msi_add_output(lcd_watermark, NULL, R_VIDEO_P0);
+        msi_cmd(lcd_watermark->name, MSI_CMD_WATERMARK, MSI_WATERMARK_SET_X_Y, 10 << 16 | 10);
+        msi_cmd(R_VIDEO_P0, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 1);
+    }
+}
+
 // 双UVC解码叠图推屏
 void lcd_from_usb_sim_video(void *d)
 {
@@ -681,6 +715,46 @@ void lcd_from_sim_video_more_DVP_USB(void *d)
     {
         route_usb_msi->enable = 1;
         msi_add_output(route_usb_msi, NULL, SR_OTHER_JPG_USB1);
+    }
+}
+
+// uvc -> yuv -> scale2 -> LCD
+void lcd_from_usb_video_scale2(void *d)
+{
+    struct msi *scale2_yuv_msi_init(const char *name, uint16_t filter_type, uint16_t out_w, uint16_t out_h, uint16_t show_x, uint16_t show_y);
+    struct msi *scale2_lcd = scale2_yuv_msi_init(SR_LCD_YUV_SCALE2, FSTYPE_JPG_GEN420_REJPG, 360, 360, 0, 0);
+    if (scale2_lcd)
+    {
+        // 裁剪位置
+        // uint16_t start_x = 0, start_y = 0;
+        // start_x = (1280 - 1280 * 100 / 150) / 2;
+        // start_y = (720 - 720 * 100 / 150) / 2  + 10;
+        // msi_do_cmd(scale2_lcd, MSI_CMD_SCALE2, MSI_SCALE2_SET_X_Y, start_x << 16 | start_y);
+
+        // 显示位置模式
+        // msi_do_cmd(scale2_lcd, MSI_CMD_SCALE2, MSI_SCALE2_SET_LOC_MODE, 1);
+
+        // 裁剪大小
+        // uint16_t tailor_w = 0, tailor_h = 0;
+        // tailor_w = 1280 * 10 / 15;  // 1.5倍
+        // tailor_h = 720 * 10 / 15;
+        // msi_do_cmd(scale2_lcd, MSI_CMD_SCALE2, MSI_SCALE2_SET_W_H, tailor_w << 16 | tailor_h);
+
+        msi_add_output(NULL, S_JPG_DECODE, SR_LCD_YUV_SCALE2);
+        msi_add_output(scale2_lcd, NULL, SR_LCD_YUV_WATERMARK);
+
+        // 不加水印
+        // msi_add_output(scale2_lcd, NULL, R_VIDEO_P0);
+        // msi_cmd(R_VIDEO_P0, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 1);
+    }
+
+    extern struct msi *yuv_time_watermark(const char *name, uint8_t filter);
+    struct msi *lcd_watermark = yuv_time_watermark(SR_LCD_YUV_WATERMARK, FSTYPE_YUV_P0);
+    if (lcd_watermark)
+    {
+        msi_add_output(lcd_watermark, NULL, R_VIDEO_P0);
+        msi_cmd(lcd_watermark->name, MSI_CMD_WATERMARK, MSI_WATERMARK_SET_X_Y, 10 << 16 | 10);
+        msi_cmd(R_VIDEO_P0, MSI_CMD_LCD_VIDEO, MSI_VIDEO_ENABLE, 1);
     }
 }
 
@@ -783,6 +857,7 @@ const FuncEntry func_table[] = {
         {"lcd_from_sim_file_decode", lcd_from_sim_file_decode},
         {"lcd_from_usb_sim_video", lcd_from_usb_sim_video},
         {"lcd_from_sim_video_more_DVP_USB", lcd_from_sim_video_more_DVP_USB},
+        {"lcd_from_usb_video_scale2", lcd_from_usb_video_scale2},
         {"auto_jpg_run", auto_jpg_run}, // 硬件mjpeg启动,支持自动停止和切换到gen420去编码
 };
 

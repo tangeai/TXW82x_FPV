@@ -94,6 +94,13 @@ typedef struct
 	uint32_t target_high;
 }target_resolution;
 
+typedef struct
+{
+	int8 next_switch_device;
+	int8 cur_switch_device;
+	uint8 dev0_wait_I_frame;
+	uint8 dev1_wait_I_frame;
+}switch_device;
 
 #define MAIN_SENSOR_STILL_MIN    300
 #define MAIN_SENSOR_STILL_MAX    600

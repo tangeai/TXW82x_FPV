@@ -29,8 +29,9 @@ int32_t client_local_record_init(uint32_t record_time_minutes)
         if(h264_msi) {
             msi_put(h264_msi);
             auenc_init.destroy_self = 0;
-            auenc_init.src_msi = get_auadc_msi(AUSYS_AUAD);
-            aac_msi = audio_encode_init(AAC_ENC, audio_adc_get_samplerate(AUSYS_AUAD), &auenc_init);
+            auenc_init.src_msi = get_auadc_msi(MAIN_MIC_ID);
+            auenc_init.channels = audio_adc_get_channels(MAIN_MIC_ID);
+            aac_msi = audio_encode_init(AAC_ENC, audio_adc_get_samplerate(MAIN_MIC_ID), &auenc_init);
             if(!aac_msi) {   
                 h264_msi = NULL;  
                 return RET_ERR;              

@@ -96,15 +96,15 @@ int32_t takephoto_name_no_dir_time(char *filename, int filename_size, struct tim
  * path: 文件路径，格式: dir_name/filename
  * path_size: 文件路径大小
  */
-int32_t takephoto_name_add_dir(char *filename, int filename_size, char *path, const char *dir_name)
+int32_t takephoto_name_add_dir(char *path, int path_size, char *filename, const char *dir_name)
 {
     if(dir_name)
     {
-        os_snprintf(filename, filename_size,"%s/%s", dir_name, path);
+        os_snprintf(path, path_size,"%s/%s", dir_name, filename);
     }
     else
     {
-        os_snprintf(filename, filename_size,"%s", path);
+        os_snprintf(path, path_size,"%s", filename);
     }
 	return 0;
 }

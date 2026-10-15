@@ -19,6 +19,7 @@ struct alaw_encode_struct {
     uint8_t current_status;
     uint8_t enc_buf[1024];
     uint32_t samplerate;
+    uint32_t channels;
     AUDIO_INFO audio_info;
 };
 
@@ -37,7 +38,6 @@ static void alaw_encode_thread(void *d)
     AUCODE_HDL *alaw_enc = NULL;
 
     s->msi->enable = 1;
-    msi_get(s->msi);
 
     alaw_enc = audio_coder_open(ALAW_ENC, s->samplerate, 1);
     if (alaw_enc == NULL) 
@@ -62,8 +62,9 @@ static void alaw_encode_thread(void *d)
         if(recv_frame_buf) { 
             if(s->audio_info.nsamples == 0) {
                 s->audio_info.nsamples = recv_frame_buf->len / 2;
-                s->audio_info.time_interval = s->audio_info.nsamples * 1000 / s->samplerate;
+                s->audio_info.time_interval = s->audio_info.nsamples / s->channels * 1000 / s->samplerate;
                 s->audio_info.samplerate = s->samplerate;
+				s->audio_info.channels = s->channels;
             }
             if(clear_finish == 0) {
                 goto alaw_encode_frame_end;
@@ -256,7 +257,7 @@ static int32_t alaw_encode_msi_action(struct msi *msi, uint32_t cmd_id, uint32_t
     return ret;
 }
 
-struct msi *alaw_encode_init(uint32_t samplerate, AUENC_INIT *auenc_init)
+struct msi *alaw_encode_init(uint32_t samplerate, uint32_t channels, AUENC_INIT *auenc_init)
 { 
 #if AUDIO_EN
     uint8_t msi_isnew = 0;
@@ -291,6 +292,7 @@ struct msi *alaw_encode_init(uint32_t samplerate, AUENC_INIT *auenc_init)
         alaw_encode_s->msi = msi;
         alaw_encode_s->src_msi = auenc_init->src_msi;
         alaw_encode_s->samplerate = samplerate;
+		alaw_encode_s->channels = channels;
         alaw_encode_s->destroy_self = auenc_init->destroy_self;
 		alaw_encode_s->next_status = AUCODEC_RUN;
 		alaw_encode_s->current_status = AUCODEC_RUN;
@@ -305,6 +307,7 @@ struct msi *alaw_encode_init(uint32_t samplerate, AUENC_INIT *auenc_init)
 			ALAW_INFO("create alaw encode task fail!\r\n");
 			goto alaw_encode_init_err;
 		}
+		msi_get(msi);
 	}
 	return msi;
     

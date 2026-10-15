@@ -2,19 +2,17 @@
 #define _PROMPT_TONE_H_
 
 #include "basic_include.h"
-#include "lib/heap/av_heap.h"
-#include "lib/heap/av_psram_heap.h"
 #include "lib/multimedia/msi.h"
 #include "lib/multimedia/framebuff.h"
 
 #ifdef PSRAM_HEAP
-#define PROMPTTONE_MALLOC av_psram_malloc
-#define PROMPTTONE_ZALLOC av_psram_zalloc
-#define PROMPTTONE_FREE   av_psram_free
+#define PROMPTTONE_MALLOC os_malloc_psram
+#define PROMPTTONE_ZALLOC os_zalloc_psram
+#define PROMPTTONE_FREE   os_free_psram
 #else
-#define PROMPTTONE_MALLOC av_malloc
-#define PROMPTTONE_ZALLOC av_zalloc
-#define PROMPTTONE_FREE   av_free
+#define PROMPTTONE_MALLOC os_malloc
+#define PROMPTTONE_ZALLOC os_zalloc
+#define PROMPTTONE_FREE   os_free
 #endif
 
 typedef struct {

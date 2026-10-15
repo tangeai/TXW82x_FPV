@@ -371,7 +371,7 @@ const _Sensor_LSC          imx219_lsc_init = {
     .p_lsc_tbl = (uint32 *)imx219_lsc_tbl,
 };
 
-const _Sensor_LHS imx219_lhs_map[] = {
+const _Sensor_LHS imx219_lhs_map[9] = {
     // region defination: lower -> center -> upper(direction: anticlockwise)
     // region_lower, region_center, region_upper, hue adjust value, saturation adjust value
     //   (9 bits)      (9 bits)       (9 bits)          (9 bits)           (8 bits)
@@ -644,25 +644,13 @@ const _Sensor_ISP_Init imx219_isp_init =
 
 SENSOR_OP_SECTION const _Sensor_Adpt_ imx219_cmd= 
 {	
-	.typ = 1, //YUV
-
 	.pixelw = IMA_W,
 	.pixelh= IMA_H,
-	
-	.hsyn = 1,
-	.vsyn = 1,
-	.rduline = 0,//
-	.rawwide = 1,//10bit
-	.colrarray = 2,//0:_RGRG_ 1:_GRGR_,2:_BGBG_,3:_GBGB_
 	.init = (uint8 *)IMX219InitTable,
     .init_len = sizeof(IMX219InitTable),
     .mipi_lane_num = 2,
     .vts_reg = {0x0160,0x0161},
     .vts_reg_num = 2,
-	.rotate_adapt = {0},
-	.hvb_adapt = {0x80,0x0a,0x80,0x0a},
-	.mclk = 24000000,
-	.p_fun_adapt = {NULL,NULL,NULL},
     .sensor_isp = (_Sensor_ISP_Init *)&imx219_isp_init,
 };
 

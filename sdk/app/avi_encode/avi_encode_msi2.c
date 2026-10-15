@@ -307,7 +307,20 @@ static int avi_encode_running(struct msi *msi, uint32_t save_time, void *fp, con
             }
         }
 
-        avimuxer_sync_time(ctx, 1000);
+        if (ctx && avimuxer_sync_judge(ctx, 1000))
+        {
+            uint8_t sync_lock = 0;
+            if (avi_encode->file_process.need_lock && !holding_lock)
+            {
+                os_mutex_lock(&mult_record.mutex, osWaitForever);
+                sync_lock = 1;
+            }
+            avimuxer_sync(ctx);
+            if (sync_lock)
+            {
+                os_mutex_unlock(&mult_record.mutex);
+            }
+        }
 
         if (fbtime - last_syn_time > 1000)
         {

@@ -81,7 +81,7 @@ int32_t jpg_mutex_lock(uint32_t jpgid, uint8_t value, uint8_t *last_value)
     {
         if (last_value)
         {
-            *last_value = mutex->last_lock_value;
+            *last_value = mutex->lock_value;
         }
         return 1;
     }

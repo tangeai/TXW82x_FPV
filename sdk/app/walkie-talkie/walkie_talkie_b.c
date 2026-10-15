@@ -49,7 +49,7 @@
 #define STREAM_LIBC_ZALLOC av_zalloc
 
 
-#define MAX_USER_VIDEO_TX 16
+#define MAX_USER_VIDEO_TX 12
 #define MAX_VIDEO_PKT_LEN 1430
 
 
@@ -288,8 +288,19 @@ void udp_handle_client_status_read_workqueue(){
 	}	
 	enable_irq(ie);
 }
+static EVT_HDL event_fd = NULL;
+static void client_status_read_exit(void *ei, void *d)
+{
+	if(walkmsg.run_state == 0) {
+		os_printf("%s\n",__FUNCTION__);
+		closesocket(handle_protocol_fd);
+		handle_protocol_fd = -1;
+		eloop_remove_event(event_fd);
+	}
+}
 
 extern in_addr_t send_addr;
+static struct sockaddr_in addrServer_status;
 void udp_handle_client_status_thread(void *d)
 {
 	uint32 ie;
@@ -297,16 +308,13 @@ void udp_handle_client_status_thread(void *d)
 	//uint16_t port = 6003;
 	uint8_t  framenum;
 	uint32_t start_tmr = 0;
-	struct sockaddr_in addrServer;
 	uint16_t *port;
-	int32_t time_out = 10;
 	int32_t ret = 0;
-	EVT_HDL event_fd = NULL;
 	port = d;
 
 	user_protocol_task_increase();
 
-	memset(&addrServer,0,sizeof(struct sockaddr_in));
+	memset(&addrServer_status,0,sizeof(struct sockaddr_in));
 	while(send_addr == 0){
 		if(walkmsg.run_state == 0) {
 			user_protocol_task_decrease();
@@ -314,16 +322,17 @@ void udp_handle_client_status_thread(void *d)
 		}
 		os_sleep_ms(10);
 	}
-	addrServer.sin_family=AF_INET;
-	addrServer.sin_addr.s_addr=send_addr;//inet_addr("192.168.169.1");//client_addr;//
-	addrServer.sin_port=htons(*port);
+	addrServer_status.sin_family=AF_INET;
+	addrServer_status.sin_addr.s_addr=send_addr;//inet_addr("192.168.169.1");//client_addr;//
+	addrServer_status.sin_port=htons(*port);
 
 	handle_protocol_fd = usr_protocol_create_client(*port);
-	setsockopt(handle_protocol_fd, SOL_SOCKET, SO_RCVTIMEO, &time_out, sizeof(int32_t));
 	event_fd = eloop_add_fd( handle_protocol_fd, EVENT_READ, EVENT_F_ENABLED, udp_handle_client_status_read_workqueue, 0 );
 	while(1){
-		if(walkmsg.run_state == 0)
+		if(walkmsg.run_state == 0) {
+			eloop_add_alarm(os_jiffies(),EVENT_F_ENABLED,client_status_read_exit,(void *)handle_protocol_fd);
 			break;
+		}
 		CHILDREN_DBG("D");
 		ret = net_h264_sema_down(10);  //wait for data send finish
 		if(ret != RET_OK)
@@ -334,7 +343,7 @@ void udp_handle_client_status_thread(void *d)
 		os_sleep_ms(client_frame.timeout);
 		loop_run = 0;
 		while((client_frame.status == 0)&&(framenum  == client_frame.framenum)){         //如果当前frame还处于等待client状态的情况,发送请求状态的要求
-			eloop_add_alarm(os_jiffies(),EVENT_F_ENABLED,udp_handle_client_status_write_workqueue,(void *)&addrServer);   //eventloop send
+			eloop_add_alarm(os_jiffies(),EVENT_F_ENABLED,udp_handle_client_status_write_workqueue,(void *)&addrServer_status);   //eventloop send
 			//client_frame.timeout = 5;       //10ms都读不到对回复的状态,重发吧
 			os_sleep_ms(10);
 			loop_run++;
@@ -354,8 +363,6 @@ void udp_handle_client_status_thread(void *d)
 			}
 		}	
 	}
-	close(handle_protocol_fd);
-	eloop_remove_event(event_fd);
 	user_protocol_task_decrease();
 }
 
@@ -445,6 +452,9 @@ void  recfg_mclk_msg(struct dvp_device * mclkdev,uint8_t success){
 		framecnt++;
 	}
 	walkmsg.speed = speed_level;
+	if(walkmsg.speed > 1) {
+		walkmsg.speed = 1;
+	}
 }
 #endif
 void recfg_mclk_by_connect(){
@@ -616,7 +626,6 @@ void udp_handle_client_data_thread(void *d){
 	while(send_addr == 0){
 		if(walkmsg.run_state == 0) {
 			msi_destroy(msi);
-			msi_del_output(0, S_H264, "NET_H264");
 			user_protocol_task_decrease();
 			return;
 		}
@@ -799,8 +808,8 @@ delete_frame:
 		}
 	}
 	close(handle_data_protocol_fd);
+	handle_data_protocol_fd = -1;
 	msi_destroy(msi);
-	msi_del_output(0, S_H264, "NET_H264");
 	user_protocol_task_decrease();
 }
 
